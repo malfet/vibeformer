@@ -1,3 +1,6 @@
 Create CLAUDE.md in this folder so far with a single rule. I want you to maintain interaction-log.txt, where you'll save all prompts that I give you along the way
 Now, download Attention is all your need paper
 move it to docs folder and commit
+Ok, now read the paper and let's implement a transformer based on this one. Do you need a dataset or do you know where to get it from? I want to start with a small one
+Let's do Tiny Shakespeare
+Implement the decoder-only transformer plan, using .venv with python-3.14 and uv for venv creation
