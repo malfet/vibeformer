@@ -1,0 +1,3 @@
+Create CLAUDE.md in this folder so far with a single rule. I want you to maintain interaction-log.txt, where you'll save all prompts that I give you along the way
+Now, download Attention is all your need paper
+move it to docs folder and commit
