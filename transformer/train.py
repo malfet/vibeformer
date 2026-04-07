@@ -169,7 +169,7 @@ def main():
         d_ff=D_FF,
         block_size=BLOCK_SIZE,
         dropout=DROPOUT,
-    ).to(device)
+    ).to(device=device, dtype=torch.bfloat16)
 
     param_count = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {param_count:,}")

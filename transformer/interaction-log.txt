@@ -19,3 +19,8 @@ Also, what about torch.compile, will it improve forward or backward
 And commit this
 Can you tell me how to know if model is overfitting? Or like how to pick size of the model to the number of parameters?
 Can you add safetensors to requirements for this project (as well as numpy, to squash the warning) and figure out how checkpoints can be safed/loaded as safetensors
+Commit this
+Can you run a small experiment to check if training using bf16 would have any negative impact on the accuracy? I.e. let's delete all checkpoint, start from the same random weights (using manual seed) and say train for say 200 steps using fp32 and bf16
+But why use autocast rather than just change the model weights to bf16?
+Are Attention is All you need paper mentions anything about precision? But indeed let's cast model to bfloat16 and commit the changes
+Search the PDF file /Users/malfet/git/malfet/vibeformer/transformer/docs/attention_is_all_you_need.pdf for any mentions of precision, float16, fp16, bf16, bfloat16, half precision, mixed precision, or numerical precision. Use grep on the extracted text or any means available. Report what you find (or if there's nothing).

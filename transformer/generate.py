@@ -44,7 +44,7 @@ def main():
     itos = {int(k): v for k, v in json.loads(meta["itos"]).items()}
     vocab_size = int(meta["vocab_size"])
 
-    model = Transformer(vocab_size=vocab_size)
+    model = Transformer(vocab_size=vocab_size).bfloat16()
     model_state = {k[len("model."):]: v for k, v in tensors.items() if k.startswith("model.")}
     model.load_state_dict(model_state, strict=False)
 
