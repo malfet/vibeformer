@@ -15,3 +15,7 @@ Are you training using fp32 or bf16 precision?
 Can you may be write a small script that benchmarks various parts of the training loop
 Why are you saying that bf16 support is limited?
 Can you try autograd with bf16 and run the benchmark again?
+Also, what about torch.compile, will it improve forward or backward
+And commit this
+Can you tell me how to know if model is overfitting? Or like how to pick size of the model to the number of parameters?
+Can you add safetensors to requirements for this project (as well as numpy, to squash the warning) and figure out how checkpoints can be safed/loaded as safetensors

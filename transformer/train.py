@@ -1,9 +1,12 @@
 """Training loop for the decoder-only transformer."""
 
+import json
 import math
 import os
 import torch
 from torch.utils.data import DataLoader
+from safetensors.torch import save_file, load_file
+from safetensors import safe_open
 
 from dataset import get_datasets
 from model import Transformer
@@ -23,8 +26,88 @@ N_HEADS = 4
 N_LAYERS = 4
 D_FF = 512
 DROPOUT = 0.1
-CHECKPOINT_PATH = "best_model.pt"
+CHECKPOINT_PATH = "best_model.safetensors"
 CHECKPOINT_DIR = "checkpoints"
+
+
+def _flatten_optim_state(optimizer):
+    """Flatten optimizer state_dict into tensors + JSON metadata for safetensors."""
+    tensors = {}
+    state = optimizer.state_dict()
+    # Store param_groups as JSON (they contain scalars, bools, Nones, tuples)
+    meta = {"optim_param_groups": json.dumps(state["param_groups"])}
+    for param_id, param_state in state["state"].items():
+        for key, val in param_state.items():
+            if isinstance(val, torch.Tensor):
+                tensors[f"optim.state.{param_id}.{key}"] = val
+            else:
+                tensors[f"optim.state.{param_id}.{key}"] = torch.tensor(val)
+    return tensors, meta
+
+
+def _unflatten_optim_state(tensors, metadata, optimizer):
+    """Restore optimizer state_dict from flattened safetensors."""
+    state_dict = optimizer.state_dict()
+    if "optim_param_groups" in metadata:
+        loaded_groups = json.loads(metadata["optim_param_groups"])
+        for i, group in enumerate(loaded_groups):
+            # Restore all keys except 'params' (which must match current model)
+            for key, val in group.items():
+                if key == "params":
+                    continue
+                # Convert lists back to tuples where needed (e.g. betas)
+                if isinstance(val, list):
+                    val = tuple(val)
+                state_dict["param_groups"][i][key] = val
+    for key, tensor in tensors.items():
+        if not key.startswith("optim.state."):
+            continue
+        parts = key.split(".")
+        param_id, param_name = int(parts[2]), ".".join(parts[3:])
+        if param_id not in state_dict["state"]:
+            state_dict["state"][param_id] = {}
+        val = tensor if tensor.dim() > 0 else tensor.item()
+        state_dict["state"][param_id][param_name] = val
+    optimizer.load_state_dict(state_dict)
+
+
+def save_checkpoint(path, model, optimizer, step, best_val_loss, tokenizer):
+    """Save checkpoint as safetensors."""
+    # Skip tied weights (head.weight == token_emb.weight)
+    tensors = {}
+    seen_data_ptrs = {}
+    for k, v in model.state_dict().items():
+        ptr = v.data_ptr()
+        if ptr in seen_data_ptrs:
+            continue
+        seen_data_ptrs[ptr] = k
+        tensors[f"model.{k}"] = v.contiguous().cpu()
+    optim_tensors, optim_meta = _flatten_optim_state(optimizer)
+    tensors.update({k: v.contiguous().cpu() for k, v in optim_tensors.items()})
+    metadata = {
+        "step": str(step),
+        "best_val_loss": str(best_val_loss),
+        "vocab_size": str(tokenizer.vocab_size),
+        "stoi": json.dumps(tokenizer.stoi),
+        "itos": json.dumps({str(k): v for k, v in tokenizer.itos.items()}),
+        **optim_meta,
+    }
+    save_file(tensors, path, metadata=metadata)
+
+
+def load_checkpoint(path, model, optimizer, device):
+    """Load checkpoint from safetensors. Returns (step, best_val_loss)."""
+    with safe_open(path, framework="pt") as f:
+        meta = f.metadata()
+    tensors = load_file(path, device=str(device))
+    model_state = {k[len("model."):]: v for k, v in tensors.items() if k.startswith("model.")}
+    model.load_state_dict(model_state, strict=False)
+    optim_tensors = {k: v for k, v in tensors.items() if k.startswith("optim.")}
+    if optim_tensors:
+        _unflatten_optim_state(optim_tensors, meta, optimizer)
+    step = int(meta.get("step", "-1"))
+    best_val_loss = float(meta.get("best_val_loss", "inf"))
+    return step, best_val_loss
 
 
 def get_device() -> torch.device:
@@ -98,13 +181,9 @@ def main():
 
     # Resume from checkpoint if available
     if os.path.exists(CHECKPOINT_PATH):
-        ckpt = torch.load(CHECKPOINT_PATH, map_location=device, weights_only=False)
-        model.load_state_dict(ckpt["model_state_dict"])
-        if "optimizer_state_dict" in ckpt:
-            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-        if "step" in ckpt:
-            step = ckpt["step"] + 1
-            best_val_loss = ckpt.get("best_val_loss", float("inf"))
+        loaded_step, best_val_loss = load_checkpoint(CHECKPOINT_PATH, model, optimizer, device)
+        if loaded_step >= 0:
+            step = loaded_step + 1
         print(f"Resumed from step {step} (best val loss {best_val_loss:.4f})")
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     train_iter = iter(train_loader)
@@ -137,34 +216,12 @@ def main():
             print(f"step {step:5d} | train loss {losses['train']:.4f} | val loss {losses['val']:.4f} | lr {lr:.2e}", flush=True)
             if losses["val"] < best_val_loss:
                 best_val_loss = losses["val"]
-                torch.save(
-                    {
-                        "model_state_dict": model.state_dict(),
-                        "optimizer_state_dict": optimizer.state_dict(),
-                        "step": step,
-                        "best_val_loss": best_val_loss,
-                        "vocab_size": tokenizer.vocab_size,
-                        "stoi": tokenizer.stoi,
-                        "itos": tokenizer.itos,
-                    },
-                    CHECKPOINT_PATH,
-                )
+                save_checkpoint(CHECKPOINT_PATH, model, optimizer, step, best_val_loss, tokenizer)
                 print(f"  -> saved best checkpoint (val loss {best_val_loss:.4f})", flush=True)
 
             # Periodic checkpoint
-            periodic_path = os.path.join(CHECKPOINT_DIR, f"step_{step:06d}.pt")
-            torch.save(
-                {
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "step": step,
-                    "best_val_loss": best_val_loss,
-                    "vocab_size": tokenizer.vocab_size,
-                    "stoi": tokenizer.stoi,
-                    "itos": tokenizer.itos,
-                },
-                periodic_path,
-            )
+            periodic_path = os.path.join(CHECKPOINT_DIR, f"step_{step:06d}.safetensors")
+            save_checkpoint(periodic_path, model, optimizer, step, best_val_loss, tokenizer)
 
         step += 1
 
