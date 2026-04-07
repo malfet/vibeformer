@@ -11,12 +11,12 @@ from model import Transformer
 # Hyperparameters
 BLOCK_SIZE = 128
 BATCH_SIZE = 64
-MAX_ITERS = 5000
-EVAL_INTERVAL = 250
+MAX_ITERS = 20000
+EVAL_INTERVAL = 500
 EVAL_ITERS = 200
 LEARNING_RATE = 3e-4
 WARMUP_ITERS = 400
-LR_DECAY_ITERS = 5000
+LR_DECAY_ITERS = 20000
 MIN_LR = 1e-5
 D_MODEL = 128
 N_HEADS = 4
@@ -24,6 +24,7 @@ N_LAYERS = 4
 D_FF = 512
 DROPOUT = 0.1
 CHECKPOINT_PATH = "best_model.pt"
+CHECKPOINT_DIR = "checkpoints"
 
 
 def get_device() -> torch.device:
@@ -94,6 +95,18 @@ def main():
 
     best_val_loss = float("inf")
     step = 0
+
+    # Resume from checkpoint if available
+    if os.path.exists(CHECKPOINT_PATH):
+        ckpt = torch.load(CHECKPOINT_PATH, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"])
+        if "optimizer_state_dict" in ckpt:
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        if "step" in ckpt:
+            step = ckpt["step"] + 1
+            best_val_loss = ckpt.get("best_val_loss", float("inf"))
+        print(f"Resumed from step {step} (best val loss {best_val_loss:.4f})")
+    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     train_iter = iter(train_loader)
 
     while step < MAX_ITERS:
@@ -121,19 +134,37 @@ def main():
         # Evaluate
         if step % EVAL_INTERVAL == 0 or step == MAX_ITERS - 1:
             losses = estimate_loss(model, train_loader, val_loader, device)
-            print(f"step {step:5d} | train loss {losses['train']:.4f} | val loss {losses['val']:.4f} | lr {lr:.2e}")
+            print(f"step {step:5d} | train loss {losses['train']:.4f} | val loss {losses['val']:.4f} | lr {lr:.2e}", flush=True)
             if losses["val"] < best_val_loss:
                 best_val_loss = losses["val"]
                 torch.save(
                     {
                         "model_state_dict": model.state_dict(),
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "step": step,
+                        "best_val_loss": best_val_loss,
                         "vocab_size": tokenizer.vocab_size,
                         "stoi": tokenizer.stoi,
                         "itos": tokenizer.itos,
                     },
                     CHECKPOINT_PATH,
                 )
-                print(f"  -> saved checkpoint (val loss {best_val_loss:.4f})")
+                print(f"  -> saved best checkpoint (val loss {best_val_loss:.4f})", flush=True)
+
+            # Periodic checkpoint
+            periodic_path = os.path.join(CHECKPOINT_DIR, f"step_{step:06d}.pt")
+            torch.save(
+                {
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "step": step,
+                    "best_val_loss": best_val_loss,
+                    "vocab_size": tokenizer.vocab_size,
+                    "stoi": tokenizer.stoi,
+                    "itos": tokenizer.itos,
+                },
+                periodic_path,
+            )
 
         step += 1
 

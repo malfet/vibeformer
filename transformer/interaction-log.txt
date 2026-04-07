@@ -4,3 +4,14 @@ move it to docs folder and commit
 Ok, now read the paper and let's implement a transformer based on this one. Do you need a dataset or do you know where to get it from? I want to start with a small one
 Let's do Tiny Shakespeare
 Implement the decoder-only transformer plan, using .venv with python-3.14 and uv for venv creation
+Read claude.md and continue
+Run the training loop and see if it's learning
+Sure
+Let's train for a bit longer
+And why weights_only is False?
+Hmm, but you are not training the tokenizer, are you?
+Can't you create a checkpoint every epoch or so?
+Are you training using fp32 or bf16 precision?
+Can you may be write a small script that benchmarks various parts of the training loop
+Why are you saying that bf16 support is limited?
+Can you try autograd with bf16 and run the benchmark again?
