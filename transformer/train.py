@@ -3,6 +3,7 @@
 import json
 import math
 import os
+import time
 import torch
 from torch.utils.data import DataLoader
 from safetensors.torch import save_file, load_file
@@ -173,6 +174,9 @@ def main():
 
     param_count = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {param_count:,}")
+    tokens_per_step = BATCH_SIZE * BLOCK_SIZE
+    # Approximate FLOPs per token: 6 * N_params (2x forward, 4x backward)
+    flops_per_step = 6 * param_count * tokens_per_step
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, betas=(0.9, 0.98))
 
@@ -187,6 +191,7 @@ def main():
         print(f"Resumed from step {step} (best val loss {best_val_loss:.4f})")
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     train_iter = iter(train_loader)
+    step_times = []
 
     while step < MAX_ITERS:
         # Get batch
@@ -203,17 +208,32 @@ def main():
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
 
-        # Forward + backward
+        # Forward + backward (timed)
+        t0 = time.perf_counter()
         _, loss = model(xb, yb)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        elif device.type == "mps":
+            torch.mps.synchronize()
+        dt = time.perf_counter() - t0
+        step_times.append(dt)
 
         # Evaluate
         if step % EVAL_INTERVAL == 0 or step == MAX_ITERS - 1:
+            avg_dt = sum(step_times) / len(step_times)
+            tok_per_sec = tokens_per_step / avg_dt
+            gflops = flops_per_step / avg_dt / 1e9
             losses = estimate_loss(model, train_loader, val_loader, device)
-            print(f"step {step:5d} | train loss {losses['train']:.4f} | val loss {losses['val']:.4f} | lr {lr:.2e}", flush=True)
+            print(
+                f"step {step:5d} | train loss {losses['train']:.4f} | val loss {losses['val']:.4f}"
+                f" | lr {lr:.2e} | {tok_per_sec:,.0f} tok/s | {gflops:.1f} GFLOP/s",
+                flush=True,
+            )
+            step_times = []
             if losses["val"] < best_val_loss:
                 best_val_loss = losses["val"]
                 save_checkpoint(CHECKPOINT_PATH, model, optimizer, step, best_val_loss, tokenizer)
