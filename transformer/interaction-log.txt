@@ -26,3 +26,5 @@ Are Attention is All you need paper mentions anything about precision? But indee
 Search the PDF file /Users/malfet/git/malfet/vibeformer/transformer/docs/attention_is_all_you_need.pdf for any mentions of precision, float16, fp16, bf16, bfloat16, half precision, mixed precision, or numerical precision. Use grep on the extracted text or any means available. Report what you find (or if there's nothing).
 Can you print performance (in GFlops if you can easily estimate those, or tokens per second) during the training loop
 Let's increase it to 100_000
+Is there say a TinyPoe dataset (or can you help me create one) that contains poems by Edgar Allan Poe
+Is there a more Poe poems?
