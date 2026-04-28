@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import torch
 from safetensors.torch import load_file
 from safetensors import safe_open
@@ -30,11 +31,18 @@ def generate(
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", default="best_model.safetensors")
+    parser.add_argument("--data", default="data/tiny_shakespeare.txt",
+                        help="Dataset path (used to derive default checkpoint name)")
+    parser.add_argument("--checkpoint", default=None,
+                        help="Checkpoint path (default: <dataset_name>_best.safetensors)")
     parser.add_argument("--prompt", default="\n", help="Starting text")
     parser.add_argument("--max-tokens", type=int, default=500)
     parser.add_argument("--temperature", type=float, default=0.8)
     args = parser.parse_args()
+
+    if args.checkpoint is None:
+        data_name = os.path.splitext(os.path.basename(args.data))[0]
+        args.checkpoint = f"{data_name}_best.safetensors"
 
     with safe_open(args.checkpoint, framework="pt") as f:
         meta = f.metadata()

@@ -29,3 +29,4 @@ Let's increase it to 100_000
 Is there say a TinyPoe dataset (or can you help me create one) that contains poems by Edgar Allan Poe
 Is there a more Poe poems?
 And let's try something different. How about poems of Konstantin Balmont (in russian)
+Can I have multiple checkpoints if I train on different datasets? I.e. is there a checkpoint name prefix (defaults to dataset name)?

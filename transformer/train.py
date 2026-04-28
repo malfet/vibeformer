@@ -1,5 +1,6 @@
 """Training loop for the decoder-only transformer."""
 
+import argparse
 import json
 import math
 import os
@@ -27,8 +28,7 @@ N_HEADS = 4
 N_LAYERS = 4
 D_FF = 512
 DROPOUT = 0.1
-CHECKPOINT_PATH = "best_model.safetensors"
-CHECKPOINT_DIR = "checkpoints"
+DATA_PATH = "data/tiny_shakespeare.txt"
 
 
 def _flatten_optim_state(optimizer):
@@ -152,10 +152,20 @@ def estimate_loss(model, train_loader, val_loader, device):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Train decoder-only transformer")
+    parser.add_argument("--data", default=DATA_PATH, help="Path to training text file")
+    args = parser.parse_args()
+
+    # Derive checkpoint prefix from dataset filename (e.g. "tiny_shakespeare")
+    data_name = os.path.splitext(os.path.basename(args.data))[0]
+    checkpoint_path = f"{data_name}_best.safetensors"
+    checkpoint_dir = f"checkpoints/{data_name}"
+
     device = get_device()
     print(f"Using device: {device}")
+    print(f"Dataset: {args.data} (prefix: {data_name})")
 
-    train_dataset, val_dataset, tokenizer = get_datasets(BLOCK_SIZE)
+    train_dataset, val_dataset, tokenizer = get_datasets(BLOCK_SIZE, data_path=args.data)
     print(f"Vocab size: {tokenizer.vocab_size}")
     print(f"Train size: {len(train_dataset):,} | Val size: {len(val_dataset):,}")
 
@@ -184,12 +194,12 @@ def main():
     step = 0
 
     # Resume from checkpoint if available
-    if os.path.exists(CHECKPOINT_PATH):
-        loaded_step, best_val_loss = load_checkpoint(CHECKPOINT_PATH, model, optimizer, device)
+    if os.path.exists(checkpoint_path):
+        loaded_step, best_val_loss = load_checkpoint(checkpoint_path, model, optimizer, device)
         if loaded_step >= 0:
             step = loaded_step + 1
         print(f"Resumed from step {step} (best val loss {best_val_loss:.4f})")
-    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+    os.makedirs(checkpoint_dir, exist_ok=True)
     train_iter = iter(train_loader)
     step_times = []
 
@@ -236,11 +246,11 @@ def main():
             step_times = []
             if losses["val"] < best_val_loss:
                 best_val_loss = losses["val"]
-                save_checkpoint(CHECKPOINT_PATH, model, optimizer, step, best_val_loss, tokenizer)
+                save_checkpoint(checkpoint_path, model, optimizer, step, best_val_loss, tokenizer)
                 print(f"  -> saved best checkpoint (val loss {best_val_loss:.4f})", flush=True)
 
             # Periodic checkpoint
-            periodic_path = os.path.join(CHECKPOINT_DIR, f"step_{step:06d}.safetensors")
+            periodic_path = os.path.join(checkpoint_dir, f"step_{step:06d}.safetensors")
             save_checkpoint(periodic_path, model, optimizer, step, best_val_loss, tokenizer)
 
         step += 1
