@@ -30,3 +30,6 @@ Is there say a TinyPoe dataset (or can you help me create one) that contains poe
 Is there a more Poe poems?
 And let's try something different. How about poems of Konstantin Balmont (in russian)
 Can I have multiple checkpoints if I train on different datasets? I.e. is there a checkpoint name prefix (defaults to dataset name)?
+Does it always make sense to train the model on the full dataset? I.e. can one train it initially just on words (to learn vocabulary), then on short phrases and finally on the full text?
+I want to do experiment a bit with fine tuning, i.e. train model on say Shakespare, Poe and say Chaucer and then quickly tune the model to produce text that is more clesely aligned with the style of just one author. Or may be like Shakespare but in cyrilic, or Balmont but in English
+Let's create say a poetry dataset using well known classic poets from 6-8 languages with different character sets: say English, French, German (Goete please), Russian, Spanish, Czech and Bulgarian
