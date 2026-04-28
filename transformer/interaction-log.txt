@@ -28,3 +28,4 @@ Can you print performance (in GFlops if you can easily estimate those, or tokens
 Let's increase it to 100_000
 Is there say a TinyPoe dataset (or can you help me create one) that contains poems by Edgar Allan Poe
 Is there a more Poe poems?
+And let's try something different. How about poems of Konstantin Balmont (in russian)
