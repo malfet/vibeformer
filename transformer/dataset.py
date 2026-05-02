@@ -6,7 +6,7 @@ from torch.utils.data import Dataset
 
 
 def load_text(path: str = "data/tiny_shakespeare.txt") -> str:
-    with open(path, "r") as f:
+    with open(path, "r", encoding="utf-8") as f:
         return f.read()
 
 
