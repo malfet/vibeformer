@@ -35,3 +35,16 @@ I want to do experiment a bit with fine tuning, i.e. train model on say Shakespa
 Let's create say a poetry dataset using well known classic poets from 6-8 languages with different character sets: say English, French, German (Goete please), Russian, Spanish, Czech and Bulgarian
 Nice, can you rework the tiny_balmont dataset by adding those unicode marks, but also there are lots of weirdly wraped-around stanzas, and form is weird important in poetry. For example Жажда вырваться из плена, вновь изведать гнет оков. should not have contained all those whitespaces and newlines and just one line of the poem, not two
 Yes, commit it
+Can you now suggest a change to generate that inserts poem start as first token
+No need, it's always better to start from the start of the poem
+While running the training I wonder if it's possible to save loss curve into .png file or something (using matplotlib) for example
+Also, help me understand why it sometimes spikes
+Let's plot loss-curve first (may be also save/append them to CSV)
+And I wonder if something like mixed precision would be useful for overcoming the bfloat16 numerics. i.e. would keeping weigths in bfloat16, but gradients in float32 will work/help?
+Let's apply autocast to the training script
+On the loss curve, it's not really usable, may be one should exclude first few steps?
+Also, loss seems to plateau at .91 any reason why?
+May be instead of fixed number of steps, cut of should be on say maximum difference between start and end of the plot? Alos may be plot loss on a logarithmic scale?
+Great, now when I restart the training from the best checkpoint will it overrwirte the values?
+Truncate sounds reasonable
+Commit one change for new generate and another for training script changes

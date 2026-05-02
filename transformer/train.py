@@ -1,6 +1,7 @@
 """Training loop for the decoder-only transformer."""
 
 import argparse
+import csv
 import json
 import math
 import os
@@ -10,18 +11,22 @@ from torch.utils.data import DataLoader
 from safetensors.torch import save_file, load_file
 from safetensors import safe_open
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
 from dataset import get_datasets
 from model import Transformer
 
 # Hyperparameters
 BLOCK_SIZE = 128
 BATCH_SIZE = 64
-MAX_ITERS = 100_000
+MAX_ITERS = 200_000
 EVAL_INTERVAL = 500
 EVAL_ITERS = 200
 LEARNING_RATE = 3e-4
 WARMUP_ITERS = 400
-LR_DECAY_ITERS = 100_000
+LR_DECAY_ITERS = 200_000
 MIN_LR = 1e-5
 D_MODEL = 128
 N_HEADS = 4
@@ -111,6 +116,82 @@ def load_checkpoint(path, model, optimizer, device):
     return step, best_val_loss
 
 
+def load_loss_history(csv_path):
+    """Load existing (step, train, val) rows; resumes earlier runs cleanly."""
+    if not os.path.exists(csv_path):
+        return []
+    rows = []
+    with open(csv_path, "r", newline="") as f:
+        reader = csv.DictReader(f)
+        for r in reader:
+            rows.append((int(r["step"]), float(r["train_loss"]), float(r["val_loss"])))
+    return rows
+
+
+def append_loss_row(csv_path, step, train_loss, val_loss):
+    """Append one row, writing the header if the file is new."""
+    new = not os.path.exists(csv_path)
+    with open(csv_path, "a", newline="") as f:
+        writer = csv.writer(f)
+        if new:
+            writer.writerow(["step", "train_loss", "val_loss"])
+        writer.writerow([step, f"{train_loss:.6f}", f"{val_loss:.6f}"])
+
+
+def truncate_loss_history(csv_path, history, cutoff_step):
+    """Drop rows whose step > cutoff_step, rewriting the CSV in place.
+
+    Used on resume so the new run's appended rows don't overlap with stale
+    rows from a prior run that trained past the best-checkpoint step.
+    """
+    kept = [h for h in history if h[0] <= cutoff_step]
+    if len(kept) == len(history):
+        return history
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["step", "train_loss", "val_loss"])
+        for s, t, v in kept:
+            writer.writerow([s, f"{t:.6f}", f"{v:.6f}"])
+    return kept
+
+
+def plot_loss_curve(history, png_path, title):
+    """Re-render the loss curve PNG with a log-scale y-axis.
+
+    Adaptively drop leading high-loss points so the interesting region
+    fills the plot. Cutoff = first index where val_loss has dropped to
+    within 1.5x of the asymptote (median of the last quarter of points).
+    """
+    if not history:
+        return
+    visible = history
+    if len(history) >= 4:
+        tail = history[3 * len(history) // 4 :]
+        tail_med = sorted(h[2] for h in tail)[len(tail) // 2]
+        threshold = 1.5 * tail_med
+        for i, h in enumerate(history):
+            if h[2] <= threshold:
+                visible = history[i:]
+                break
+    if not visible:
+        return
+    steps = [h[0] for h in visible]
+    train = [h[1] for h in visible]
+    val = [h[2] for h in visible]
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.plot(steps, train, label="train", linewidth=1.2)
+    ax.plot(steps, val, label="val", linewidth=1.2)
+    ax.set_xlabel("step")
+    ax.set_ylabel("loss")
+    ax.set_yscale("log")
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3, which="both")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(png_path, dpi=120)
+    plt.close(fig)
+
+
 def get_device() -> torch.device:
     if torch.cuda.is_available():
         return torch.device("cuda")
@@ -131,7 +212,7 @@ def get_lr(step: int) -> float:
 
 
 @torch.no_grad()
-def estimate_loss(model, train_loader, val_loader, device):
+def estimate_loss(model, train_loader, val_loader, device, autocast_ctx):
     model.eval()
     out = {}
     for name, loader in [("train", train_loader), ("val", val_loader)]:
@@ -144,7 +225,8 @@ def estimate_loss(model, train_loader, val_loader, device):
                 loader_iter = iter(loader)
                 xb, yb = next(loader_iter)
             xb, yb = xb.to(device), yb.to(device)
-            _, loss = model(xb, yb)
+            with autocast_ctx:
+                _, loss = model(xb, yb)
             losses.append(loss.item())
         out[name] = sum(losses) / len(losses)
     model.train()
@@ -172,6 +254,7 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, drop_last=True)
 
+    # Master weights stay in fp32; forward/backward run in bf16 via autocast.
     model = Transformer(
         vocab_size=tokenizer.vocab_size,
         d_model=D_MODEL,
@@ -180,7 +263,8 @@ def main():
         d_ff=D_FF,
         block_size=BLOCK_SIZE,
         dropout=DROPOUT,
-    ).to(device=device, dtype=torch.bfloat16)
+    ).to(device=device)
+    autocast_ctx = torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16)
 
     param_count = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {param_count:,}")
@@ -200,6 +284,14 @@ def main():
             step = loaded_step + 1
         print(f"Resumed from step {step} (best val loss {best_val_loss:.4f})")
     os.makedirs(checkpoint_dir, exist_ok=True)
+    loss_csv_path = os.path.join(checkpoint_dir, "losses.csv")
+    loss_png_path = os.path.join(checkpoint_dir, "loss.png")
+    loss_history = load_loss_history(loss_csv_path)
+    # Drop any logged rows beyond the resumed step (e.g. a prior run that kept
+    # going past the best checkpoint) — otherwise the new run would re-append
+    # overlapping step numbers and the plot would zig-zag.
+    if step > 0 and loss_history:
+        loss_history = truncate_loss_history(loss_csv_path, loss_history, step - 1)
     train_iter = iter(train_loader)
     step_times = []
 
@@ -220,7 +312,8 @@ def main():
 
         # Forward + backward (timed)
         t0 = time.perf_counter()
-        _, loss = model(xb, yb)
+        with autocast_ctx:
+            _, loss = model(xb, yb)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -237,12 +330,15 @@ def main():
             avg_dt = sum(step_times) / len(step_times)
             tok_per_sec = tokens_per_step / avg_dt
             gflops = flops_per_step / avg_dt / 1e9
-            losses = estimate_loss(model, train_loader, val_loader, device)
+            losses = estimate_loss(model, train_loader, val_loader, device, autocast_ctx)
             print(
                 f"step {step:5d} | train loss {losses['train']:.4f} | val loss {losses['val']:.4f}"
                 f" | lr {lr:.2e} | {tok_per_sec:,.0f} tok/s | {gflops:.1f} GFLOP/s",
                 flush=True,
             )
+            append_loss_row(loss_csv_path, step, losses["train"], losses["val"])
+            loss_history.append((step, losses["train"], losses["val"]))
+            plot_loss_curve(loss_history, loss_png_path, f"{data_name} loss")
             step_times = []
             if losses["val"] < best_val_loss:
                 best_val_loss = losses["val"]
