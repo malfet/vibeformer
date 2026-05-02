@@ -48,3 +48,6 @@ May be instead of fixed number of steps, cut of should be on say maximum differe
 Great, now when I restart the training from the best checkpoint will it overrwirte the values?
 Truncate sounds reasonable
 Commit one change for new generate and another for training script changes
+Look at the current model architecture and input and output dtypes/shapes and write me a per-operator benchmark for forward and backward ops
+Run it
+Commit this
