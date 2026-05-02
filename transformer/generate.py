@@ -56,8 +56,14 @@ def main():
     model_state = {k[len("model."):]: v for k, v in tensors.items() if k.startswith("model.")}
     model.load_state_dict(model_state, strict=False)
 
+    # If the model was trained with poem markers, always start at a poem boundary
+    POEM_START = "✦"
+    prompt = args.prompt
+    if POEM_START in stoi and not prompt.startswith(POEM_START):
+        prompt = POEM_START + "\n" + prompt.lstrip("\n")
+
     # Encode prompt
-    idx = torch.tensor([[stoi[c] for c in args.prompt]], dtype=torch.long)
+    idx = torch.tensor([[stoi[c] for c in prompt]], dtype=torch.long)
 
     with torch.no_grad():
         out = generate(model, idx, args.max_tokens, args.temperature)
