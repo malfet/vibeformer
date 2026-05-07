@@ -1,0 +1,3 @@
+If I want AI to learn how to solve sudoku from the first principles, what would be the good paper to read/approach?
+Create papers folder and download abovementioned papers there
+Tool loaded. And may be 2nd question: is there an existing Python library to generate sudoku problems of different complexity? Commit log and papers you've downloaded (and may be create short README.md with summary of the papers and approaches they are trying)
