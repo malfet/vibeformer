@@ -1,3 +1,8 @@
 If I want AI to learn how to solve sudoku from the first principles, what would be the good paper to read/approach?
 Create papers folder and download abovementioned papers there
 Tool loaded. And may be 2nd question: is there an existing Python library to generate sudoku problems of different complexity? Commit log and papers you've downloaded (and may be create short README.md with summary of the papers and approaches they are trying)
+And what is this Sakana/others 2024 paper you've mentioned?
+Looks like it disappeared from from github and huggingface
+Ok, can you find/generate a sudoku dataset. And I guess usually it's something akin to an inpainting problem: I.e. given a partially filled grid it predicts a next one
+For sudoku experiment, let's try RNNs
+Let's do (b), but since I'm on Mac I as usually want to train it on MPS
