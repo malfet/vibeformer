@@ -8,3 +8,5 @@
 [2026-05-11] Sounds good let's checkout necessary libraries and build. So should we make dosbox-pure a submodule of the project? + pybind?
 [2026-05-11] Do the submodule, create .venv with requirements (not sure why you need gymnasium, I've heard it's a semi abandoned repo, best not depend on it)
 [2026-05-11] Remove libretro.h (as dosbox-pure already comes with it) and indeed commit
+[2026-05-11] Sure, let's do that and try to run DIGGER.exe inside of the emulator and capture a screenshot after running for say 20 frames (do not commit the EXE file and may be put it into data folder)
+[2026-05-11] Can you do a bit of a housekeeping for me, and rename src into csrc. Also, respect envvars like DEBUG or RELEASEDBG and rebuild both extension and libdos_purelib with those flags. Last but not least, isn't setup a deprecated approach and one should use different build mechanisms to install the extensions?

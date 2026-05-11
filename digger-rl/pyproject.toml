@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=68", "pybind11>=2.13"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "digger-rl"
+version = "0.0.1"
+description = "Libretro-based RL frontend for DOS games (DOSBox Pure)"
+requires-python = ">=3.10"
+dependencies = ["numpy>=2.0"]
+
+[tool.setuptools]
+# All source is C++ via setup.py's ext_modules; no pure-Python package yet.
+py-modules = []
