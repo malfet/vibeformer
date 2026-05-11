@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+*.so
+*.dylib
+*.o
+*.dSYM/
+build/
+vendor/dosbox-pure/dosbox_pure_libretro.dylib

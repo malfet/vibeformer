@@ -3,3 +3,8 @@
 [2026-05-11] And put them in papers folder
 [2026-05-11] Then I want you to think about how one can instrument say dosbox, to make it accessible for this type of interaction
 [2026-05-11] I would like to have papers/*.pdf as is, and in that folder add README with quick explanation of those papers and suggestions for an additional reading
+[2026-05-11] Now let's figure out if there is a libdosbox exist already existing, or perhaps one can use typescript port of the project
+[2026-05-11] Ok, libretro indeed sounds like an interesting approach. Is it available thru homebrew already?
+[2026-05-11] Sounds good let's checkout necessary libraries and build. So should we make dosbox-pure a submodule of the project? + pybind?
+[2026-05-11] Do the submodule, create .venv with requirements (not sure why you need gymnasium, I've heard it's a semi abandoned repo, best not depend on it)
+[2026-05-11] Remove libretro.h (as dosbox-pure already comes with it) and indeed commit
