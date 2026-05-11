@@ -1,0 +1,5 @@
+[2026-05-10] I want to build an RL system that learns how to play video games, with almost no supervision, i.e. one can probably give it a reward function as total time to play + score. Can you find some articles about it?
+[2026-05-11] Ok, let's download Dreamer V3 and Twister 2025 papers
+[2026-05-11] And put them in papers folder
+[2026-05-11] Then I want you to think about how one can instrument say dosbox, to make it accessible for this type of interaction
+[2026-05-11] I would like to have papers/*.pdf as is, and in that folder add README with quick explanation of those papers and suggestions for an additional reading
