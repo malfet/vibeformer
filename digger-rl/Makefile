@@ -19,6 +19,23 @@ DOSBOX_PURE := vendor/dosbox-pure
 PIP         := .venv/bin/pip
 NPROC       := $(shell sysctl -n hw.ncpu 2>/dev/null || nproc)
 
+# DOSBox Pure's Makefile only skips strip when BUILD=DEBUG; for RELEASEDBG it
+# strips the dylib, throwing away symbols we explicitly asked to keep. Suppress
+# strip for anything but a clean release build.
+ifeq ($(MODE),RELEASE)
+  STRIP_OVERRIDE :=
+else
+  STRIP_OVERRIDE := STRIP=true
+endif
+
+# DOSBox Pure's dynarec writes generated x86->arm64 code and then mprotects the
+# region executable. On Apple Silicon this requires MAP_JIT + a JIT entitlement
+# on the host process, neither of which DOSBox Pure (nor Homebrew Python) has,
+# so the SIGILL we hit in cache_flush is the kernel rejecting the broken JIT
+# state. Disable the dynarec and fall back to the interpreter cores -- still
+# plenty fast for DOS-era games.
+CXX_FOR_CORE := c++ -DDISABLE_DYNAREC=1
+
 .PHONY: all core ext clean clean-core clean-ext debug relwithdebinfo release help
 
 all: core ext
@@ -26,7 +43,8 @@ all: core ext
 
 core:
 	@echo ">>> building DOSBox Pure libretro core (BUILD=$(MODE))"
-	$(MAKE) -C $(DOSBOX_PURE) -j$(NPROC) BUILD=$(MODE)
+	$(MAKE) -C $(DOSBOX_PURE) -j$(NPROC) BUILD=$(MODE) $(STRIP_OVERRIDE) \
+	    CXX="$(CXX_FOR_CORE)"
 
 ext:
 	@echo ">>> building pybind11 extension (BUILD=$(MODE))"
