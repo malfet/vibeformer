@@ -16,3 +16,5 @@
 [2026-05-11] And filename is risc_armv8le.h
 [2026-05-11] Let's disable DYNAREC for now
 [2026-05-11] Yes, commit this
+[2026-05-11] Let's do input injection. Also, can you modify the script to have --live option, when output is rendered to matplotlib or something
+[2026-05-11] Commit this, but no 80 characters wraparound in commit message

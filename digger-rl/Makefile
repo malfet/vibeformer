@@ -47,6 +47,8 @@ core:
 	    CXX="$(CXX_FOR_CORE)"
 
 ext:
+	@echo ">>> installing dev deps from requirements.txt"
+	$(PIP) install -r requirements.txt
 	@echo ">>> building pybind11 extension (BUILD=$(MODE))"
 	BUILD=$(MODE) $(PIP) install -e . --no-build-isolation
 

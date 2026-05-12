@@ -8,6 +8,7 @@
 #include <pybind11/stl.h>
 
 #include <dlfcn.h>
+#include <array>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -120,6 +121,25 @@ public:
         return std::move(arr);
     }
 
+    void set_key(unsigned retro_key, bool pressed) {
+        if (retro_key >= keyboard_state_.size()) return;
+        keyboard_state_[retro_key] = pressed;
+        // DOSBox Pure registers an event-style keyboard callback (push model)
+        // AND polls input_state (pull model). Drive both so either path works.
+        if (keyboard_event_cb_) {
+            keyboard_event_cb_(pressed, retro_key, 0, 0);
+        }
+    }
+
+    void clear_keys() {
+        for (size_t i = 0; i < keyboard_state_.size(); ++i) {
+            if (keyboard_state_[i] && keyboard_event_cb_) {
+                keyboard_event_cb_(false, static_cast<unsigned>(i), 0, 0);
+            }
+            keyboard_state_[i] = false;
+        }
+    }
+
     py::bytes get_memory(unsigned id) {
         void* data = retro_get_memory_data_(id);
         size_t size = retro_get_memory_size_(id);
@@ -171,6 +191,11 @@ private:
     retro_pixel_format pixel_format_ = RETRO_PIXEL_FORMAT_0RGB1555;
     std::string system_dir_, save_dir_;
 
+    // Input state. keyboard_state_ is indexed by RETROK_* values (the enum
+    // tops out near 324; 512 is a safe ceiling).
+    std::array<bool, 512> keyboard_state_{};
+    retro_keyboard_event_t keyboard_event_cb_ = nullptr;
+
     // Trampolines into the singleton.
     static bool env_cb(unsigned cmd, void* data) {
         return instance_->handle_env(cmd, data);
@@ -181,7 +206,15 @@ private:
     static void audio_sample_cb(int16_t, int16_t) {}
     static size_t audio_batch_cb(const int16_t*, size_t frames) { return frames; }
     static void input_poll_cb() {}
-    static int16_t input_state_cb(unsigned, unsigned, unsigned, unsigned) { return 0; }
+    static int16_t input_state_cb(unsigned port, unsigned device,
+                                  unsigned /*index*/, unsigned id) {
+        if (port != 0) return 0;
+        if (device == RETRO_DEVICE_KEYBOARD) {
+            return (id < instance_->keyboard_state_.size() &&
+                    instance_->keyboard_state_[id]) ? 1 : 0;
+        }
+        return 0;
+    }
 
     static void log_printf(retro_log_level, const char* fmt, ...) {
         char buf[2048];
@@ -234,6 +267,11 @@ private:
                 return true;
             case RETRO_ENVIRONMENT_GET_INPUT_BITMASKS:
                 return true;
+            case RETRO_ENVIRONMENT_SET_KEYBOARD_CALLBACK: {
+                auto* kc = static_cast<const retro_keyboard_callback*>(data);
+                keyboard_event_cb_ = kc ? kc->callback : nullptr;
+                return true;
+            }
             default:
                 return false;
         }
@@ -311,10 +349,40 @@ PYBIND11_MODULE(_libretro, m) {
         .def("get_frame", &LibretroCore::get_frame)
         .def("get_memory", &LibretroCore::get_memory, py::arg("id") = RETRO_MEMORY_SYSTEM_RAM)
         .def("get_system_info", &LibretroCore::get_system_info)
-        .def("get_av_info", &LibretroCore::get_av_info);
+        .def("get_av_info", &LibretroCore::get_av_info)
+        .def("set_key", &LibretroCore::set_key,
+             py::arg("retro_key"), py::arg("pressed"))
+        .def("clear_keys", &LibretroCore::clear_keys);
 
     m.attr("MEMORY_SYSTEM_RAM") = py::int_(RETRO_MEMORY_SYSTEM_RAM);
     m.attr("MEMORY_SAVE_RAM")   = py::int_(RETRO_MEMORY_SAVE_RAM);
     m.attr("MEMORY_RTC")        = py::int_(RETRO_MEMORY_RTC);
     m.attr("MEMORY_VIDEO_RAM")  = py::int_(RETRO_MEMORY_VIDEO_RAM);
+
+    // Subset of retro_key values, exposed as integers under _libretro.RETROK.
+    // Any unsigned int in [0, 512) is a valid argument to set_key, so this is
+    // just a convenience: extend the list if you need more keys.
+    py::module keys = m.def_submodule("RETROK", "libretro key codes (subset)");
+#define K(pyname, enumname) \
+    keys.attr(pyname) = py::int_(static_cast<unsigned>(RETROK_##enumname))
+    K("RETURN", RETURN);    K("SPACE", SPACE);
+    K("ESCAPE", ESCAPE);    K("TAB", TAB);
+    K("BACKSPACE", BACKSPACE); K("DELETE", DELETE);
+    K("LEFT", LEFT);  K("RIGHT", RIGHT);
+    K("UP", UP);      K("DOWN", DOWN);
+    K("LSHIFT", LSHIFT); K("RSHIFT", RSHIFT);
+    K("LCTRL", LCTRL);   K("RCTRL", RCTRL);
+    K("LALT", LALT);     K("RALT", RALT);
+    K("F1",  F1);  K("F2",  F2);  K("F3",  F3);  K("F4",  F4);
+    K("F5",  F5);  K("F6",  F6);  K("F7",  F7);  K("F8",  F8);
+    K("F9",  F9);  K("F10", F10); K("F11", F11); K("F12", F12);
+    K("A", a); K("B", b); K("C", c); K("D", d); K("E", e);
+    K("F", f); K("G", g); K("H", h); K("I", i); K("J", j);
+    K("K", k); K("L", l); K("M", m); K("N", n); K("O", o);
+    K("P", p); K("Q", q); K("R", r); K("S", s); K("T", t);
+    K("U", u); K("V", v); K("W", w); K("X", x); K("Y", y);
+    K("Z", z);
+    K("N0", 0); K("N1", 1); K("N2", 2); K("N3", 3); K("N4", 4);
+    K("N5", 5); K("N6", 6); K("N7", 7); K("N8", 8); K("N9", 9);
+#undef K
 }
