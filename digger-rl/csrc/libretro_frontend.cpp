@@ -104,6 +104,12 @@ public:
             throw std::runtime_error("retro_load_game failed");
         }
         game_loaded_ = true;
+        // The libretro spec says the frontend must call retro_get_system_av_info
+        // after retro_load_game so the core knows the frontend has read the
+        // timing/geometry. DOSBox Pure relies on this -- skipping it leaves
+        // internal state half-initialized and the first retro_run() segfaults.
+        retro_system_av_info av = {};
+        retro_get_system_av_info_(&av);
     }
 
     void run() { retro_run_(); }
@@ -145,6 +151,27 @@ public:
         size_t size = retro_get_memory_size_(id);
         if (!data || size == 0) return py::bytes();
         return py::bytes(static_cast<const char*>(data), size);
+    }
+
+    py::list get_memory_maps() {
+        py::list result;
+        for (const auto& r : memory_maps_) {
+            py::dict d;
+            d["flags"]     = r.flags;
+            d["start"]     = r.start;
+            d["len"]       = r.len;
+            d["addrspace"] = r.addrspace;
+            result.append(d);
+        }
+        return result;
+    }
+
+    py::bytes read_memory_region(size_t idx) {
+        if (idx >= memory_maps_.size()) {
+            throw std::runtime_error("memory region index out of range");
+        }
+        const auto& r = memory_maps_[idx];
+        return py::bytes(static_cast<const char*>(r.ptr), r.len);
     }
 
     py::tuple get_system_info() {
@@ -195,6 +222,19 @@ private:
     // tops out near 324; 512 is a safe ceiling).
     std::array<bool, 512> keyboard_state_{};
     retro_keyboard_event_t keyboard_event_cb_ = nullptr;
+
+    // Memory maps registered by the core via SET_MEMORY_MAPS. The ptr fields
+    // point into the core's own allocations, which stay live for the lifetime
+    // of the core. DOSBox Pure registers 2-3 descriptors covering DOS GAME
+    // memory, OS memory, and expanded (EMS/XMS) memory.
+    struct MemRegion {
+        uint64_t flags;
+        void* ptr;
+        size_t start;
+        size_t len;
+        std::string addrspace;
+    };
+    std::vector<MemRegion> memory_maps_;
 
     // Trampolines into the singleton.
     static bool env_cb(unsigned cmd, void* data) {
@@ -270,6 +310,20 @@ private:
             case RETRO_ENVIRONMENT_SET_KEYBOARD_CALLBACK: {
                 auto* kc = static_cast<const retro_keyboard_callback*>(data);
                 keyboard_event_cb_ = kc ? kc->callback : nullptr;
+                return true;
+            }
+            case RETRO_ENVIRONMENT_SET_MEMORY_MAPS: {
+                auto* mm = static_cast<const retro_memory_map*>(data);
+                memory_maps_.clear();
+                if (mm && mm->descriptors) {
+                    for (unsigned i = 0; i < mm->num_descriptors; ++i) {
+                        const auto& d = mm->descriptors[i];
+                        memory_maps_.push_back({
+                            d.flags, d.ptr, d.start, d.len,
+                            d.addrspace ? std::string(d.addrspace) : std::string()
+                        });
+                    }
+                }
                 return true;
             }
             default:
@@ -348,6 +402,10 @@ PYBIND11_MODULE(_libretro, m) {
         .def("reset", &LibretroCore::reset)
         .def("get_frame", &LibretroCore::get_frame)
         .def("get_memory", &LibretroCore::get_memory, py::arg("id") = RETRO_MEMORY_SYSTEM_RAM)
+        .def("get_memory_maps", &LibretroCore::get_memory_maps,
+             "Return the descriptor list set by the core via SET_MEMORY_MAPS.")
+        .def("read_memory_region", &LibretroCore::read_memory_region, py::arg("index"),
+             "Return the bytes of the registered memory region at the given index.")
         .def("get_system_info", &LibretroCore::get_system_info)
         .def("get_av_info", &LibretroCore::get_av_info)
         .def("set_key", &LibretroCore::set_key,

@@ -6,6 +6,7 @@ Default: run N frames headlessly and dump a PPM screenshot.
 """
 
 import argparse
+import struct
 import time
 from pathlib import Path
 
@@ -16,6 +17,17 @@ CORE = REPO / "vendor" / "dosbox-pure" / "dosbox_pure_libretro.dylib"
 GAME = REPO / "data" / "DIGGER.EXE"
 SYS_DIR = REPO / "data" / "system"
 SAVE_DIR = REPO / "data" / "save"
+
+# Offset of the int32 score variable inside memory region 0 (the DOS GAME
+# segment as exposed by DOSBox Pure's SET_MEMORY_MAPS). Located by diffing
+# RAM snapshots before/after eating emeralds; see find_score.py.
+SCORE_OFFSET = 0x282E0
+
+
+def read_score(core) -> int:
+    """Read the current 1P score as a signed 32-bit LE integer."""
+    region = core.read_memory_region(0)
+    return struct.unpack_from("<i", region, SCORE_OFFSET)[0]
 
 # Map matplotlib key-event names to libretro RETROK_* values. Single printable
 # characters are handled separately (ASCII matches RETROK for [a-z] and a few
@@ -152,7 +164,8 @@ def run_live(core) -> None:
             fps_ema = 0.9 * fps_ema + 0.1 * (steps / elapsed)
         if frame_no % 30 == 0:
             fig.canvas.manager.set_window_title(
-                f"DIGGER -- emu {fps_ema:5.1f} fps -- frame {frame_no}"
+                f"DIGGER -- score {read_score(core):6d} -- "
+                f"emu {fps_ema:5.1f} fps -- frame {frame_no}"
             )
 
         # If we got ahead of real time, sleep the rest of the budget.
