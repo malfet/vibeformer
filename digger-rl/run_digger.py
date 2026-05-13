@@ -64,6 +64,25 @@ def init_core() -> "_libretro.LibretroCore":
     return core
 
 
+def advance_to_gameplay(core, title_frames: int = 20, hold_frames: int = 10, advance_frames: int = 20) -> None:
+    """Run past the title screen so the agent starts in actual gameplay.
+
+    DIGGER.EXE boots into a title/menu that waits on a keypress. Pressing
+    RETURN starts a one-player game. We let the title render for a few
+    frames, then hold RETURN across `hold_frames` to make sure the press is
+    seen by the keyboard interrupt handler, then release, and finally run
+    `advance_frames` more so the screen transition into the level settles.
+    """
+    for _ in range(title_frames):
+        core.run()
+    core.set_key(_libretro.RETROK.RETURN, True)
+    for _ in range(hold_frames):
+        core.run()
+    core.set_key(_libretro.RETROK.RETURN, False)
+    for _ in range(advance_frames):
+        core.run()
+
+
 def run_headless(core, frames: int) -> None:
     out = REPO / "data" / f"frame_{frames}.ppm"
     for _ in range(frames):
@@ -153,6 +172,7 @@ def main():
     args = p.parse_args()
 
     core = init_core()
+    advance_to_gameplay(core)
     if args.live:
         run_live(core)
     else:

@@ -18,3 +18,5 @@
 [2026-05-11] Yes, commit this
 [2026-05-11] Let's do input injection. Also, can you modify the script to have --live option, when output is rendered to matplotlib or something
 [2026-05-11] Commit this, but no 80 characters wraparound in commit message
+[2026-05-13] Can you search the internet if there are any examples of disassembling the game to highlight where gameover and score events are. May be as separate task, to jump directly into game, let's always run for say 20 frames, then press space and run for 2 frames
+[2026-05-13] Ok, adjusted it, see updated code, commit (enter was the way to start it, but one needs to wait for a few more frames after key is pressed
