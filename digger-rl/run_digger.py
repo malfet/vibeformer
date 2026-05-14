@@ -18,16 +18,24 @@ GAME = REPO / "data" / "DIGGER.EXE"
 SYS_DIR = REPO / "data" / "system"
 SAVE_DIR = REPO / "data" / "save"
 
-# Offset of the int32 score variable inside memory region 0 (the DOS GAME
-# segment as exposed by DOSBox Pure's SET_MEMORY_MAPS). Located by diffing
-# RAM snapshots before/after eating emeralds; see find_score.py.
-SCORE_OFFSET = 0x282E0
+# Offsets inside memory region 0 (the DOS GAME segment as exposed by DOSBox
+# Pure's SET_MEMORY_MAPS). Located by diffing RAM snapshots across gameplay:
+# eating emeralds for the score, observing deaths for lives. Lives goes
+# 3 -> 2 -> 1 -> 0 in 1P mode; 0 == game over.
+SCORE_OFFSET = 0x282E0  # int32 LE
+LIVES_OFFSET = 0x259F2  # uint8
 
 
 def read_score(core) -> int:
     """Read the current 1P score as a signed 32-bit LE integer."""
     region = core.read_memory_region(0)
     return struct.unpack_from("<i", region, SCORE_OFFSET)[0]
+
+
+def read_lives(core) -> int:
+    """Read the remaining-lives count (0 == game over once gameplay started)."""
+    region = core.read_memory_region(0)
+    return region[LIVES_OFFSET]
 
 # Map matplotlib key-event names to libretro RETROK_* values. Single printable
 # characters are handled separately (ASCII matches RETROK for [a-z] and a few
@@ -144,6 +152,10 @@ def run_live(core) -> None:
     last = time.monotonic()
     fps_ema = target_fps
     frame_no = 0
+    # Avoid bailing on a transient lives=0 reading before gameplay actually
+    # starts; only treat zero as game-over after we've seen lives > 0 at
+    # least once.
+    seen_alive = False
     while plt.fignum_exists(fig.number):
         now = time.monotonic()
         elapsed = now - last
@@ -160,11 +172,18 @@ def run_live(core) -> None:
         fig.canvas.draw_idle()
         fig.canvas.flush_events()
 
+        lives = read_lives(core)
+        if lives > 0:
+            seen_alive = True
+        elif seen_alive:
+            print(f"Game over (final score {read_score(core)}). Exiting live mode.")
+            break
+
         if elapsed > 0:
             fps_ema = 0.9 * fps_ema + 0.1 * (steps / elapsed)
         if frame_no % 30 == 0:
             fig.canvas.manager.set_window_title(
-                f"DIGGER -- score {read_score(core):6d} -- "
+                f"DIGGER -- score {read_score(core):6d} -- lives {lives} -- "
                 f"emu {fps_ema:5.1f} fps -- frame {frame_no}"
             )
 
@@ -174,6 +193,7 @@ def run_live(core) -> None:
             time.sleep(slack)
 
     core.clear_keys()
+    plt.close(fig)
 
 
 def main():

@@ -22,3 +22,5 @@
 [2026-05-13] Ok, adjusted it, see updated code, commit (enter was the way to start it, but one needs to wait for a few more frames after key is pressed
 [2026-05-13] Now let's add memory snapshotting (or it is there already) and figure out memory location of score and gameover conditions
 [2026-05-13] Let's commit read_memory_region() and perhaps add option Score offset const to play_digger and render it as part of matplot lib title during --live mode
+[2026-05-13] Commit this, and instead of gameover condition, let's try to find number of lives
+[2026-05-13] Let's drop the find_score script from the current commit and again, add LIVES_OFFSET to run_digger.py and exit --live mode when counter reaches 0
