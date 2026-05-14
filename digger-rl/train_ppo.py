@@ -266,6 +266,33 @@ def main() -> None:
                 done_t = torch.zeros(1, device=device)
             obs_t = torch.from_numpy(obs_np).float().unsqueeze(0).to(device)
 
+        # ---- Pre-update diagnostics: encoder-collapse early-warning signals.
+        # All computed on the full rollout buffer in a single forward pass so
+        # we get a stable measurement that isn't biased to a single minibatch.
+        with torch.no_grad():
+            buf_logits = agent.actor(agent.encode(obs_buf))
+            buf_log_probs = F.log_softmax(buf_logits, dim=-1)
+            buf_probs = buf_log_probs.exp()
+            buf_entropy = -(buf_probs * buf_log_probs).sum(-1)
+            buf_spread = (buf_logits.max(-1).values - buf_logits.min(-1).values)
+
+        ent_buf_mean = buf_entropy.mean().item()
+        ent_buf_p10 = buf_entropy.quantile(0.1).item()
+        spread_mean = buf_spread.mean().item()
+
+        act_counts = torch.bincount(act_buf, minlength=DiggerEnv.NUM_ACTIONS).float()
+        act_dist = act_counts / act_counts.sum()
+        top_act_idx = int(act_dist.argmax().item())
+        top_act_frac = act_dist.max().item()
+
+        collapse_signals = []
+        if top_act_frac > 0.85:
+            collapse_signals.append(f"action {top_act_idx} = {top_act_frac:.0%}")
+        if ent_buf_p10 < 0.05:
+            collapse_signals.append(f"ent_p10 = {ent_buf_p10:.3f}")
+        if spread_mean > 15.0:
+            collapse_signals.append(f"logit_spread = {spread_mean:.1f}")
+
         # ---- GAE ----
         with torch.no_grad():
             next_value = agent.value(obs_t)
@@ -334,9 +361,14 @@ def main() -> None:
             print(f"upd {update:>4d}  step {global_step:>8d}  "
                   f"pg {pg_loss.item():+.3f}  v {v_loss.item():.3f}  "
                   f"ent {ent.item():.3f}  clip {np.mean(clipfracs):.3f}  "
-                  f"kl {np.mean(approx_kls):+.4f}  "
                   f"avg_ret {avg_ret:.1f}  lr {lr_now:.2e}  sps {sps:.0f}",
                   flush=True)
+            print(f"     buf: ent_mean {ent_buf_mean:.2f}  ent_p10 {ent_buf_p10:.2f}  "
+                  f"spread {spread_mean:5.2f}  top_a {top_act_idx}@{top_act_frac:.0%}",
+                  flush=True)
+            if collapse_signals:
+                print(f"     ** collapse-warning: {' | '.join(collapse_signals)}",
+                      flush=True)
 
         if cfg.save_every and update % cfg.save_every == 0:
             ckpt = CKPT_DIR / f"ppo_digger_step{global_step:08d}.pt"

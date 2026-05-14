@@ -41,3 +41,4 @@
 [2026-05-14] Also, make let's make this state window optional when runnign ppo and perhaps merge p-1,p-2,p-3 into single rgb image where each step are projected into its own color plane
 [2026-05-14] Yes, let's doo clip_reward and EpisodicLifeEnv
 [2026-05-14] Also let's try larger ent_coef
+[2026-05-14] Let's cleanup the checkpoints and start training. Also is there a way to get an early warning about encoder collapse
