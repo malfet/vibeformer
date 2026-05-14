@@ -56,8 +56,22 @@ class Config:
     obs_size: int = 84
     log_every: int = 1                # updates
     save_every: int = 50              # updates
-    device: str = "mps"
+    device: str = "auto"              # resolved by select_device()
     seed: int = 1
+
+
+def select_device(force_cpu: bool = False) -> torch.device:
+    """Pick the best available accelerator, with a CPU override.
+
+    Delegates to torch.accelerator so we don't enumerate device names here --
+    whatever backend (CUDA, MPS, XPU, ...) the torch build supports is what
+    we use.
+    """
+    if force_cpu:
+        return torch.device("cpu")
+    if torch.accelerator.is_available():
+        return torch.accelerator.current_accelerator()
+    return torch.device("cpu")
 
 
 def layer_init(layer: nn.Module, std: float = np.sqrt(2),
@@ -147,8 +161,8 @@ def env_step_skipped(env: DiggerEnv, action: int, skip: int):
 def parse_args() -> Config:
     p = argparse.ArgumentParser()
     p.add_argument("--total-timesteps", type=int, default=Config.total_timesteps)
-    p.add_argument("--device", type=str, default=Config.device,
-                   choices=["mps", "cpu", "cuda"])
+    p.add_argument("--force-cpu", action="store_true",
+                   help="force CPU even if a CUDA/MPS accelerator is available")
     p.add_argument("--lr", type=float, default=Config.learning_rate)
     p.add_argument("--seed", type=int, default=Config.seed)
     p.add_argument("--num-steps", type=int, default=Config.num_steps)
@@ -158,10 +172,11 @@ def parse_args() -> Config:
     p.add_argument("--no-anneal-lr", action="store_true")
     a = p.parse_args()
     return Config(
-        total_timesteps=a.total_timesteps, device=a.device, learning_rate=a.lr,
-        seed=a.seed, num_steps=a.num_steps, frame_skip=a.frame_skip,
-        frame_stack=a.frame_stack, save_every=a.save_every,
-        anneal_lr=not a.no_anneal_lr,
+        total_timesteps=a.total_timesteps,
+        device=str(select_device(a.force_cpu)),
+        learning_rate=a.lr, seed=a.seed, num_steps=a.num_steps,
+        frame_skip=a.frame_skip, frame_stack=a.frame_stack,
+        save_every=a.save_every, anneal_lr=not a.no_anneal_lr,
     )
 
 

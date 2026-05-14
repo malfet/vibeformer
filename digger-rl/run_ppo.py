@@ -17,7 +17,7 @@ import torch
 from torch.distributions import Categorical
 
 from digger_env import DiggerEnv
-from train_ppo import Agent, FrameStack, env_step_skipped, preprocess
+from train_ppo import Agent, FrameStack, env_step_skipped, preprocess, select_device
 
 _ACTION_NAMES = {
     DiggerEnv.NOOP:  "noop ",
@@ -33,7 +33,8 @@ def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("checkpoint", type=Path,
                    help="path to a .pt file produced by train_ppo.py")
-    p.add_argument("--device", default="mps", choices=["mps", "cpu", "cuda"])
+    p.add_argument("--force-cpu", action="store_true",
+                   help="force CPU even if a CUDA/MPS accelerator is available")
     p.add_argument("--stochastic", action="store_true",
                    help="sample from the policy instead of taking argmax")
     p.add_argument("--frame-skip", type=int, default=4)
@@ -46,7 +47,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    device = torch.device(args.device)
+    device = select_device(args.force_cpu)
 
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
     agent = Agent(num_actions=DiggerEnv.NUM_ACTIONS,
