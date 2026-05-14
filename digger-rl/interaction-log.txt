@@ -42,3 +42,11 @@
 [2026-05-14] Yes, let's doo clip_reward and EpisodicLifeEnv
 [2026-05-14] Also let's try larger ent_coef
 [2026-05-14] Let's cleanup the checkpoints and start training. Also is there a way to get an early warning about encoder collapse
+[2026-05-14] And again, would it be beneficial to warm up the encoder with few human gameplay traces?
+[2026-05-14] And perhaps last question - would it make sense to introduce a pentalty for repeatdely using the same action?
+[2026-05-14] Ok, I see that increasing entropy indeed changed the behavior, but it doesn't feel like it learned to collect emeralds nor shoot enemies, it just moves randomly
+[2026-05-14] Sure, let's wait and try 2
+[2026-05-14] In the meantime, I wonder if we should even try to speedup the training by doing vec one? Another question - should the training be changed to rollback and repeat sequences? I.e. when life is lost, roll back 20 steps and search for different strategies. And penalize the last action that lead to a life loss (though this might be wrong, sometimes there isn't an action one can take to avoid it)
+[2026-05-14] Let's wait for completion
+[2026-05-14] I.e. when I tru to run run_ppo on ppo_digger_final.pt average scroe is 150
+[2026-05-14] Sure, let's try (2)

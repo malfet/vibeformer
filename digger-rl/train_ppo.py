@@ -56,6 +56,8 @@ class Config:
     obs_size: int = 84
     clip_reward: bool = False
     episodic_life: bool = False
+    death_penalty: float = 0.0
+    ent_coef_final: float | None = None  # if set, linearly anneal ent_coef -> this
     log_every: int = 1                # updates
     save_every: int = 50              # updates
     device: str = "auto"              # resolved by select_device()
@@ -178,6 +180,10 @@ def parse_args() -> Config:
                    help="emit done=True on every life loss, not just game over")
     p.add_argument("--ent-coef", type=float, default=Config.ent_coef,
                    help="entropy bonus weight (default 0.01; bump to 0.05-0.1 to fight collapse)")
+    p.add_argument("--ent-coef-final", type=float, default=None,
+                   help="linearly anneal entropy bonus toward this value over training")
+    p.add_argument("--death-penalty", type=float, default=Config.death_penalty,
+                   help="subtract this from reward on every life loss (default 0)")
     a = p.parse_args()
     return Config(
         total_timesteps=a.total_timesteps,
@@ -186,7 +192,8 @@ def parse_args() -> Config:
         frame_skip=a.frame_skip, frame_stack=a.frame_stack,
         save_every=a.save_every, anneal_lr=not a.no_anneal_lr,
         clip_reward=a.clip_reward, episodic_life=a.episodic_life,
-        ent_coef=a.ent_coef,
+        ent_coef=a.ent_coef, ent_coef_final=a.ent_coef_final,
+        death_penalty=a.death_penalty,
     )
 
 
@@ -201,7 +208,8 @@ def main() -> None:
 
     env = DiggerEnv(max_steps=10**9,  # don't truncate during training
                     clip_reward=cfg.clip_reward,
-                    episodic_life=cfg.episodic_life)
+                    episodic_life=cfg.episodic_life,
+                    death_penalty=cfg.death_penalty)
     stack = FrameStack(k=cfg.frame_stack, size=cfg.obs_size)
     agent = Agent(num_actions=DiggerEnv.NUM_ACTIONS,
                   in_channels=cfg.frame_stack).to(device)
@@ -230,9 +238,14 @@ def main() -> None:
 
     while global_step < cfg.total_timesteps:
         update += 1
+        frac_remaining = max(0.0, 1.0 - global_step / cfg.total_timesteps)
         if cfg.anneal_lr:
-            frac = max(0.0, 1.0 - global_step / cfg.total_timesteps)
-            optim.param_groups[0]["lr"] = frac * cfg.learning_rate
+            optim.param_groups[0]["lr"] = frac_remaining * cfg.learning_rate
+        if cfg.ent_coef_final is not None:
+            current_ent_coef = (cfg.ent_coef_final
+                                + frac_remaining * (cfg.ent_coef - cfg.ent_coef_final))
+        else:
+            current_ent_coef = cfg.ent_coef
 
         # ---- Rollout ----
         for step in range(N):
@@ -340,7 +353,7 @@ def main() -> None:
                     v_loss = 0.5 * ((new_val - returns[mb]) ** 2).mean()
 
                 ent = entropy.mean()
-                loss = pg_loss - cfg.ent_coef * ent + cfg.vf_coef * v_loss
+                loss = pg_loss - current_ent_coef * ent + cfg.vf_coef * v_loss
 
                 optim.zero_grad()
                 loss.backward()
@@ -361,7 +374,8 @@ def main() -> None:
             print(f"upd {update:>4d}  step {global_step:>8d}  "
                   f"pg {pg_loss.item():+.3f}  v {v_loss.item():.3f}  "
                   f"ent {ent.item():.3f}  clip {np.mean(clipfracs):.3f}  "
-                  f"avg_ret {avg_ret:.1f}  lr {lr_now:.2e}  sps {sps:.0f}",
+                  f"avg_ret {avg_ret:.1f}  lr {lr_now:.2e}  "
+                  f"entc {current_ent_coef:.3f}  sps {sps:.0f}",
                   flush=True)
             print(f"     buf: ent_mean {ent_buf_mean:.2f}  ent_p10 {ent_buf_p10:.2f}  "
                   f"spread {spread_mean:5.2f}  top_a {top_act_idx}@{top_act_frac:.0%}",

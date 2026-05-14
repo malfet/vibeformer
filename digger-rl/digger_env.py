@@ -76,7 +76,8 @@ class DiggerEnv:
 
     def __init__(self, max_steps: int = 36000,
                  clip_reward: bool = False,
-                 episodic_life: bool = False):
+                 episodic_life: bool = False,
+                 death_penalty: float = 0.0):
         # 36000 frames ~= 8.5 minutes of in-game time at 70 fps. Plenty for
         # a Digger run; cap exists so an immortal idle policy doesn't loop
         # forever.
@@ -87,9 +88,14 @@ class DiggerEnv:
         # on full game-over, so the agent sees three short episodes per
         # life-pool. The actual game keeps running underneath -- reset()
         # short-circuits to the current frame until lives truly hit 0.
+        # death_penalty: subtract this from reward on any life loss (each
+        # transition where lives decreased). Useful in addition to (or
+        # instead of) episodic_life because the value head learns to
+        # discount states that lead to death, propagating back via GAE.
         self.max_steps = max_steps
         self.clip_reward = clip_reward
         self.episodic_life = episodic_life
+        self.death_penalty = float(death_penalty)
         self._core: _libretro.LibretroCore | None = None
         self._last_action = self.NOOP
         self._last_score = 0
@@ -164,11 +170,16 @@ class DiggerEnv:
         if real_game_over:
             self._real_game_over = True
 
-        # Episodic-life mode: a per-life "death" also ends the agent's episode.
+        # Death = lives went down this step (covers both intermediate deaths
+        # and the final game-over death).
+        death_event = self._prev_lives > 0 and lives < self._prev_lives
+        self._prev_lives = lives
+
+        if death_event and self.death_penalty != 0.0:
+            reward -= self.death_penalty
+
         if self.episodic_life:
-            life_lost = self._prev_lives > 0 and lives < self._prev_lives
-            self._prev_lives = lives
-            agent_done = real_game_over or life_lost
+            agent_done = death_event or real_game_over
         else:
             agent_done = real_game_over
 
