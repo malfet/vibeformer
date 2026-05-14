@@ -39,3 +39,5 @@
 [2026-05-14] for select-device, I don't want you to hardcode any device names, just use `torch.accelerator.current_accelerator`, amend previous commit
 [2026-05-14] Hmm, are you sure run_ppo is doing the right thing? Because all I see when run it without stocastic selection is it picks a single actions and goes with it
 [2026-05-14] Also, make let's make this state window optional when runnign ppo and perhaps merge p-1,p-2,p-3 into single rgb image where each step are projected into its own color plane
+[2026-05-14] Yes, let's doo clip_reward and EpisodicLifeEnv
+[2026-05-14] Also let's try larger ent_coef

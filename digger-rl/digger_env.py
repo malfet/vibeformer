@@ -74,23 +74,52 @@ class DiggerEnv:
         FIRE:  _libretro.RETROK.F1,
     }
 
-    def __init__(self, max_steps: int = 36000):
+    def __init__(self, max_steps: int = 36000,
+                 clip_reward: bool = False,
+                 episodic_life: bool = False):
         # 36000 frames ~= 8.5 minutes of in-game time at 70 fps. Plenty for
         # a Digger run; cap exists so an immortal idle policy doesn't loop
         # forever.
+        #
+        # clip_reward: report sign(reward) to the agent so a +1000 bonus
+        # doesn't dominate value-loss gradients (Atari PPO standard).
+        # episodic_life: emit done=True on every life-loss instead of only
+        # on full game-over, so the agent sees three short episodes per
+        # life-pool. The actual game keeps running underneath -- reset()
+        # short-circuits to the current frame until lives truly hit 0.
         self.max_steps = max_steps
+        self.clip_reward = clip_reward
+        self.episodic_life = episodic_life
         self._core: _libretro.LibretroCore | None = None
         self._last_action = self.NOOP
         self._last_score = 0
         self._seen_alive = False
         self._steps = 0
+        self._prev_lives = -1
+        self._real_game_over = True  # forces a hard reset on first call
 
     # -- lifecycle ---------------------------------------------------------
 
     def reset(self) -> np.ndarray:
-        """Start a fresh episode. Returns the initial observation."""
+        """Start a fresh episode. Returns the initial observation.
+
+        With episodic_life=True and the game still alive (i.e. we just
+        emitted done=True on a life-loss), this is a soft reset: we don't
+        reboot DIGGER.EXE, we just re-baseline the reward tracker and
+        return the current frame. The game has already auto-respawned the
+        digger and continued running. On true game-over (or truncation, or
+        first call), do a full hard reset.
+        """
         SYS_DIR.mkdir(parents=True, exist_ok=True)
         SAVE_DIR.mkdir(parents=True, exist_ok=True)
+
+        if (self.episodic_life and not self._real_game_over
+                and self._core is not None):
+            self._last_action = self.NOOP
+            self._last_score = self._read_score()
+            self._prev_lives = self._read_lives()
+            self._steps = 0
+            return self._core.get_frame()
 
         # LibretroCore is a singleton per process. Drop the old one first so
         # the new constructor doesn't see another live instance.
@@ -106,6 +135,8 @@ class DiggerEnv:
         self._last_action = self.NOOP
         self._last_score = self._read_score()
         self._seen_alive = self._read_lives() > 0
+        self._prev_lives = self._read_lives()
+        self._real_game_over = False
         self._steps = 0
         return self._core.get_frame()
 
@@ -121,22 +152,40 @@ class DiggerEnv:
         self._steps += 1
 
         score = self._read_score()
-        reward = float(score - self._last_score)
+        raw_reward = float(score - self._last_score)
         self._last_score = score
+        reward = float(np.sign(raw_reward)) if self.clip_reward else raw_reward
 
         lives = self._read_lives()
         if lives > 0:
             self._seen_alive = True
 
-        game_over = self._seen_alive and lives == 0
+        real_game_over = self._seen_alive and lives == 0
+        if real_game_over:
+            self._real_game_over = True
+
+        # Episodic-life mode: a per-life "death" also ends the agent's episode.
+        if self.episodic_life:
+            life_lost = self._prev_lives > 0 and lives < self._prev_lives
+            self._prev_lives = lives
+            agent_done = real_game_over or life_lost
+        else:
+            agent_done = real_game_over
+
         truncated = self._steps >= self.max_steps
-        done = game_over or truncated
+        if truncated:
+            # Force a hard reset on next reset() so we don't resume into a
+            # weird state.
+            self._real_game_over = True
+        done = agent_done or truncated
 
         return StepResult(
             obs=self._core.get_frame(),
             reward=reward,
             done=done,
-            info={"score": score, "lives": int(lives), "truncated": truncated},
+            info={"score": score, "lives": int(lives),
+                  "truncated": truncated, "real_done": real_game_over,
+                  "raw_reward": raw_reward},
         )
 
     def close(self) -> None:

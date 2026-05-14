@@ -54,6 +54,8 @@ class Config:
     frame_skip: int = 4
     frame_stack: int = 4
     obs_size: int = 84
+    clip_reward: bool = False
+    episodic_life: bool = False
     log_every: int = 1                # updates
     save_every: int = 50              # updates
     device: str = "auto"              # resolved by select_device()
@@ -170,6 +172,12 @@ def parse_args() -> Config:
     p.add_argument("--frame-stack", type=int, default=Config.frame_stack)
     p.add_argument("--save-every", type=int, default=Config.save_every)
     p.add_argument("--no-anneal-lr", action="store_true")
+    p.add_argument("--clip-reward", action="store_true",
+                   help="report sign(reward) to the agent instead of raw score delta")
+    p.add_argument("--episodic-life", action="store_true",
+                   help="emit done=True on every life loss, not just game over")
+    p.add_argument("--ent-coef", type=float, default=Config.ent_coef,
+                   help="entropy bonus weight (default 0.01; bump to 0.05-0.1 to fight collapse)")
     a = p.parse_args()
     return Config(
         total_timesteps=a.total_timesteps,
@@ -177,6 +185,8 @@ def parse_args() -> Config:
         learning_rate=a.lr, seed=a.seed, num_steps=a.num_steps,
         frame_skip=a.frame_skip, frame_stack=a.frame_stack,
         save_every=a.save_every, anneal_lr=not a.no_anneal_lr,
+        clip_reward=a.clip_reward, episodic_life=a.episodic_life,
+        ent_coef=a.ent_coef,
     )
 
 
@@ -189,7 +199,9 @@ def main() -> None:
 
     print(f"device={device} cfg={cfg}", flush=True)
 
-    env = DiggerEnv(max_steps=10**9)  # don't truncate during training
+    env = DiggerEnv(max_steps=10**9,  # don't truncate during training
+                    clip_reward=cfg.clip_reward,
+                    episodic_life=cfg.episodic_life)
     stack = FrameStack(k=cfg.frame_stack, size=cfg.obs_size)
     agent = Agent(num_actions=DiggerEnv.NUM_ACTIONS,
                   in_channels=cfg.frame_stack).to(device)
