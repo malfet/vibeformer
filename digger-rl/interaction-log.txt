@@ -33,3 +33,4 @@
 [2026-05-13] let's do Clear RL style approach, but also clear if one can speed up training by giving it a few gameplay traces
 [2026-05-13] proceed, let's do MPS, if you run into op gap let me know
 [2026-05-13] Sure, let's do that
+[2026-05-14] Hmm, can you add run_ppo.py than would visualize the play (using matplotlib similar to play_digger.py ) for a given checkpoint
