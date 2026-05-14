@@ -28,3 +28,8 @@
 [2026-05-13] Sorry, perhaps I wasn't super clear on the goal. Let's undo the previous commit. Before we start training, should one tries to reduce the pixels field by learning embeddings of sort? Or learning those is part of Dreamer architecure. If that is the case, let's leave it as is. And indeed create Env class
 [2026-05-13] In terms of actions - there should be size: idle, directional move(arrow keys)  and fire (F1)
 [2026-05-13] Sure, commit this. Just curious - would trying the gymnasium still makes sense or Dreamer-like approach should yield better results?
+[2026-05-13] Ok, let's do PPO, what paper it described in?
+[2026-05-13] hmm, let's use pytorch + stable baselines
+[2026-05-13] let's do Clear RL style approach, but also clear if one can speed up training by giving it a few gameplay traces
+[2026-05-13] proceed, let's do MPS, if you run into op gap let me know
+[2026-05-13] Sure, let's do that
