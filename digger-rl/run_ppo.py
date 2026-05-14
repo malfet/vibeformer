@@ -74,6 +74,21 @@ def main():
     ax.set_axis_off()
     img = ax.imshow(raw)
     fig.tight_layout(pad=0)
+    fig.canvas.manager.set_window_title("DIGGER PPO -- gameplay")
+
+    # Second window: what the policy network actually sees. Four 84x84
+    # grayscale frames stacked along the channel axis, oldest on the left.
+    fig2, axes2 = plt.subplots(1, args.frame_stack, figsize=(2 * args.frame_stack, 2.3))
+    if args.frame_stack == 1:
+        axes2 = [axes2]
+    imgs2 = []
+    for i, ax_i in enumerate(axes2):
+        ax_i.set_axis_off()
+        ax_i.set_title(f"t-{args.frame_stack - 1 - i}", fontsize=9)
+        imgs2.append(ax_i.imshow(obs[i], cmap="gray", vmin=0.0, vmax=1.0))
+    fig2.tight_layout(pad=0.3)
+    fig2.canvas.manager.set_window_title("PPO input -- 4x grayscale frame stack")
+
     plt.ion()
     plt.show()
 
@@ -84,7 +99,9 @@ def main():
     step_no = 0
     last_wall = time.monotonic()
 
-    while plt.fignum_exists(fig.number) and episodes_done < args.episodes:
+    while (plt.fignum_exists(fig.number)
+           and plt.fignum_exists(fig2.number)
+           and episodes_done < args.episodes):
         now = time.monotonic()
         elapsed = now - last_wall
         last_wall = now
@@ -105,6 +122,12 @@ def main():
         img.set_data(raw)
         fig.canvas.draw_idle()
         fig.canvas.flush_events()
+
+        # Mirror the policy's input stack into the secondary window.
+        for i, frame in enumerate(stack.frames):
+            imgs2[i].set_data(frame)
+        fig2.canvas.draw_idle()
+        fig2.canvas.flush_events()
 
         lives = info["lives"]
         if lives > 0:
@@ -137,7 +160,7 @@ def main():
         if slack > 0:
             time.sleep(slack)
 
-    plt.close(fig)
+    plt.close("all")
     env.close()
 
 

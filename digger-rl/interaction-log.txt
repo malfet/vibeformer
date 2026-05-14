@@ -35,4 +35,5 @@
 [2026-05-13] Sure, let's do that
 [2026-05-14] Hmm, can you add run_ppo.py than would visualize the play (using matplotlib similar to play_digger.py ) for a given checkpoint
 [2026-05-14] Hmm, few questions: instead of hardcoding the device, can one use accelerator (and perhaps --force-cpu flag) to select where to run (no need to stop the training, let's just update the scripts)
+[2026-05-14] Also, while doign run_ppo, can you visualize (perhaps in separate window) the view network gets (4 grayscale frames)
 [2026-05-14] for select-device, I don't want you to hardcode any device names, just use `torch.accelerator.current_accelerator`, amend previous commit
