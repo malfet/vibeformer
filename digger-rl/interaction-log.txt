@@ -24,3 +24,7 @@
 [2026-05-13] Let's commit read_memory_region() and perhaps add option Score offset const to play_digger and render it as part of matplot lib title during --live mode
 [2026-05-13] Commit this, and instead of gameover condition, let's try to find number of lives
 [2026-05-13] Let's drop the find_score script from the current commit and again, add LIVES_OFFSET to run_digger.py and exit --live mode when counter reaches 0
+[2026-05-13] So for Dreamer one needs some traces, don't they? But for gymanisum one can train from a clean slate. Also, for pixels - Digger is initially CGA game, but our pixels are not 640x480, which is a lot for AI model to parse, can you scale it down to CGA resolution (and 16 colors)
+[2026-05-13] Sorry, perhaps I wasn't super clear on the goal. Let's undo the previous commit. Before we start training, should one tries to reduce the pixels field by learning embeddings of sort? Or learning those is part of Dreamer architecure. If that is the case, let's leave it as is. And indeed create Env class
+[2026-05-13] In terms of actions - there should be size: idle, directional move(arrow keys)  and fire (F1)
+[2026-05-13] Sure, commit this. Just curious - would trying the gymnasium still makes sense or Dreamer-like approach should yield better results?
