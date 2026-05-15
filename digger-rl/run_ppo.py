@@ -38,7 +38,7 @@ def parse_args():
                    help="force CPU even if a CUDA/MPS accelerator is available")
     p.add_argument("--stochastic", action="store_true",
                    help="sample from the policy instead of taking argmax")
-    p.add_argument("--frame-skip", type=int, default=4)
+    p.add_argument("--frame-skip", type=int, default=8)
     p.add_argument("--frame-stack", type=int, default=4)
     p.add_argument("--obs-size", type=int, default=84)
     p.add_argument("--episodes", type=int, default=1,

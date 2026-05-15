@@ -51,13 +51,21 @@ class Config:
     ent_coef: float = 0.01
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
-    frame_skip: int = 4
+    frame_skip: int = 8
     frame_stack: int = 4
     obs_size: int = 84
     clip_reward: bool = False
     episodic_life: bool = False
     death_penalty: float = 0.0
     ent_coef_final: float | None = None  # if set, linearly anneal ent_coef -> this
+    # Behavioural-cloning warmup. If bc_traces is non-empty, pretrain the
+    # actor (cross-entropy on human-recorded actions) for bc_epochs *before*
+    # PPO starts; with --bc-value, also fit the critic on MC returns from the
+    # traces so the random V doesn't immediately wipe out the BC policy.
+    bc_traces: tuple[str, ...] = ()
+    bc_epochs: int = 5
+    bc_batch_size: int = 64
+    bc_value: bool = False
     log_every: int = 1                # updates
     save_every: int = 50              # updates
     device: str = "auto"              # resolved by select_device()
@@ -145,6 +153,242 @@ class FrameStack:
         return np.stack(list(self.frames), axis=0)  # (k, size, size)
 
 
+def _decimate_trace(d: dict, factor: int) -> dict:
+    """Group every `factor` consecutive samples in a trace into one.
+
+    Used to convert a low-skip trace (e.g. recorded at frame_skip=4) into a
+    higher-skip representation (e.g. trainer running at frame_skip=8).
+    Keeps the LAST frame/score/lives of each group (matching the env's
+    skip-then-snapshot semantics), SUMS rewards across the group, and ORs
+    resets so a reset that landed inside the group is preserved.
+    """
+    n = len(d["frames"])
+    trimmed = n - (n % factor)
+    frames = d["frames"][:trimmed].reshape(
+        -1, factor, *d["frames"].shape[1:])[:, -1]
+    actions = d["actions"][:trimmed].reshape(-1, factor)[:, -1]
+    raw_rewards = d["raw_rewards"][:trimmed].reshape(-1, factor).sum(axis=1)
+    scores = d["scores"][:trimmed].reshape(-1, factor)[:, -1]
+    lives = d["lives"][:trimmed].reshape(-1, factor)[:, -1]
+    resets = d["resets"][:trimmed].reshape(-1, factor).any(axis=1)
+    return {
+        "frames":      frames,
+        "actions":     actions,
+        "raw_rewards": raw_rewards,
+        "scores":      scores,
+        "lives":       lives,
+        "resets":      resets,
+        "frame_skip":  int(d["frame_skip"]) * factor,
+        "obs_size":    int(d["obs_size"]),
+    }
+
+
+def _load_traces(paths: tuple[str, ...], cfg: Config) -> list[dict]:
+    """Load .npz playtraces, decimating skip-mismatched ones at load time."""
+    out: list[dict] = []
+    for p in paths:
+        raw = np.load(p)
+        fs = int(raw["frame_skip"])
+        os_ = int(raw["obs_size"])
+        if os_ != cfg.obs_size:
+            raise ValueError(
+                f"{p}: trace obs_size={os_} but trainer uses {cfg.obs_size}")
+        # Traces predating the R-reset feature won't carry a `resets` array;
+        # default to all-False (no resets recorded).
+        if "resets" in raw.files:
+            resets = raw["resets"].astype(bool)
+        else:
+            resets = np.zeros(len(raw["actions"]), dtype=bool)
+        d = {
+            "frames":      raw["frames"],
+            "actions":     raw["actions"],
+            "raw_rewards": raw["raw_rewards"],
+            "scores":      raw["scores"],
+            "lives":       raw["lives"],
+            "resets":      resets,
+            "frame_skip":  fs,
+            "obs_size":    os_,
+        }
+        if fs != cfg.frame_skip:
+            if cfg.frame_skip % fs != 0 or cfg.frame_skip < fs:
+                raise ValueError(
+                    f"{p}: trace frame_skip={fs} not an integer divisor of "
+                    f"trainer frame_skip={cfg.frame_skip}; re-record")
+            factor = cfg.frame_skip // fs
+            before = len(d["frames"])
+            d = _decimate_trace(d, factor)
+            print(f"  {p}: decimated x{factor} (frame_skip {fs}->{cfg.frame_skip}), "
+                  f"{before}->{len(d['frames'])} samples", flush=True)
+        d["path"] = p
+        out.append(d)
+    return out
+
+
+def _trace_returns(rewards: np.ndarray, lives: np.ndarray,
+                   resets: np.ndarray, gamma: float,
+                   episodic_life: bool) -> np.ndarray:
+    """Compute discounted returns G_t, resetting the bootstrap at episode ends.
+
+    Reset bootstrap when (a) lives drops from >0 to 0 (true game-over),
+    (b) `episodic_life` and any life loss, or (c) `resets[t+1]` flags a
+    user-triggered emulator reset between t and t+1.
+    """
+    n = len(rewards)
+    returns = np.zeros(n, dtype=np.float32)
+    running = 0.0
+    for t in range(n - 1, -1, -1):
+        if t < n - 1:
+            ended = (int(lives[t + 1]) == 0 and int(lives[t]) > 0) or (
+                episodic_life and int(lives[t + 1]) < int(lives[t])) or (
+                bool(resets[t + 1]))
+            if ended:
+                running = 0.0
+        running = float(rewards[t]) + gamma * running
+        returns[t] = running
+    return returns
+
+
+def _build_bc_index(traces: list[dict], cfg: Config
+                    ) -> tuple[list[np.ndarray], list[np.ndarray],
+                               list[np.ndarray], list[tuple[int, int]]]:
+    """Prepare per-trace arrays and a flat (trace_idx, t) sample index.
+
+    Stored in uint8 to keep memory modest; the minibatch loader divides by
+    255 on the fly. The first (frame_stack - 1) timesteps of each trace are
+    skipped because we can't build a full stack for them.
+    """
+    per_frames: list[np.ndarray] = []
+    per_actions: list[np.ndarray] = []
+    per_returns: list[np.ndarray] = []
+    index: list[tuple[int, int]] = []
+
+    for i, tr in enumerate(traces):
+        frames = tr["frames"]
+        actions = tr["actions"].astype(np.int64)
+        rewards = tr["raw_rewards"].astype(np.float32).copy()
+        lives = tr["lives"]
+        resets = tr["resets"]
+
+        if cfg.clip_reward:
+            rewards = np.sign(rewards).astype(np.float32)
+        if cfg.death_penalty != 0.0:
+            died = np.zeros_like(rewards)
+            died[1:] = (lives[1:] < lives[:-1]).astype(np.float32)
+            rewards = rewards - cfg.death_penalty * died
+
+        returns = _trace_returns(rewards, lives, resets, cfg.gamma,
+                                 cfg.episodic_life)
+
+        per_frames.append(frames)
+        per_actions.append(actions)
+        per_returns.append(returns)
+        n = len(frames)
+        for t in range(cfg.frame_stack - 1, n):
+            index.append((i, t))
+
+    return per_frames, per_actions, per_returns, index
+
+
+def bc_pretrain(agent: "Agent", optim: Adam, traces: list[dict],
+                cfg: Config, device: torch.device) -> None:
+    """Cross-entropy on (obs, action). Optionally MSE on critic vs MC return.
+
+    Shares the PPO optimiser so Adam state carries over into the main loop.
+    """
+    per_frames, per_actions, per_returns, index = _build_bc_index(traces, cfg)
+    M = len(index)
+    if M == 0:
+        print("bc: no usable samples in traces; skipping", flush=True)
+        return
+
+    # Returns are in raw point units (~50..8000 in Digger). Regressing the
+    # critic on them with the default vf_coef=0.5 produces a v_loss that
+    # dwarfs the cross-entropy by ~4 orders of magnitude, so Adam learns the
+    # critic and basically ignores the actor. Train V against standardised
+    # targets, then absorb (mean, std) into the critic head so PPO sees a
+    # raw-scale predictor.
+    if cfg.bc_value:
+        sampled_at = np.array([per_returns[i][t] for i, t in index],
+                              dtype=np.float32)
+        ret_mean = float(sampled_at.mean())
+        ret_std = float(sampled_at.std()) + 1e-6
+        norm_returns = [(r - ret_mean) / ret_std for r in per_returns]
+    else:
+        ret_mean = 0.0
+        ret_std = 1.0
+        norm_returns = per_returns
+
+    extra = ""
+    if cfg.bc_value:
+        extra = f", +value head (returns N({ret_mean:.1f}, {ret_std:.1f}))"
+    print(f"bc: {M} samples from {len(traces)} traces "
+          f"({cfg.bc_epochs} epochs, batch={cfg.bc_batch_size}{extra})",
+          flush=True)
+
+    rng = np.random.default_rng(cfg.seed)
+
+    def sample_batch(idxs: np.ndarray):
+        # (B, stack, H, W) uint8 -> float32 on device
+        obs = np.empty(
+            (len(idxs), cfg.frame_stack, cfg.obs_size, cfg.obs_size),
+            dtype=np.uint8)
+        acts = np.empty(len(idxs), dtype=np.int64)
+        rets = np.empty(len(idxs), dtype=np.float32)
+        for j, ix in enumerate(idxs):
+            tr_i, t = index[ix]
+            obs[j] = per_frames[tr_i][t - cfg.frame_stack + 1: t + 1]
+            acts[j] = per_actions[tr_i][t]
+            rets[j] = norm_returns[tr_i][t]
+        obs_t = torch.from_numpy(obs).to(device).float().mul_(1.0 / 255.0)
+        acts_t = torch.from_numpy(acts).to(device)
+        rets_t = torch.from_numpy(rets).to(device)
+        return obs_t, acts_t, rets_t
+
+    for epoch in range(cfg.bc_epochs):
+        perm = rng.permutation(M)
+        ce_sum = 0.0
+        v_sum = 0.0
+        acc_sum = 0.0
+        nb = 0
+        for start in range(0, M, cfg.bc_batch_size):
+            mb = perm[start:start + cfg.bc_batch_size]
+            obs_t, acts_t, rets_t = sample_batch(mb)
+            z = agent.encode(obs_t)
+            logits = agent.actor(z)
+            ce = F.cross_entropy(logits, acts_t)
+            loss = ce
+            v_val = 0.0
+            if cfg.bc_value:
+                v = agent.critic(z).squeeze(-1)
+                v_loss = 0.5 * (v - rets_t).pow(2).mean()
+                loss = loss + cfg.vf_coef * v_loss
+                v_val = v_loss.item()
+            optim.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(agent.parameters(), cfg.max_grad_norm)
+            optim.step()
+            with torch.no_grad():
+                acc_sum += (logits.argmax(-1) == acts_t).float().mean().item()
+            ce_sum += ce.item()
+            v_sum += v_val
+            nb += 1
+        tail = f"  v_mse_norm {v_sum / nb:.3f}" if cfg.bc_value else ""
+        print(f"  bc epoch {epoch + 1}/{cfg.bc_epochs}  "
+              f"ce {ce_sum / nb:.3f}  acc {acc_sum / nb:.3f}{tail}",
+              flush=True)
+
+    # Absorb the (mean, std) normalisation into the critic's last linear so
+    # V outputs raw-scale returns from here on. V(s) = w·z + b learned to
+    # predict (G - mean)/std, so de-normalised V is std*(w·z + b) + mean.
+    if cfg.bc_value:
+        with torch.no_grad():
+            agent.critic.weight.mul_(ret_std)
+            agent.critic.bias.mul_(ret_std)
+            agent.critic.bias.add_(ret_mean)
+        print(f"  bc: rescaled critic head to raw return units "
+              f"(mul {ret_std:.2f}, add {ret_mean:.2f})", flush=True)
+
+
 def env_step_skipped(env: DiggerEnv, action: int, skip: int):
     """Hold action across `skip` emulator frames; return last obs + summed reward."""
     total_r = 0.0
@@ -184,6 +428,17 @@ def parse_args() -> Config:
                    help="linearly anneal entropy bonus toward this value over training")
     p.add_argument("--death-penalty", type=float, default=Config.death_penalty,
                    help="subtract this from reward on every life loss (default 0)")
+    p.add_argument("--bc-traces", type=str, nargs="+", default=[],
+                   help="one or more .npz playtraces from run_digger "
+                        "--record-playtrace; if set, BC-pretrain the actor "
+                        "before PPO starts")
+    p.add_argument("--bc-epochs", type=int, default=Config.bc_epochs,
+                   help="behavioural-cloning epochs over the traces (default 5)")
+    p.add_argument("--bc-batch-size", type=int, default=Config.bc_batch_size)
+    p.add_argument("--bc-value", action="store_true",
+                   help="also fit the critic on MC returns from the traces "
+                        "during BC pretrain (recommended; otherwise a random "
+                        "V can wipe out the BC policy on the first PPO update)")
     a = p.parse_args()
     return Config(
         total_timesteps=a.total_timesteps,
@@ -194,6 +449,8 @@ def parse_args() -> Config:
         clip_reward=a.clip_reward, episodic_life=a.episodic_life,
         ent_coef=a.ent_coef, ent_coef_final=a.ent_coef_final,
         death_penalty=a.death_penalty,
+        bc_traces=tuple(a.bc_traces), bc_epochs=a.bc_epochs,
+        bc_batch_size=a.bc_batch_size, bc_value=a.bc_value,
     )
 
 
@@ -214,6 +471,10 @@ def main() -> None:
     agent = Agent(num_actions=DiggerEnv.NUM_ACTIONS,
                   in_channels=cfg.frame_stack).to(device)
     optim = Adam(agent.parameters(), lr=cfg.learning_rate, eps=1e-5)
+
+    if cfg.bc_traces:
+        traces = _load_traces(cfg.bc_traces, cfg)
+        bc_pretrain(agent, optim, traces, cfg, device)
 
     # Rollout storage
     N = cfg.num_steps

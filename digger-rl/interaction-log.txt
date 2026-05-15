@@ -50,3 +50,14 @@
 [2026-05-14] Let's wait for completion
 [2026-05-14] I.e. when I tru to run run_ppo on ppo_digger_final.pt average scroe is 150
 [2026-05-14] Sure, let's try (2)
+[2026-05-14] Do you mind trying enablish JIT compilation but launch it as separate subprocess that communicates via shared memory or pipes (while training is running in the background)
+[2026-05-14] I don't want python to have this entitlement, but rather just having an executable (as dosbox does not need an entitlement does it?)
+[2026-05-14] Yes, you can do this in parallel with training, and let's use shm, and yes this is fine to run in the background with training, but may be let's name libraries differently based on whether DYNAREC is enabled or not
+[2026-05-14] Let's test how fast is tight loop in this library compared to jit vs nojit
+[2026-05-14] Can you add `MAP_JIT` to dosboxpure?
+[2026-05-14] Are you sure about that? Can you write a standalone .c file that have functions say foo and bar (that print different things) you mmap region with jit, copy content of foo there, and execute. Will it work?
+[2026-05-14] Good points, let's stash changes and do vec envs
+
+[2026-05-14 post-compact] So let's stash all the jit changes and focus on improving the training loop. Once again, what is wrong about training it from several play traces? Can you modify run_digger.py to add --record-playtrace and then may be add option to train_ppo to learn from those traces
+
+[2026-05-14] Let's do skip=8, and may be another change -  add ability to reset to the first level, because lots of traces I record are on levels 2 and 3 and ppo never trains to that one. Make R reset the emulator (but continue with traces)
