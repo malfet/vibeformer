@@ -51,7 +51,7 @@ class Config:
     ent_coef: float = 0.01
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
-    frame_skip: int = 8
+    frame_skip: int = 4
     frame_stack: int = 4
     obs_size: int = 84
     clip_reward: bool = False
@@ -66,10 +66,16 @@ class Config:
     bc_epochs: int = 5
     bc_batch_size: int = 64
     bc_value: bool = False
+    # BC anchor: per PPO minibatch, add bc_anchor_coef * CE(pi(s_demo), a_demo)
+    # to the loss. Keeps the policy close to demonstrations while PPO ramps up.
+    # Optionally annealed linearly toward bc_anchor_final.
+    bc_anchor_coef: float = 0.0
+    bc_anchor_final: float | None = None
     log_every: int = 1                # updates
     save_every: int = 50              # updates
     device: str = "auto"              # resolved by select_device()
     seed: int = 1
+    run_name: str = ""                # if set, checkpoints go to <CKPT>/run_name/
 
 
 def select_device(force_cpu: bool = False) -> torch.device:
@@ -283,19 +289,54 @@ def _build_bc_index(traces: list[dict], cfg: Config
         per_actions.append(actions)
         per_returns.append(returns)
         n = len(frames)
+        # Skip stacks that straddle an R-reset: the stack at index t covers
+        # frames [t-k+1..t], so a reset on any of (t-k+2)..t would mean
+        # pre-reset and post-reset frames are mixed in the same input window.
+        # resets[k] = True means a reset happened between sample k-1 and k.
+        skipped = 0
         for t in range(cfg.frame_stack - 1, n):
+            lo = max(0, t - cfg.frame_stack + 2)
+            if bool(resets[lo:t + 1].any()):
+                skipped += 1
+                continue
             index.append((i, t))
+        if skipped:
+            print(f"  bc: skipped {skipped} cross-reset stacks in trace {i}",
+                  flush=True)
 
     return per_frames, per_actions, per_returns, index
 
 
-def bc_pretrain(agent: "Agent", optim: Adam, traces: list[dict],
+def _bc_minibatch(per_frames: list[np.ndarray], per_actions: list[np.ndarray],
+                  per_returns: list[np.ndarray] | None,
+                  index: list[tuple[int, int]], idxs: np.ndarray,
+                  cfg: Config, device: torch.device,
+                  ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """Materialise a minibatch of (stacked_obs, action, return) from a BC index."""
+    bs = len(idxs)
+    obs = np.empty((bs, cfg.frame_stack, cfg.obs_size, cfg.obs_size),
+                   dtype=np.uint8)
+    acts = np.empty(bs, dtype=np.int64)
+    rets = np.empty(bs, dtype=np.float32) if per_returns is not None else None
+    for j, ix in enumerate(idxs):
+        ti, t = index[ix]
+        obs[j] = per_frames[ti][t - cfg.frame_stack + 1: t + 1]
+        acts[j] = per_actions[ti][t]
+        if rets is not None:
+            rets[j] = per_returns[ti][t]
+    obs_t = torch.from_numpy(obs).to(device).float().mul_(1.0 / 255.0)
+    acts_t = torch.from_numpy(acts).to(device)
+    rets_t = torch.from_numpy(rets).to(device) if rets is not None else None
+    return obs_t, acts_t, rets_t
+
+
+def bc_pretrain(agent: "Agent", optim: Adam, bc_data: tuple,
                 cfg: Config, device: torch.device) -> None:
     """Cross-entropy on (obs, action). Optionally MSE on critic vs MC return.
 
     Shares the PPO optimiser so Adam state carries over into the main loop.
     """
-    per_frames, per_actions, per_returns, index = _build_bc_index(traces, cfg)
+    per_frames, per_actions, per_returns, index = bc_data
     M = len(index)
     if M == 0:
         print("bc: no usable samples in traces; skipping", flush=True)
@@ -321,28 +362,10 @@ def bc_pretrain(agent: "Agent", optim: Adam, traces: list[dict],
     extra = ""
     if cfg.bc_value:
         extra = f", +value head (returns N({ret_mean:.1f}, {ret_std:.1f}))"
-    print(f"bc: {M} samples from {len(traces)} traces "
-          f"({cfg.bc_epochs} epochs, batch={cfg.bc_batch_size}{extra})",
-          flush=True)
+    print(f"bc: {M} samples ({cfg.bc_epochs} epochs, "
+          f"batch={cfg.bc_batch_size}{extra})", flush=True)
 
     rng = np.random.default_rng(cfg.seed)
-
-    def sample_batch(idxs: np.ndarray):
-        # (B, stack, H, W) uint8 -> float32 on device
-        obs = np.empty(
-            (len(idxs), cfg.frame_stack, cfg.obs_size, cfg.obs_size),
-            dtype=np.uint8)
-        acts = np.empty(len(idxs), dtype=np.int64)
-        rets = np.empty(len(idxs), dtype=np.float32)
-        for j, ix in enumerate(idxs):
-            tr_i, t = index[ix]
-            obs[j] = per_frames[tr_i][t - cfg.frame_stack + 1: t + 1]
-            acts[j] = per_actions[tr_i][t]
-            rets[j] = norm_returns[tr_i][t]
-        obs_t = torch.from_numpy(obs).to(device).float().mul_(1.0 / 255.0)
-        acts_t = torch.from_numpy(acts).to(device)
-        rets_t = torch.from_numpy(rets).to(device)
-        return obs_t, acts_t, rets_t
 
     for epoch in range(cfg.bc_epochs):
         perm = rng.permutation(M)
@@ -352,7 +375,8 @@ def bc_pretrain(agent: "Agent", optim: Adam, traces: list[dict],
         nb = 0
         for start in range(0, M, cfg.bc_batch_size):
             mb = perm[start:start + cfg.bc_batch_size]
-            obs_t, acts_t, rets_t = sample_batch(mb)
+            obs_t, acts_t, rets_t = _bc_minibatch(
+                per_frames, per_actions, norm_returns, index, mb, cfg, device)
             z = agent.encode(obs_t)
             logits = agent.actor(z)
             ce = F.cross_entropy(logits, acts_t)
@@ -439,6 +463,18 @@ def parse_args() -> Config:
                    help="also fit the critic on MC returns from the traces "
                         "during BC pretrain (recommended; otherwise a random "
                         "V can wipe out the BC policy on the first PPO update)")
+    p.add_argument("--bc-anchor-coef", type=float,
+                   default=Config.bc_anchor_coef,
+                   help="anchor weight for an extra CE(pi(s_demo), a_demo) "
+                        "loss added to every PPO minibatch (default 0 = off). "
+                        "Try 0.1-1.0 to keep PPO from drifting off BC.")
+    p.add_argument("--bc-anchor-final", type=float, default=None,
+                   help="if set, linearly anneal the BC anchor coef toward "
+                        "this value across training")
+    p.add_argument("--run-name", type=str, default="",
+                   help="subdir under data/checkpoints/ for this run; needed "
+                        "to run several train_ppo invocations in parallel "
+                        "without checkpoint filename collisions")
     a = p.parse_args()
     return Config(
         total_timesteps=a.total_timesteps,
@@ -451,6 +487,8 @@ def parse_args() -> Config:
         death_penalty=a.death_penalty,
         bc_traces=tuple(a.bc_traces), bc_epochs=a.bc_epochs,
         bc_batch_size=a.bc_batch_size, bc_value=a.bc_value,
+        bc_anchor_coef=a.bc_anchor_coef, bc_anchor_final=a.bc_anchor_final,
+        run_name=a.run_name,
     )
 
 
@@ -459,9 +497,11 @@ def main() -> None:
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
     device = torch.device(cfg.device)
-    CKPT_DIR.mkdir(parents=True, exist_ok=True)
+    ckpt_dir = CKPT_DIR / cfg.run_name if cfg.run_name else CKPT_DIR
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"device={device} cfg={cfg}", flush=True)
+    tag = f"[{cfg.run_name}] " if cfg.run_name else ""
+    print(f"{tag}device={device} cfg={cfg}", flush=True)
 
     env = DiggerEnv(max_steps=10**9,  # don't truncate during training
                     clip_reward=cfg.clip_reward,
@@ -472,9 +512,14 @@ def main() -> None:
                   in_channels=cfg.frame_stack).to(device)
     optim = Adam(agent.parameters(), lr=cfg.learning_rate, eps=1e-5)
 
+    bc_data = None
     if cfg.bc_traces:
         traces = _load_traces(cfg.bc_traces, cfg)
-        bc_pretrain(agent, optim, traces, cfg, device)
+        bc_data = _build_bc_index(traces, cfg)
+        if cfg.bc_epochs > 0:
+            bc_pretrain(agent, optim, bc_data, cfg, device)
+    anchor_active = bc_data is not None and cfg.bc_anchor_coef > 0
+    anchor_rng = np.random.default_rng(cfg.seed + 17)
 
     # Rollout storage
     N = cfg.num_steps
@@ -507,6 +552,11 @@ def main() -> None:
                                 + frac_remaining * (cfg.ent_coef - cfg.ent_coef_final))
         else:
             current_ent_coef = cfg.ent_coef
+        if cfg.bc_anchor_final is not None:
+            current_anchor = (cfg.bc_anchor_final
+                              + frac_remaining * (cfg.bc_anchor_coef - cfg.bc_anchor_final))
+        else:
+            current_anchor = cfg.bc_anchor_coef
 
         # ---- Rollout ----
         for step in range(N):
@@ -616,6 +666,17 @@ def main() -> None:
                 ent = entropy.mean()
                 loss = pg_loss - current_ent_coef * ent + cfg.vf_coef * v_loss
 
+                if anchor_active and current_anchor > 0:
+                    bc_M = len(bc_data[3])
+                    bc_idxs = anchor_rng.choice(
+                        bc_M, size=min(cfg.bc_batch_size, bc_M), replace=False)
+                    bc_obs, bc_acts, _ = _bc_minibatch(
+                        bc_data[0], bc_data[1], None, bc_data[3],
+                        bc_idxs, cfg, device)
+                    bc_logits = agent.actor(agent.encode(bc_obs))
+                    anchor_ce = F.cross_entropy(bc_logits, bc_acts)
+                    loss = loss + current_anchor * anchor_ce
+
                 optim.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(agent.parameters(), cfg.max_grad_norm)
@@ -632,11 +693,12 @@ def main() -> None:
             elapsed = time.monotonic() - t0
             sps = global_step / max(elapsed, 1e-6)
             lr_now = optim.param_groups[0]["lr"]
-            print(f"upd {update:>4d}  step {global_step:>8d}  "
+            anchor_tag = f"  anchor {current_anchor:.3f}" if anchor_active else ""
+            print(f"{tag}upd {update:>4d}  step {global_step:>8d}  "
                   f"pg {pg_loss.item():+.3f}  v {v_loss.item():.3f}  "
                   f"ent {ent.item():.3f}  clip {np.mean(clipfracs):.3f}  "
                   f"avg_ret {avg_ret:.1f}  lr {lr_now:.2e}  "
-                  f"entc {current_ent_coef:.3f}  sps {sps:.0f}",
+                  f"entc {current_ent_coef:.3f}{anchor_tag}  sps {sps:.0f}",
                   flush=True)
             print(f"     buf: ent_mean {ent_buf_mean:.2f}  ent_p10 {ent_buf_p10:.2f}  "
                   f"spread {spread_mean:5.2f}  top_a {top_act_idx}@{top_act_frac:.0%}",
@@ -646,16 +708,16 @@ def main() -> None:
                       flush=True)
 
         if cfg.save_every and update % cfg.save_every == 0:
-            ckpt = CKPT_DIR / f"ppo_digger_step{global_step:08d}.pt"
+            ckpt = ckpt_dir / f"ppo_digger_step{global_step:08d}.pt"
             torch.save({"agent": agent.state_dict(), "step": global_step,
                         "config": cfg.__dict__}, ckpt)
-            print(f"  saved {ckpt}", flush=True)
+            print(f"{tag}  saved {ckpt}", flush=True)
 
     env.close()
-    final = CKPT_DIR / "ppo_digger_final.pt"
+    final = ckpt_dir / "ppo_digger_final.pt"
     torch.save({"agent": agent.state_dict(), "step": global_step,
                 "config": cfg.__dict__}, final)
-    print(f"done. final checkpoint {final}", flush=True)
+    print(f"{tag}done. final checkpoint {final}", flush=True)
 
 
 if __name__ == "__main__":

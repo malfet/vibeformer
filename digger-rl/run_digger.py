@@ -163,7 +163,7 @@ def run_headless(core, frames: int) -> None:
 
 
 def run_live(core, record_path: Path | None = None,
-             frame_skip: int = 8, obs_size: int = 84) -> None:
+             frame_skip: int = 4, obs_size: int = 84) -> None:
     import matplotlib.pyplot as plt
 
     target_fps = core.get_av_info()[4] or 70.0
@@ -344,9 +344,9 @@ def main():
     p.add_argument("--record-playtrace", type=Path, default=None,
                    help="while in --live, snapshot every frame_skip emulator "
                         "frames and save to this .npz path on exit")
-    p.add_argument("--frame-skip", type=int, default=8,
+    p.add_argument("--frame-skip", type=int, default=4,
                    help="emulator frames per recorded sample (must match the "
-                        "frame_skip used in train_ppo; default 8)")
+                        "frame_skip used in train_ppo; default 4)")
     p.add_argument("--obs-size", type=int, default=84,
                    help="recorded frame resolution; matches train_ppo obs_size")
     args = p.parse_args()

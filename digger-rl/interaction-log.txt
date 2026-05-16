@@ -61,3 +61,29 @@
 [2026-05-14 post-compact] So let's stash all the jit changes and focus on improving the training loop. Once again, what is wrong about training it from several play traces? Can you modify run_digger.py to add --record-playtrace and then may be add option to train_ppo to learn from those traces
 
 [2026-05-14] Let's do skip=8, and may be another change -  add ability to reset to the first level, because lots of traces I record are on levels 2 and 3 and ppo never trains to that one. Make R reset the emulator (but continue with traces)
+
+[2026-05-14] let's try 1
+
+[2026-05-15] Hmm, pressing 'R' button resulted in AttributeError: 'NoneType' object has no attribute 'read_memory_region'
+
+[2026-05-15] And commit work in progress
+
+[2026-05-15] Ok, Let's try the new tracefile
+
+[2026-05-15] let's try 1
+
+[2026-05-15] Sure, I can record more traces, but do you think 8 frames is the right decision, or should we go back to 4?
+
+[2026-05-15] Yes, let's go back to 4
+
+[2026-05-15] Why I'm collecting trace, can you try thinking of the ways to start multiple training experiments in parallel, with different parameters (as right now we are neither CPU nor GPU bound, as emulator is single threaded process)
+
+[2026-05-15] No need to do the script, but check the trace, does it have enough samples
+
+[2026-05-15] I can start trace2 in the meantime
+
+[2026-05-15] Can you try both - skip cross-boundary stacks, run the experiments and in the men time start working on BC anchros loss and run another experiment. And may be third experiment would be to train on the given traces for a few more epochs, before starting regular search
+
+[2026-05-15] Also, I have a trace2, you can try combining those
+
+[2026-05-16] do (1) and (2) in parallel
