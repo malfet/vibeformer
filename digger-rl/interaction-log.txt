@@ -87,3 +87,23 @@
 [2026-05-15] Also, I have a trace2, you can try combining those
 
 [2026-05-16] do (1) and (2) in parallel
+
+[2026-05-16] Hmm, can you run ppo without visualization and just analyze it's steps before it reaches game over
+
+[2026-05-16] Without stochastics it just drives to the left
+
+[2026-05-16] Commit this anyway
+
+[2026-05-16] Can you help me summarize, where are we now in terms of progress towards trianing a playable game?
+
+[2026-05-16] Let's try exp4 with a longer training loop and see what will happen
+
+[2026-05-16] While you at it: any way to modify run_ppo or play_digger to switch focus to matplotlib window rather than keep it on console? Or redirect console input to matplotlib as well? Because right now I need to switch to a window for `q` key etc to work
+
+[2026-05-16] Hmm, I still don't see an intelegient behavior from the network.. Perhaps network needs to be deeper?
+
+[2026-05-16] Or should we try restarting from a certain steps
+
+[2026-05-16] Sure, let's do that, but also let's start sketching vectorized architecture
+
+[2026-05-16] Also, undo the change that tried to change focuse of the Windows, as it clearly didn't work

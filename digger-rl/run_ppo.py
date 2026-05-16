@@ -54,8 +54,10 @@ def main():
     device = select_device(args.force_cpu)
 
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    width = int(ckpt.get("config", {}).get("encoder_width", 1))
     agent = Agent(num_actions=DiggerEnv.NUM_ACTIONS,
-                  in_channels=args.frame_stack).to(device)
+                  in_channels=args.frame_stack,
+                  width=width).to(device)
     agent.load_state_dict(ckpt["agent"])
     agent.eval()
     step_trained = ckpt.get("step", "?")

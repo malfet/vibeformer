@@ -54,6 +54,7 @@ class Config:
     frame_skip: int = 4
     frame_stack: int = 4
     obs_size: int = 84
+    encoder_width: int = 1            # NatureCNN width multiplier; 2 = ~4x params
     clip_reward: bool = False
     episodic_life: bool = False
     death_penalty: float = 0.0
@@ -101,19 +102,26 @@ def layer_init(layer: nn.Module, std: float = np.sqrt(2),
 
 
 class Agent(nn.Module):
-    """NatureCNN trunk + linear actor / critic heads."""
+    """NatureCNN trunk + linear actor / critic heads.
 
-    def __init__(self, num_actions: int, in_channels: int = 4):
+    `width` linearly scales conv channels (32->32w, 64->64w) and the FC
+    bottleneck (512->512w). width=1 is the classic NatureCNN (~1.7M params);
+    width=2 is ~6M params and substantially more representation capacity.
+    """
+
+    def __init__(self, num_actions: int, in_channels: int = 4, width: int = 1):
         super().__init__()
+        c1, c2, c3, fc = 32 * width, 64 * width, 64 * width, 512 * width
+        self.width = width
         self.encoder = nn.Sequential(
-            layer_init(nn.Conv2d(in_channels, 32, 8, stride=4)), nn.ReLU(),
-            layer_init(nn.Conv2d(32, 64, 4, stride=2)), nn.ReLU(),
-            layer_init(nn.Conv2d(64, 64, 3, stride=1)), nn.ReLU(),
+            layer_init(nn.Conv2d(in_channels, c1, 8, stride=4)), nn.ReLU(),
+            layer_init(nn.Conv2d(c1, c2, 4, stride=2)), nn.ReLU(),
+            layer_init(nn.Conv2d(c2, c3, 3, stride=1)), nn.ReLU(),
             nn.Flatten(),
-            layer_init(nn.Linear(64 * 7 * 7, 512)), nn.ReLU(),
+            layer_init(nn.Linear(c3 * 7 * 7, fc)), nn.ReLU(),
         )
-        self.actor = layer_init(nn.Linear(512, num_actions), std=0.01)
-        self.critic = layer_init(nn.Linear(512, 1), std=1.0)
+        self.actor = layer_init(nn.Linear(fc, num_actions), std=0.01)
+        self.critic = layer_init(nn.Linear(fc, 1), std=1.0)
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         return self.encoder(x)
@@ -471,6 +479,9 @@ def parse_args() -> Config:
     p.add_argument("--bc-anchor-final", type=float, default=None,
                    help="if set, linearly anneal the BC anchor coef toward "
                         "this value across training")
+    p.add_argument("--encoder-width", type=int, default=Config.encoder_width,
+                   help="NatureCNN channel/FC width multiplier (default 1 = "
+                        "~1.7M params; 2 = ~6M params for richer encoder)")
     p.add_argument("--run-name", type=str, default="",
                    help="subdir under data/checkpoints/ for this run; needed "
                         "to run several train_ppo invocations in parallel "
@@ -488,7 +499,7 @@ def parse_args() -> Config:
         bc_traces=tuple(a.bc_traces), bc_epochs=a.bc_epochs,
         bc_batch_size=a.bc_batch_size, bc_value=a.bc_value,
         bc_anchor_coef=a.bc_anchor_coef, bc_anchor_final=a.bc_anchor_final,
-        run_name=a.run_name,
+        encoder_width=a.encoder_width, run_name=a.run_name,
     )
 
 
@@ -509,7 +520,10 @@ def main() -> None:
                     death_penalty=cfg.death_penalty)
     stack = FrameStack(k=cfg.frame_stack, size=cfg.obs_size)
     agent = Agent(num_actions=DiggerEnv.NUM_ACTIONS,
-                  in_channels=cfg.frame_stack).to(device)
+                  in_channels=cfg.frame_stack,
+                  width=cfg.encoder_width).to(device)
+    n_params = sum(p.numel() for p in agent.parameters())
+    print(f"{tag}agent: width={cfg.encoder_width}, params={n_params:,}", flush=True)
     optim = Adam(agent.parameters(), lr=cfg.learning_rate, eps=1e-5)
 
     bc_data = None
