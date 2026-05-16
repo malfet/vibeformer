@@ -187,6 +187,45 @@ class MLPHead(nn.Module):
         return y
 
 
+# -------- Actor / Critic (operate on RSSM feature) --------------------------
+
+class Actor(nn.Module):
+    """Categorical policy over discrete actions.
+
+    Feature is the concatenation of deterministic h and stochastic z. We use
+    a small MLP head -> logits -> Categorical. Discrete actions = REINFORCE
+    in the imagined-rollout loss (with critic baseline).
+    """
+
+    def __init__(self, cfg: DreamerConfig):
+        super().__init__()
+        feat_dim = cfg.deter_dim + cfg.stoch_dim
+        self.net = nn.Sequential(
+            nn.Linear(feat_dim, cfg.hidden_dim), nn.SiLU(),
+            nn.Linear(cfg.hidden_dim, cfg.hidden_dim), nn.SiLU(),
+            nn.Linear(cfg.hidden_dim, cfg.num_actions),
+        )
+
+    def forward(self, feature: torch.Tensor) -> torch.distributions.Categorical:
+        return torch.distributions.Categorical(logits=self.net(feature))
+
+
+class Critic(nn.Module):
+    """V(feature) -> scalar lambda-return target."""
+
+    def __init__(self, cfg: DreamerConfig):
+        super().__init__()
+        feat_dim = cfg.deter_dim + cfg.stoch_dim
+        self.net = nn.Sequential(
+            nn.Linear(feat_dim, cfg.hidden_dim), nn.SiLU(),
+            nn.Linear(cfg.hidden_dim, cfg.hidden_dim), nn.SiLU(),
+            nn.Linear(cfg.hidden_dim, 1),
+        )
+
+    def forward(self, feature: torch.Tensor) -> torch.Tensor:
+        return self.net(feature).squeeze(-1)
+
+
 # -------- Full world model ---------------------------------------------------
 
 class WorldModel(nn.Module):
@@ -201,7 +240,33 @@ class WorldModel(nn.Module):
         self.continue_head = MLPHead(feat_dim, cfg.hidden_dim,
                                      activation="sigmoid")
 
-    def loss(self, obs, actions, rewards, continues):
+    def observe(self, obs, actions):
+        """Run encoder + RSSM observe steps; return (h_seq, z_seq, prior, post).
+
+        h_seq, z_seq: (B, T, ...) latent trajectories (gradient-tracked).
+        prior_dists, post_dists: lists of length T of Independent Normals;
+        used by the caller to compute KL.
+        """
+        B, T = obs.shape[:2]
+        device = obs.device
+        cfg = self.cfg
+        embed = self.encoder(obs)
+        actions_oh = F.one_hot(actions, num_classes=cfg.num_actions).float()
+
+        h, z = self.rssm.initial(B, device)
+        h_seq, z_seq, priors, posts = [], [], [], []
+        for t in range(T):
+            h, z, prior, post = self.rssm.observe_step(
+                h, z, actions_oh[:, t], embed[:, t])
+            h_seq.append(h)
+            z_seq.append(z)
+            priors.append(prior)
+            posts.append(post)
+        h_seq = torch.stack(h_seq, dim=1)
+        z_seq = torch.stack(z_seq, dim=1)
+        return h_seq, z_seq, priors, posts
+
+    def loss(self, obs, actions, rewards, continues, return_latents: bool = False):
         """Compute world model loss on a batch of trajectories.
 
         obs:        (B, T, 3, H, W) float in [0, 1]
@@ -209,47 +274,39 @@ class WorldModel(nn.Module):
         rewards:    (B, T) float
         continues:  (B, T) float in [0, 1]   (1.0 = episode continues)
 
-        Returns: dict of scalar losses; total in `total`.
+        Returns: dict of scalar losses; total in `total`. If return_latents,
+        also returns (h_seq, z_seq) so caller can use them as imagination
+        start states for the actor-critic phase.
         """
-        B, T = obs.shape[:2]
-        device = obs.device
         cfg = self.cfg
+        h_seq, z_seq, priors, posts = self.observe(obs, actions)
+        feats = torch.cat([h_seq, z_seq], dim=-1)
 
-        embed = self.encoder(obs)                          # (B, T, embed_dim)
-        actions_oh = F.one_hot(actions, num_classes=cfg.num_actions).float()
-
-        h, z = self.rssm.initial(B, device)
-        feats, kls = [], []
-        for t in range(T):
-            h, z, prior, post = self.rssm.observe_step(
-                h, z, actions_oh[:, t], embed[:, t])
-            feats.append(self.rssm.feature(h, z))
-            # KL with free bits (per-dim threshold so trivial dims aren't
-            # punished into a tight prior match).
-            kl = torch.distributions.kl_divergence(post, prior)
-            kl = kl.clamp(min=cfg.kl_free_nats)
-            kls.append(kl)
-        feats = torch.stack(feats, dim=1)                  # (B, T, feat_dim)
-        kls = torch.stack(kls, dim=1)
-
-        # Reconstruction loss (per-pixel MSE)
-        recon = self.decoder(feats)                        # (B, T, 3, H, W)
+        recon = self.decoder(feats)
         recon_loss = F.mse_loss(recon, obs)
 
-        # Reward and continue prediction
-        pred_reward = self.reward_head(feats)              # (B, T)
-        pred_continue = self.continue_head(feats)          # (B, T)
-        reward_loss = F.mse_loss(pred_reward,
-                                 rewards.clamp(-cfg.reward_clip, cfg.reward_clip))
+        pred_reward = self.reward_head(feats)
+        pred_continue = self.continue_head(feats)
+        reward_loss = F.mse_loss(
+            pred_reward, rewards.clamp(-cfg.reward_clip, cfg.reward_clip))
         continue_loss = F.binary_cross_entropy(
             pred_continue.clamp(1e-6, 1.0 - 1e-6), continues)
 
-        kl_loss = kls.mean()
+        # KL with free bits (per-dim threshold).
+        kls = []
+        for prior, post in zip(priors, posts):
+            kl = torch.distributions.kl_divergence(post, prior)
+            kls.append(kl.clamp(min=cfg.kl_free_nats))
+        kl_loss = torch.stack(kls, dim=1).mean()
+
         total = recon_loss + reward_loss + continue_loss + kl_loss
-        return {
+        losses = {
             "total": total,
             "recon": recon_loss,
             "reward": reward_loss,
             "continue": continue_loss,
             "kl": kl_loss,
         }
+        if return_latents:
+            return losses, h_seq, z_seq
+        return losses
