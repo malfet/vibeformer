@@ -131,3 +131,7 @@
 [2026-05-16] About rewards, should one try giving small reward for staying alive? I.e. just being alive, without collecting diamonds is already a success?
 
 [2026-05-16] Sure, continue with phase 2. But can you also add `run_dreamer.py` so that one can observe the behavior on a real playthrough?
+
+[2026-05-16] start phase 3
+
+[2026-05-16] Hmm, why are you using `np.empty` rather than torch.empty?

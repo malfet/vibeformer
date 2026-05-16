@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -310,3 +311,78 @@ class WorldModel(nn.Module):
         if return_latents:
             return losses, h_seq, z_seq
         return losses
+
+
+# -------- Replay buffer ------------------------------------------------------
+
+class ReplayBuffer:
+    """Per-env circular buffer of (obs, action, reward, done) transitions.
+
+    Layout is (num_envs, capacity, ...). We sample length-T subsequences from
+    a single env at random start positions; subsequences are allowed to cross
+    done flags (the trainer learns the boundary from `continues=0` there).
+
+    obs are stored as uint8 to keep memory in check. With capacity=20_000
+    and num_envs=4 at (3, 64, 64): ~1 GB. Halve capacity if needed.
+    """
+
+    def __init__(self, capacity: int, num_envs: int,
+                 obs_shape: tuple[int, ...]):
+        self.capacity = capacity
+        self.num_envs = num_envs
+        self.obs_shape = obs_shape
+        self.obs = np.zeros((num_envs, capacity, *obs_shape), dtype=np.uint8)
+        self.actions = np.zeros((num_envs, capacity), dtype=np.int64)
+        self.rewards = np.zeros((num_envs, capacity), dtype=np.float32)
+        self.dones = np.zeros((num_envs, capacity), dtype=bool)
+        self.idx = 0       # next write index (per env)
+        self.full = False  # has the buffer wrapped at least once
+
+    def add(self, obs: np.ndarray, actions: np.ndarray,
+            rewards: np.ndarray, dones: np.ndarray) -> None:
+        i = self.idx
+        self.obs[:, i] = obs
+        self.actions[:, i] = actions
+        self.rewards[:, i] = rewards
+        self.dones[:, i] = dones
+        self.idx = (i + 1) % self.capacity
+        if self.idx == 0:
+            self.full = True
+
+    def __len__(self) -> int:
+        return self.capacity if self.full else self.idx
+
+    def sample(self, batch_size: int, seq_length: int,
+               device: torch.device, rng) -> tuple:
+        """Return (obs, actions, rewards, continues) sequences ready for the WM.
+
+        Avoids sampling a sub-sequence that crosses the write head when the
+        buffer is full (otherwise we'd mix the oldest and newest data
+        non-causally). When the buffer isn't yet full, sample only from the
+        contiguous [0, idx) region.
+        """
+        n = len(self)
+        max_start = n - seq_length
+        if max_start <= 0:
+            raise ValueError(
+                f"buffer has {n} samples, need >= {seq_length}")
+        envs = rng.integers(self.num_envs, size=batch_size)
+        starts = rng.integers(0, max_start + 1, size=batch_size)
+
+        obs = np.empty((batch_size, seq_length, *self.obs_shape), dtype=np.uint8)
+        act = np.empty((batch_size, seq_length), dtype=np.int64)
+        rew = np.empty((batch_size, seq_length), dtype=np.float32)
+        don = np.empty((batch_size, seq_length), dtype=bool)
+        for i in range(batch_size):
+            e, s = int(envs[i]), int(starts[i])
+            obs[i] = self.obs[e, s:s + seq_length]
+            act[i] = self.actions[e, s:s + seq_length]
+            rew[i] = self.rewards[e, s:s + seq_length]
+            don[i] = self.dones[e, s:s + seq_length]
+
+        cont = 1.0 - don.astype(np.float32)
+        obs_t = torch.from_numpy(obs).to(device).float().mul_(1.0 / 255.0)
+        return (obs_t,
+                torch.from_numpy(act).to(device),
+                torch.from_numpy(rew).to(device),
+                torch.from_numpy(cont).to(device))
