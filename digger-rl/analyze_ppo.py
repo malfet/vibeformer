@@ -23,9 +23,9 @@ from train_ppo import Agent, select_device
 
 env_step_skipped = _env_step_skipped
 
-def preprocess(rgba, size=84):
-    """Float32 grayscale 84x84 in [0,1]."""
-    return preprocess_uint8(rgba, size).astype(np.float32) * (1.0 / 255.0)
+def preprocess(rgba, size=84, color=False):
+    """Float32 84x84 in [0,1]; grayscale by default."""
+    return preprocess_uint8(rgba, size, color).astype(np.float32) * (1.0 / 255.0)
 
 ACTION_NAMES = ["NOOP", "LEFT", "RIGHT", "UP", "DOWN", "FIRE"]
 
@@ -48,10 +48,12 @@ def main() -> None:
     device = select_device(args.force_cpu)
 
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
-    width = int(ckpt.get("config", {}).get("encoder_width", 1))
+    ckpt_cfg = ckpt.get("config", {})
+    width = int(ckpt_cfg.get("encoder_width", 1))
+    color = bool(ckpt_cfg.get("color", False))
+    in_ch = args.frame_stack * (3 if color else 1)
     agent = Agent(num_actions=DiggerEnv.NUM_ACTIONS,
-                  in_channels=args.frame_stack,
-                  width=width).to(device)
+                  in_channels=in_ch, width=width).to(device)
     agent.load_state_dict(ckpt["agent"])
     agent.eval()
     step_trained = ckpt.get("step", "?")
@@ -64,9 +66,9 @@ def main() -> None:
     env = DiggerEnv(max_steps=10**6)
 
     for ep in range(args.episodes):
-        stack = FrameStack(k=args.frame_stack, size=args.obs_size)
+        stack = FrameStack(k=args.frame_stack, size=args.obs_size, color=color)
         raw = env.reset()
-        obs = stack.reset(preprocess(raw, args.obs_size))
+        obs = stack.reset(preprocess(raw, args.obs_size, color))
 
         action_counts = [0] * DiggerEnv.NUM_ACTIONS
         ent_sum = 0.0
@@ -133,7 +135,7 @@ def main() -> None:
             game_over = seen_alive and lives == 0
             if game_over or done:
                 break
-            obs = stack.push(preprocess(raw, args.obs_size))
+            obs = stack.push(preprocess(raw, args.obs_size, color))
 
         print(f"=== Episode {ep + 1}: ended at step {step_no}, "
               f"final score {info['score']}, lives {info['lives']} ===")

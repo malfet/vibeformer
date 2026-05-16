@@ -22,12 +22,11 @@ from digger_env import (
 )
 from train_ppo import Agent, select_device
 
-# Convenience local wrappers to keep the old single-env loop concise.
 env_step_skipped = _env_step_skipped
 
-def preprocess(rgba, size=84):
-    """Float32 grayscale 84x84 in [0,1] (for direct float-tensor feed)."""
-    return preprocess_uint8(rgba, size).astype(np.float32) * (1.0 / 255.0)
+def preprocess(rgba, size=84, color=False):
+    """Float32 84x84 in [0,1]; grayscale by default, RGB if color=True."""
+    return preprocess_uint8(rgba, size, color).astype(np.float32) * (1.0 / 255.0)
 
 _ACTION_NAMES = {
     DiggerEnv.NOOP:  "noop ",
@@ -63,10 +62,12 @@ def main():
     device = select_device(args.force_cpu)
 
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
-    width = int(ckpt.get("config", {}).get("encoder_width", 1))
+    ckpt_cfg = ckpt.get("config", {})
+    width = int(ckpt_cfg.get("encoder_width", 1))
+    color = bool(ckpt_cfg.get("color", False))
+    in_ch = args.frame_stack * (3 if color else 1)
     agent = Agent(num_actions=DiggerEnv.NUM_ACTIONS,
-                  in_channels=args.frame_stack,
-                  width=width).to(device)
+                  in_channels=in_ch, width=width).to(device)
     agent.load_state_dict(ckpt["agent"])
     agent.eval()
     step_trained = ckpt.get("step", "?")
@@ -77,10 +78,10 @@ def main():
     import matplotlib.pyplot as plt
 
     env = DiggerEnv()
-    stack = FrameStack(k=args.frame_stack, size=args.obs_size)
+    stack = FrameStack(k=args.frame_stack, size=args.obs_size, color=color)
 
     raw = env.reset()
-    obs = stack.reset(preprocess(raw, args.obs_size))
+    obs = stack.reset(preprocess(raw, args.obs_size, color))
 
     target_fps = 70.087
     target_dt = (1.0 / target_fps) * args.frame_skip  # real-time pacing
@@ -165,11 +166,11 @@ def main():
             if episodes_done >= args.episodes:
                 break
             raw = env.reset()
-            obs = stack.reset(preprocess(raw, args.obs_size))
+            obs = stack.reset(preprocess(raw, args.obs_size, color))
             seen_alive = False
             step_no = 0
         else:
-            obs = stack.push(preprocess(raw, args.obs_size))
+            obs = stack.push(preprocess(raw, args.obs_size, color))
 
         # Pace to real-time so it's watchable
         slack = target_dt - (time.monotonic() - now)

@@ -55,6 +55,7 @@ class Config:
     frame_skip: int = 4
     frame_stack: int = 4
     obs_size: int = 84
+    color: bool = False               # if True, feed RGB (3*frame_stack channels)
     encoder_width: int = 1            # NatureCNN width multiplier; 2 = ~4x params
     clip_reward: bool = False
     episodic_life: bool = False
@@ -176,9 +177,17 @@ def _load_traces(paths: tuple[str, ...], cfg: Config) -> list[dict]:
         raw = np.load(p)
         fs = int(raw["frame_skip"])
         os_ = int(raw["obs_size"])
+        # Traces predating the color flag are grayscale; we also disambiguate
+        # by the stored frame shape just in case.
+        trace_color = bool(raw["color"]) if "color" in raw.files \
+            else (raw["frames"].ndim == 4)
         if os_ != cfg.obs_size:
             raise ValueError(
                 f"{p}: trace obs_size={os_} but trainer uses {cfg.obs_size}")
+        if trace_color != cfg.color:
+            raise ValueError(
+                f"{p}: trace color={trace_color} but trainer color={cfg.color}; "
+                "record traces with matching --color setting")
         # Traces predating the R-reset feature won't carry a `resets` array;
         # default to all-False (no resets recorded).
         if "resets" in raw.files:
@@ -292,15 +301,24 @@ def _bc_minibatch(per_frames: list[np.ndarray], per_actions: list[np.ndarray],
                   index: list[tuple[int, int]], idxs: np.ndarray,
                   cfg: Config, device: torch.device,
                   ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    """Materialise a minibatch of (stacked_obs, action, return) from a BC index."""
+    """Materialise a minibatch of (stacked_obs, action, return) from a BC index.
+
+    Channel layout matches FrameStack: frame_stack for gray, frame_stack*3
+    for color (RGB triplets laid out frame-by-frame).
+    """
     bs = len(idxs)
-    obs = np.empty((bs, cfg.frame_stack, cfg.obs_size, cfg.obs_size),
-                   dtype=np.uint8)
+    channels = cfg.frame_stack * (3 if cfg.color else 1)
+    obs = np.empty((bs, channels, cfg.obs_size, cfg.obs_size), dtype=np.uint8)
     acts = np.empty(bs, dtype=np.int64)
     rets = np.empty(bs, dtype=np.float32) if per_returns is not None else None
     for j, ix in enumerate(idxs):
         ti, t = index[ix]
-        obs[j] = per_frames[ti][t - cfg.frame_stack + 1: t + 1]
+        win = per_frames[ti][t - cfg.frame_stack + 1: t + 1]
+        if cfg.color:
+            # (stack_k, H, W, 3) -> (stack_k*3, H, W)
+            win = win.transpose(0, 3, 1, 2).reshape(
+                channels, cfg.obs_size, cfg.obs_size)
+        obs[j] = win
         acts[j] = per_actions[ti][t]
         if rets is not None:
             rets[j] = per_returns[ti][t]
@@ -439,6 +457,10 @@ def parse_args() -> Config:
     p.add_argument("--encoder-width", type=int, default=Config.encoder_width,
                    help="NatureCNN channel/FC width multiplier (default 1 = "
                         "~1.7M params; 2 = ~6M params for richer encoder)")
+    p.add_argument("--color", action="store_true",
+                   help="feed RGB to the encoder (3*frame_stack channels) "
+                        "instead of grayscale; requires traces recorded with "
+                        "--color if combined with --bc-traces")
     p.add_argument("--run-name", type=str, default="",
                    help="subdir under data/checkpoints/ for this run; needed "
                         "to run several train_ppo invocations in parallel "
@@ -457,7 +479,7 @@ def parse_args() -> Config:
         bc_traces=tuple(a.bc_traces), bc_epochs=a.bc_epochs,
         bc_batch_size=a.bc_batch_size, bc_value=a.bc_value,
         bc_anchor_coef=a.bc_anchor_coef, bc_anchor_final=a.bc_anchor_final,
-        encoder_width=a.encoder_width, run_name=a.run_name,
+        color=a.color, encoder_width=a.encoder_width, run_name=a.run_name,
     )
 
 
@@ -477,12 +499,14 @@ def main() -> None:
                       death_penalty=cfg.death_penalty)
     vec = DiggerVecEnv(num_envs=cfg.num_envs, frame_skip=cfg.frame_skip,
                        frame_stack=cfg.frame_stack, obs_size=cfg.obs_size,
-                       env_kwargs=env_kwargs)
+                       color=cfg.color, env_kwargs=env_kwargs)
+    in_ch = cfg.frame_stack * (3 if cfg.color else 1)
     agent = Agent(num_actions=DiggerEnv.NUM_ACTIONS,
-                  in_channels=cfg.frame_stack,
+                  in_channels=in_ch,
                   width=cfg.encoder_width).to(device)
     n_params = sum(p.numel() for p in agent.parameters())
-    print(f"{tag}agent: width={cfg.encoder_width}, params={n_params:,}  "
+    print(f"{tag}agent: width={cfg.encoder_width}, in_ch={in_ch} "
+          f"({'color' if cfg.color else 'gray'}), params={n_params:,}  "
           f"num_envs={cfg.num_envs}", flush=True)
     optim = Adam(agent.parameters(), lr=cfg.learning_rate, eps=1e-5)
 
@@ -498,7 +522,7 @@ def main() -> None:
     # Rollout storage: (N, B, ...) so we can stack per-env trajectories,
     # then flatten to (N*B, ...) for minibatch sampling.
     N, B = cfg.num_steps, cfg.num_envs
-    obs_buf = torch.zeros(N, B, cfg.frame_stack, cfg.obs_size, cfg.obs_size, device=device)
+    obs_buf = torch.zeros(N, B, in_ch, cfg.obs_size, cfg.obs_size, device=device)
     act_buf = torch.zeros(N, B, dtype=torch.long, device=device)
     logp_buf = torch.zeros(N, B, device=device)
     rew_buf = torch.zeros(N, B, device=device)

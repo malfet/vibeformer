@@ -113,3 +113,5 @@
 [2026-05-16] Yes, let's integrate it with train_ppo , but also try to keep the implementation more compact. And does it need to be a a new env, can't the same digger_env just have two modes - in-process and in-subprocess?
 
 [2026-05-16] Also, have you now training using color input images (but still downscaled) or grayscale ones?
+
+[2026-05-16] Sure

@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 
 import _libretro
-from digger_env import DiggerEnv
+from digger_env import DiggerEnv, preprocess_uint8
 
 REPO = Path(__file__).parent.resolve()
 CORE = REPO / "vendor" / "dosbox-pure" / "dosbox_pure_libretro.dylib"
@@ -103,22 +103,6 @@ def dominant_action(held_order: list[int]) -> int:
     return DiggerEnv.NOOP
 
 
-def preprocess_uint8(frame_rgba: np.ndarray, size: int = 84) -> np.ndarray:
-    """raw (H, W, 4) RGBA uint8 -> (size, size) uint8 grayscale.
-
-    Byte-identical (modulo /255 normalisation at load) to train_ppo.preprocess
-    so trace frames match what the policy sees during PPO. Imports torch
-    lazily so the headless code path doesn't pay the import cost.
-    """
-    import torch
-    import torch.nn.functional as F
-    rgb = frame_rgba[..., :3].astype(np.float32) * (1.0 / 255.0)
-    gray = 0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2]
-    t = torch.from_numpy(gray)[None, None]
-    t = F.interpolate(t, size=(size, size), mode="area")
-    return (t[0, 0].numpy() * 255.0).clip(0, 255).astype(np.uint8)
-
-
 def init_core() -> "_libretro.LibretroCore":
     SYS_DIR.mkdir(parents=True, exist_ok=True)
     SAVE_DIR.mkdir(parents=True, exist_ok=True)
@@ -163,7 +147,8 @@ def run_headless(core, frames: int) -> None:
 
 
 def run_live(core, record_path: Path | None = None,
-             frame_skip: int = 4, obs_size: int = 84) -> None:
+             frame_skip: int = 4, obs_size: int = 84,
+             color: bool = False) -> None:
     import matplotlib.pyplot as plt
 
     target_fps = core.get_av_info()[4] or 70.0
@@ -265,7 +250,7 @@ def run_live(core, record_path: Path | None = None,
                 window_reward += float(score_now - prev_score)
                 prev_score = score_now
                 if sub_counter >= frame_skip:
-                    rec_frames.append(preprocess_uint8(core.get_frame(), obs_size))
+                    rec_frames.append(preprocess_uint8(core.get_frame(), obs_size, color))
                     rec_actions.append(dominant_action(held_order))
                     rec_rewards.append(window_reward)
                     rec_scores.append(score_now)
@@ -309,14 +294,16 @@ def run_live(core, record_path: Path | None = None,
 
     if record_path is not None and rec_frames:
         save_trace(record_path, rec_frames, rec_actions, rec_rewards,
-                   rec_scores, rec_lives, rec_resets, frame_skip, obs_size)
+                   rec_scores, rec_lives, rec_resets, frame_skip, obs_size,
+                   color)
     elif record_path is not None:
         print(f"No frames recorded; skipping save to {record_path}.")
 
 
 def save_trace(path: Path, frames: list[np.ndarray], actions: list[int],
                rewards: list[float], scores: list[int], lives: list[int],
-               resets: list[bool], frame_skip: int, obs_size: int) -> None:
+               resets: list[bool], frame_skip: int, obs_size: int,
+               color: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         path,
@@ -328,10 +315,12 @@ def save_trace(path: Path, frames: list[np.ndarray], actions: list[int],
         resets=np.array(resets, dtype=bool),
         frame_skip=np.int32(frame_skip),
         obs_size=np.int32(obs_size),
+        color=np.bool_(color),
     )
     final_score = scores[-1] if scores else 0
     n_resets = sum(resets)
-    print(f"Wrote {len(frames)} samples (final score {final_score}, "
+    mode = "color" if color else "gray"
+    print(f"Wrote {len(frames)} {mode} samples (final score {final_score}, "
           f"{n_resets} R-resets) to {path}")
 
 
@@ -349,6 +338,9 @@ def main():
                         "frame_skip used in train_ppo; default 4)")
     p.add_argument("--obs-size", type=int, default=84,
                    help="recorded frame resolution; matches train_ppo obs_size")
+    p.add_argument("--color", action="store_true",
+                   help="record RGB frames (H,W,3) instead of grayscale; "
+                        "must match --color used in train_ppo")
     args = p.parse_args()
 
     if args.record_playtrace is not None and not args.live:
@@ -358,7 +350,8 @@ def main():
     advance_to_gameplay(core)
     if args.live:
         run_live(core, record_path=args.record_playtrace,
-                 frame_skip=args.frame_skip, obs_size=args.obs_size)
+                 frame_skip=args.frame_skip, obs_size=args.obs_size,
+                 color=args.color)
     else:
         run_headless(core, args.frames)
 

@@ -244,39 +244,63 @@ class DiggerEnv:
 
 # -- Vectorised wrapper -----------------------------------------------------
 
-def preprocess_uint8(rgba: np.ndarray, size: int = 84) -> np.ndarray:
-    """Raw (H, W, 4) RGBA uint8 -> (size, size) uint8 grayscale.
+def preprocess_uint8(rgba: np.ndarray, size: int = 84,
+                     color: bool = False) -> np.ndarray:
+    """Raw (H, W, 4) RGBA uint8 -> downscaled uint8.
 
-    Mirrors the original train_ppo.preprocess float pipeline; emits uint8
-    so workers can pipe small frames over multiprocessing and the trainer
-    converts to float once on the device. Lazily imports torch.
+    Grayscale: returns (size, size) via ITU-R 601 luma transform.
+    Color:     returns (size, size, 3) keeping per-channel RGB (drops alpha).
+
+    uint8 so workers can pipe small frames over multiprocessing; the trainer
+    divides by 255 on the device.
     """
     import torch
     import torch.nn.functional as F
     rgb = rgba[..., :3].astype(np.float32) * (1.0 / 255.0)
-    gray = 0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2]
-    t = torch.from_numpy(gray)[None, None]
-    t = F.interpolate(t, size=(size, size), mode="area")
-    return (t[0, 0].numpy() * 255.0).clip(0, 255).astype(np.uint8)
+    if color:
+        # (H, W, 3) -> (1, 3, H, W) -> resize -> (size, size, 3)
+        t = torch.from_numpy(rgb).permute(2, 0, 1)[None]
+        t = F.interpolate(t, size=(size, size), mode="area")
+        arr = t[0].permute(1, 2, 0).numpy()
+    else:
+        gray = 0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2]
+        t = torch.from_numpy(gray)[None, None]
+        t = F.interpolate(t, size=(size, size), mode="area")
+        arr = t[0, 0].numpy()
+    return (arr * 255.0).clip(0, 255).astype(np.uint8)
 
 
 class FrameStack:
-    """Rolling stack of the last k preprocessed frames."""
+    """Rolling stack of the last k preprocessed frames.
 
-    def __init__(self, k: int = 4, size: int = 84):
+    Output is (channels, H, W) where channels = k for grayscale or k*3 for
+    color (so a 4-frame color stack is 12 channels, with RGB triplets laid
+    out frame-by-frame: [r0 g0 b0 r1 g1 b1 ...]).
+    """
+
+    def __init__(self, k: int = 4, size: int = 84, color: bool = False):
         self.k = k
         self.size = size
+        self.color = color
         self.frames: collections.deque[np.ndarray] = collections.deque(maxlen=k)
 
     def reset(self, frame: np.ndarray) -> np.ndarray:
         self.frames.clear()
         for _ in range(self.k):
             self.frames.append(frame)
-        return np.stack(self.frames, axis=0)
+        return self._stacked()
 
     def push(self, frame: np.ndarray) -> np.ndarray:
         self.frames.append(frame)
-        return np.stack(self.frames, axis=0)
+        return self._stacked()
+
+    def _stacked(self) -> np.ndarray:
+        arr = np.stack(self.frames, axis=0)
+        if not self.color:
+            return arr                                     # (k, H, W)
+        # (k, H, W, 3) -> (k, 3, H, W) -> (k*3, H, W)
+        return arr.transpose(0, 3, 1, 2).reshape(
+            self.k * 3, self.size, self.size)
 
 
 def _env_step_skipped(env: DiggerEnv, action: int, skip: int):
@@ -296,16 +320,17 @@ def _env_step_skipped(env: DiggerEnv, action: int, skip: int):
     return obs, total_r, done, info
 
 
-def _vec_worker(conn, env_kwargs, frame_skip, obs_size, frame_stack) -> None:
+def _vec_worker(conn, env_kwargs, frame_skip, obs_size, frame_stack,
+                color) -> None:
     """One DiggerEnv per subprocess; pipe protocol = (cmd, payload)."""
     env = DiggerEnv(**env_kwargs)
-    stack = FrameStack(k=frame_stack, size=obs_size)
-    obs = stack.reset(preprocess_uint8(env.reset(), obs_size))
+    stack = FrameStack(k=frame_stack, size=obs_size, color=color)
+    obs = stack.reset(preprocess_uint8(env.reset(), obs_size, color))
     try:
         while True:
             cmd, payload = conn.recv()
             if cmd == "reset":
-                obs = stack.reset(preprocess_uint8(env.reset(), obs_size))
+                obs = stack.reset(preprocess_uint8(env.reset(), obs_size, color))
                 conn.send(obs)
             elif cmd == "step":
                 raw, r, done, info = _env_step_skipped(
@@ -313,9 +338,9 @@ def _vec_worker(conn, env_kwargs, frame_skip, obs_size, frame_stack) -> None:
                 if done:
                     # CleanRL-style auto-reset: ship the new episode's first
                     # obs alongside the dead episode's reward/done.
-                    obs = stack.reset(preprocess_uint8(env.reset(), obs_size))
+                    obs = stack.reset(preprocess_uint8(env.reset(), obs_size, color))
                 else:
-                    obs = stack.push(preprocess_uint8(raw, obs_size))
+                    obs = stack.push(preprocess_uint8(raw, obs_size, color))
                 conn.send((obs, float(r), bool(done), info))
             elif cmd == "close":
                 break
@@ -335,24 +360,26 @@ class DiggerVecEnv:
     """Parallel DiggerEnv with frame_skip + frame_stack + preprocess built in.
 
     num_envs=1 runs in-process (no IPC); num_envs>1 spawns workers. Both
-    return identically shaped (N, frame_stack, obs_size, obs_size) uint8
-    observations so the trainer doesn't branch.
+    return identically shaped (N, channels, H, W) uint8 observations where
+    channels = frame_stack for grayscale or frame_stack*3 for color.
     """
 
     def __init__(self, num_envs: int = 1, frame_skip: int = 4,
                  frame_stack: int = 4, obs_size: int = 84,
+                 color: bool = False,
                  env_kwargs: dict | None = None,
                  ctx: str = "spawn"):
         self.num_envs = num_envs
         self.frame_skip = frame_skip
         self.frame_stack = frame_stack
         self.obs_size = obs_size
+        self.color = color
         env_kwargs = dict(env_kwargs or {})
 
         self._inproc = num_envs == 1
         if self._inproc:
             self._env = DiggerEnv(**env_kwargs)
-            self._stack = FrameStack(k=frame_stack, size=obs_size)
+            self._stack = FrameStack(k=frame_stack, size=obs_size, color=color)
             self._conns = self._procs = []
         else:
             mp_ctx = mp.get_context(ctx)
@@ -361,7 +388,7 @@ class DiggerVecEnv:
                 parent, child = mp_ctx.Pipe(duplex=True)
                 p = mp_ctx.Process(target=_vec_worker, daemon=True,
                                    args=(child, env_kwargs, frame_skip,
-                                         obs_size, frame_stack))
+                                         obs_size, frame_stack, color))
                 p.start()
                 child.close()
                 self._conns.append(parent)
@@ -370,8 +397,8 @@ class DiggerVecEnv:
     def reset(self) -> np.ndarray:
         if self._inproc:
             obs = self._stack.reset(
-                preprocess_uint8(self._env.reset(), self.obs_size))
-            return obs[None]  # (1, k, H, W)
+                preprocess_uint8(self._env.reset(), self.obs_size, self.color))
+            return obs[None]  # (1, C, H, W)
         for c in self._conns:
             c.send(("reset", None))
         return np.stack([c.recv() for c in self._conns], axis=0)
@@ -382,9 +409,10 @@ class DiggerVecEnv:
                 self._env, int(actions[0]), self.frame_skip)
             if done:
                 obs = self._stack.reset(
-                    preprocess_uint8(self._env.reset(), self.obs_size))
+                    preprocess_uint8(self._env.reset(), self.obs_size, self.color))
             else:
-                obs = self._stack.push(preprocess_uint8(raw, self.obs_size))
+                obs = self._stack.push(
+                    preprocess_uint8(raw, self.obs_size, self.color))
             return (obs[None],
                     np.array([r], dtype=np.float32),
                     np.array([done], dtype=bool),
