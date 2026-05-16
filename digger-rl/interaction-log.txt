@@ -115,3 +115,7 @@
 [2026-05-16] Also, have you now training using color input images (but still downscaled) or grayscale ones?
 
 [2026-05-16] Sure
+
+[2026-05-16] But curious, after latest change previous checkouts are not usable but run_ppo are they?
+
+[2026-05-16] Let's make color option default, but yes, looks good

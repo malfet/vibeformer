@@ -338,9 +338,11 @@ def main():
                         "frame_skip used in train_ppo; default 4)")
     p.add_argument("--obs-size", type=int, default=84,
                    help="recorded frame resolution; matches train_ppo obs_size")
-    p.add_argument("--color", action="store_true",
-                   help="record RGB frames (H,W,3) instead of grayscale; "
-                        "must match --color used in train_ppo")
+    p.add_argument("--color", default=True,
+                   action=argparse.BooleanOptionalAction,
+                   help="record RGB frames (H,W,3); default on. "
+                        "--no-color records grayscale (H,W) to match a "
+                        "grayscale-trained agent.")
     args = p.parse_args()
 
     if args.record_playtrace is not None and not args.live:

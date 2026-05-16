@@ -55,7 +55,7 @@ class Config:
     frame_skip: int = 4
     frame_stack: int = 4
     obs_size: int = 84
-    color: bool = False               # if True, feed RGB (3*frame_stack channels)
+    color: bool = True                # RGB by default (3*frame_stack channels); --no-color falls back to grayscale
     encoder_width: int = 1            # NatureCNN width multiplier; 2 = ~4x params
     clip_reward: bool = False
     episodic_life: bool = False
@@ -457,10 +457,11 @@ def parse_args() -> Config:
     p.add_argument("--encoder-width", type=int, default=Config.encoder_width,
                    help="NatureCNN channel/FC width multiplier (default 1 = "
                         "~1.7M params; 2 = ~6M params for richer encoder)")
-    p.add_argument("--color", action="store_true",
-                   help="feed RGB to the encoder (3*frame_stack channels) "
-                        "instead of grayscale; requires traces recorded with "
-                        "--color if combined with --bc-traces")
+    p.add_argument("--color", default=Config.color,
+                   action=argparse.BooleanOptionalAction,
+                   help="feed RGB to the encoder (3*frame_stack channels). "
+                        "Default on; --no-color falls back to grayscale. "
+                        "Must match the trace's color flag when using --bc-traces.")
     p.add_argument("--run-name", type=str, default="",
                    help="subdir under data/checkpoints/ for this run; needed "
                         "to run several train_ppo invocations in parallel "
