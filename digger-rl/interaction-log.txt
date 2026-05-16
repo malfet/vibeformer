@@ -107,3 +107,9 @@
 [2026-05-16] Sure, let's do that, but also let's start sketching vectorized architecture
 
 [2026-05-16] Also, undo the change that tried to change focuse of the Windows, as it clearly didn't work
+
+[2026-05-16] But you can start training on wider network while doing vectorized arch (and commit the changes before you start doing it)
+
+[2026-05-16] Yes, let's integrate it with train_ppo , but also try to keep the implementation more compact. And does it need to be a a new env, can't the same digger_env just have two modes - in-process and in-subprocess?
+
+[2026-05-16] Also, have you now training using color input images (but still downscaled) or grayscale ones?

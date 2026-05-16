@@ -16,8 +16,16 @@ import numpy as np
 import torch
 from torch.distributions import Categorical
 
-from digger_env import DiggerEnv
-from train_ppo import Agent, FrameStack, env_step_skipped, preprocess, select_device
+from digger_env import (
+    DiggerEnv, FrameStack, _env_step_skipped, preprocess_uint8,
+)
+from train_ppo import Agent, select_device
+
+env_step_skipped = _env_step_skipped
+
+def preprocess(rgba, size=84):
+    """Float32 grayscale 84x84 in [0,1]."""
+    return preprocess_uint8(rgba, size).astype(np.float32) * (1.0 / 255.0)
 
 ACTION_NAMES = ["NOOP", "LEFT", "RIGHT", "UP", "DOWN", "FIRE"]
 

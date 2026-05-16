@@ -29,7 +29,7 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 from torch.optim import Adam
 
-from digger_env import DiggerEnv
+from digger_env import DiggerEnv, DiggerVecEnv
 
 REPO = Path(__file__).parent.resolve()
 CKPT_DIR = REPO / "data" / "checkpoints"
@@ -40,6 +40,7 @@ class Config:
     total_timesteps: int = 1_000_000  # emulator frames (NOT policy steps)
     learning_rate: float = 2.5e-4
     num_steps: int = 128              # policy steps per rollout
+    num_envs: int = 1                 # parallel envs (subprocess if >1)
     anneal_lr: bool = True
     gamma: float = 0.99
     gae_lambda: float = 0.95
@@ -136,35 +137,6 @@ class Agent(nn.Module):
         if action is None:
             action = dist.sample()
         return action, dist.log_prob(action), dist.entropy(), self.critic(z).squeeze(-1)
-
-
-def preprocess(obs_rgba: np.ndarray, size: int = 84) -> np.ndarray:
-    """raw (H, W, 4) RGBA uint8 -> (size, size) float32 in [0, 1]."""
-    rgb = obs_rgba[..., :3].astype(np.float32) * (1.0 / 255.0)
-    # ITU-R 601-2 luma transform.
-    gray = 0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2]
-    t = torch.from_numpy(gray)[None, None]
-    t = F.interpolate(t, size=(size, size), mode="area")
-    return t[0, 0].numpy()
-
-
-class FrameStack:
-    def __init__(self, k: int = 4, size: int = 84):
-        self.k = k
-        self.size = size
-        self.frames: collections.deque[np.ndarray] = collections.deque(maxlen=k)
-
-    def reset(self, frame: np.ndarray) -> np.ndarray:
-        for _ in range(self.k):
-            self.frames.append(frame)
-        return self._stacked()
-
-    def push(self, frame: np.ndarray) -> np.ndarray:
-        self.frames.append(frame)
-        return self._stacked()
-
-    def _stacked(self) -> np.ndarray:
-        return np.stack(list(self.frames), axis=0)  # (k, size, size)
 
 
 def _decimate_trace(d: dict, factor: int) -> dict:
@@ -421,23 +393,6 @@ def bc_pretrain(agent: "Agent", optim: Adam, bc_data: tuple,
               f"(mul {ret_std:.2f}, add {ret_mean:.2f})", flush=True)
 
 
-def env_step_skipped(env: DiggerEnv, action: int, skip: int):
-    """Hold action across `skip` emulator frames; return last obs + summed reward."""
-    total_r = 0.0
-    info: dict = {}
-    obs = None
-    done = False
-    for _ in range(skip):
-        s = env.step(action)
-        total_r += s.reward
-        obs = s.obs
-        info = s.info
-        if s.done:
-            done = True
-            break
-    return obs, total_r, done, info
-
-
 def parse_args() -> Config:
     p = argparse.ArgumentParser()
     p.add_argument("--total-timesteps", type=int, default=Config.total_timesteps)
@@ -446,6 +401,8 @@ def parse_args() -> Config:
     p.add_argument("--lr", type=float, default=Config.learning_rate)
     p.add_argument("--seed", type=int, default=Config.seed)
     p.add_argument("--num-steps", type=int, default=Config.num_steps)
+    p.add_argument("--num-envs", type=int, default=Config.num_envs,
+                   help="parallel envs (subprocess workers if >1)")
     p.add_argument("--frame-skip", type=int, default=Config.frame_skip)
     p.add_argument("--frame-stack", type=int, default=Config.frame_stack)
     p.add_argument("--save-every", type=int, default=Config.save_every)
@@ -490,7 +447,8 @@ def parse_args() -> Config:
     return Config(
         total_timesteps=a.total_timesteps,
         device=str(select_device(a.force_cpu)),
-        learning_rate=a.lr, seed=a.seed, num_steps=a.num_steps,
+        learning_rate=a.lr, seed=a.seed,
+        num_steps=a.num_steps, num_envs=a.num_envs,
         frame_skip=a.frame_skip, frame_stack=a.frame_stack,
         save_every=a.save_every, anneal_lr=not a.no_anneal_lr,
         clip_reward=a.clip_reward, episodic_life=a.episodic_life,
@@ -514,16 +472,18 @@ def main() -> None:
     tag = f"[{cfg.run_name}] " if cfg.run_name else ""
     print(f"{tag}device={device} cfg={cfg}", flush=True)
 
-    env = DiggerEnv(max_steps=10**9,  # don't truncate during training
-                    clip_reward=cfg.clip_reward,
-                    episodic_life=cfg.episodic_life,
-                    death_penalty=cfg.death_penalty)
-    stack = FrameStack(k=cfg.frame_stack, size=cfg.obs_size)
+    env_kwargs = dict(max_steps=10**9, clip_reward=cfg.clip_reward,
+                      episodic_life=cfg.episodic_life,
+                      death_penalty=cfg.death_penalty)
+    vec = DiggerVecEnv(num_envs=cfg.num_envs, frame_skip=cfg.frame_skip,
+                       frame_stack=cfg.frame_stack, obs_size=cfg.obs_size,
+                       env_kwargs=env_kwargs)
     agent = Agent(num_actions=DiggerEnv.NUM_ACTIONS,
                   in_channels=cfg.frame_stack,
                   width=cfg.encoder_width).to(device)
     n_params = sum(p.numel() for p in agent.parameters())
-    print(f"{tag}agent: width={cfg.encoder_width}, params={n_params:,}", flush=True)
+    print(f"{tag}agent: width={cfg.encoder_width}, params={n_params:,}  "
+          f"num_envs={cfg.num_envs}", flush=True)
     optim = Adam(agent.parameters(), lr=cfg.learning_rate, eps=1e-5)
 
     bc_data = None
@@ -535,24 +495,24 @@ def main() -> None:
     anchor_active = bc_data is not None and cfg.bc_anchor_coef > 0
     anchor_rng = np.random.default_rng(cfg.seed + 17)
 
-    # Rollout storage
-    N = cfg.num_steps
-    obs_buf = torch.zeros(N, cfg.frame_stack, cfg.obs_size, cfg.obs_size, device=device)
-    act_buf = torch.zeros(N, dtype=torch.long, device=device)
-    logp_buf = torch.zeros(N, device=device)
-    rew_buf = torch.zeros(N, device=device)
-    done_buf = torch.zeros(N, device=device)
-    val_buf = torch.zeros(N, device=device)
+    # Rollout storage: (N, B, ...) so we can stack per-env trajectories,
+    # then flatten to (N*B, ...) for minibatch sampling.
+    N, B = cfg.num_steps, cfg.num_envs
+    obs_buf = torch.zeros(N, B, cfg.frame_stack, cfg.obs_size, cfg.obs_size, device=device)
+    act_buf = torch.zeros(N, B, dtype=torch.long, device=device)
+    logp_buf = torch.zeros(N, B, device=device)
+    rew_buf = torch.zeros(N, B, device=device)
+    done_buf = torch.zeros(N, B, device=device)
+    val_buf = torch.zeros(N, B, device=device)
 
-    raw = env.reset()
-    obs_np = stack.reset(preprocess(raw, cfg.obs_size))
-    obs_t = torch.from_numpy(obs_np).float().unsqueeze(0).to(device)
-    done_t = torch.zeros(1, device=device)
+    obs_np = vec.reset()  # (B, k, H, W) uint8
+    obs_t = torch.from_numpy(obs_np).to(device).float().mul_(1.0 / 255.0)
+    done_t = torch.zeros(B, device=device)
 
     global_step = 0
     update = 0
-    ep_return = 0.0
-    ep_length = 0
+    ep_returns_per_env = np.zeros(B, dtype=np.float32)
+    ep_lengths_per_env = np.zeros(B, dtype=np.int64)
     ep_returns: collections.deque[float] = collections.deque(maxlen=20)
     t0 = time.monotonic()
 
@@ -574,41 +534,39 @@ def main() -> None:
 
         # ---- Rollout ----
         for step in range(N):
-            obs_buf[step] = obs_t[0]
-            done_buf[step] = done_t[0]
+            obs_buf[step] = obs_t
+            done_buf[step] = done_t
             with torch.no_grad():
                 action, logp, _, value = agent.act(obs_t)
-            act_buf[step] = action[0]
-            logp_buf[step] = logp[0]
-            val_buf[step] = value[0]
+            act_buf[step] = action
+            logp_buf[step] = logp
+            val_buf[step] = value
 
-            raw, reward, done, info = env_step_skipped(
-                env, int(action[0].item()), cfg.frame_skip)
-            global_step += cfg.frame_skip
-            rew_buf[step] = reward
-            ep_return += reward
-            ep_length += cfg.frame_skip
+            actions_np = action.cpu().numpy()
+            obs_np, rewards, dones, infos = vec.step(actions_np)
+            global_step += cfg.frame_skip * B
+            rew_buf[step] = torch.from_numpy(rewards).to(device)
+            ep_returns_per_env += rewards
+            ep_lengths_per_env += cfg.frame_skip
 
-            if done:
-                ep_returns.append(ep_return)
-                print(f"  ep_end return={ep_return:.0f} length={ep_length} "
-                      f"score={info.get('score', 0)} lives={info.get('lives', 0)}",
-                      flush=True)
-                ep_return = 0.0
-                ep_length = 0
-                raw = env.reset()
-                obs_np = stack.reset(preprocess(raw, cfg.obs_size))
-                done_t = torch.ones(1, device=device)
-            else:
-                obs_np = stack.push(preprocess(raw, cfg.obs_size))
-                done_t = torch.zeros(1, device=device)
-            obs_t = torch.from_numpy(obs_np).float().unsqueeze(0).to(device)
+            for i, d in enumerate(dones):
+                if d:
+                    ep_returns.append(float(ep_returns_per_env[i]))
+                    print(f"{tag}  ep_end env={i} return={ep_returns_per_env[i]:.0f} "
+                          f"length={ep_lengths_per_env[i]} "
+                          f"score={infos[i].get('score', 0)} "
+                          f"lives={infos[i].get('lives', 0)}", flush=True)
+                    ep_returns_per_env[i] = 0.0
+                    ep_lengths_per_env[i] = 0
 
-        # ---- Pre-update diagnostics: encoder-collapse early-warning signals.
-        # All computed on the full rollout buffer in a single forward pass so
-        # we get a stable measurement that isn't biased to a single minibatch.
+            done_t = torch.from_numpy(dones.astype(np.float32)).to(device)
+            obs_t = torch.from_numpy(obs_np).to(device).float().mul_(1.0 / 255.0)
+
+        # ---- Pre-update diagnostics on the full rollout (N*B samples) ----
+        flat_obs = obs_buf.reshape(-1, *obs_buf.shape[2:])
+        flat_act = act_buf.reshape(-1)
         with torch.no_grad():
-            buf_logits = agent.actor(agent.encode(obs_buf))
+            buf_logits = agent.actor(agent.encode(flat_obs))
             buf_log_probs = F.log_softmax(buf_logits, dim=-1)
             buf_probs = buf_log_probs.exp()
             buf_entropy = -(buf_probs * buf_log_probs).sum(-1)
@@ -618,7 +576,7 @@ def main() -> None:
         ent_buf_p10 = buf_entropy.quantile(0.1).item()
         spread_mean = buf_spread.mean().item()
 
-        act_counts = torch.bincount(act_buf, minlength=DiggerEnv.NUM_ACTIONS).float()
+        act_counts = torch.bincount(flat_act, minlength=DiggerEnv.NUM_ACTIONS).float()
         act_dist = act_counts / act_counts.sum()
         top_act_idx = int(act_dist.argmax().item())
         top_act_frac = act_dist.max().item()
@@ -631,15 +589,15 @@ def main() -> None:
         if spread_mean > 15.0:
             collapse_signals.append(f"logit_spread = {spread_mean:.1f}")
 
-        # ---- GAE ----
+        # ---- GAE per env ----
         with torch.no_grad():
             next_value = agent.value(obs_t)
             advantages = torch.zeros_like(rew_buf)
-            lastgae = torch.zeros((), device=device)
+            lastgae = torch.zeros(B, device=device)
             for t in reversed(range(N)):
                 if t == N - 1:
-                    next_nonterminal = 1.0 - done_t[0]
-                    next_v = next_value[0]
+                    next_nonterminal = 1.0 - done_t
+                    next_v = next_value
                 else:
                     next_nonterminal = 1.0 - done_buf[t + 1]
                     next_v = val_buf[t + 1]
@@ -648,19 +606,24 @@ def main() -> None:
                 advantages[t] = lastgae
             returns = advantages + val_buf
 
-        # ---- PPO update ----
-        b_inds = np.arange(N)
+        # ---- PPO update over flattened (N*B, ...) samples ----
+        flat_logp = logp_buf.reshape(-1)
+        flat_val = val_buf.reshape(-1)
+        flat_adv = advantages.reshape(-1)
+        flat_ret = returns.reshape(-1)
+        total = N * B
+        b_inds = np.arange(total)
         clipfracs = []
         approx_kls = []
         for epoch in range(cfg.update_epochs):
             np.random.shuffle(b_inds)
-            mb_size = N // cfg.num_minibatches
-            for start in range(0, N, mb_size):
+            mb_size = total // cfg.num_minibatches
+            for start in range(0, total, mb_size):
                 mb = b_inds[start:start + mb_size]
-                _, new_logp, entropy, new_val = agent.act(obs_buf[mb], act_buf[mb])
-                ratio = (new_logp - logp_buf[mb]).exp()
+                _, new_logp, entropy, new_val = agent.act(flat_obs[mb], flat_act[mb])
+                ratio = (new_logp - flat_logp[mb]).exp()
 
-                mb_adv = advantages[mb]
+                mb_adv = flat_adv[mb]
                 if cfg.norm_adv:
                     mb_adv = (mb_adv - mb_adv.mean()) / (mb_adv.std() + 1e-8)
 
@@ -669,13 +632,13 @@ def main() -> None:
                 pg_loss = torch.max(pg1, pg2).mean()
 
                 if cfg.clip_vloss:
-                    v_unclipped = (new_val - returns[mb]) ** 2
-                    v_clipped = val_buf[mb] + torch.clamp(
-                        new_val - val_buf[mb], -cfg.clip_coef, cfg.clip_coef)
-                    v_clipped_loss = (v_clipped - returns[mb]) ** 2
+                    v_unclipped = (new_val - flat_ret[mb]) ** 2
+                    v_clipped = flat_val[mb] + torch.clamp(
+                        new_val - flat_val[mb], -cfg.clip_coef, cfg.clip_coef)
+                    v_clipped_loss = (v_clipped - flat_ret[mb]) ** 2
                     v_loss = 0.5 * torch.max(v_unclipped, v_clipped_loss).mean()
                 else:
-                    v_loss = 0.5 * ((new_val - returns[mb]) ** 2).mean()
+                    v_loss = 0.5 * ((new_val - flat_ret[mb]) ** 2).mean()
 
                 ent = entropy.mean()
                 loss = pg_loss - current_ent_coef * ent + cfg.vf_coef * v_loss
@@ -699,7 +662,7 @@ def main() -> None:
                 with torch.no_grad():
                     clipfracs.append(
                         ((ratio - 1.0).abs() > cfg.clip_coef).float().mean().item())
-                    approx_kls.append(((ratio - 1) - (new_logp - logp_buf[mb])).mean().item())
+                    approx_kls.append(((ratio - 1) - (new_logp - flat_logp[mb])).mean().item())
 
         # ---- Logging ----
         if update % cfg.log_every == 0:
@@ -727,7 +690,7 @@ def main() -> None:
                         "config": cfg.__dict__}, ckpt)
             print(f"{tag}  saved {ckpt}", flush=True)
 
-    env.close()
+    vec.close()
     final = ckpt_dir / "ppo_digger_final.pt"
     torch.save({"agent": agent.state_dict(), "step": global_step,
                 "config": cfg.__dict__}, final)

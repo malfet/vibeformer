@@ -1,20 +1,26 @@
-"""Single-process RL env wrapping DOSBox Pure + Digger.
+"""RL env wrapping DOSBox Pure + Digger.
 
-No gymnasium dependency. Just a minimal protocol:
+Two layers, no gymnasium dependency:
 
-    env = DiggerEnv()
-    obs = env.reset()
-    while not done:
-        action = policy(obs)
-        obs, reward, done, info = env.step(action)
+  DiggerEnv      — single env, raw RGBA frames. LibretroCore is a per-process
+                   singleton so only one per process.
+  DiggerVecEnv   — N parallel envs with frame_skip + frame_stack + preprocess
+                   baked in. num_envs=1 runs in-process (no IPC overhead).
+                   num_envs>1 spawns subprocesses (one DiggerEnv each), pipes
+                   uint8 stacks to keep IPC bandwidth modest.
 
-LibretroCore is a per-process singleton (libretro callbacks have no userdata),
-so a single DiggerEnv per process. For vectorized rollouts spawn subprocesses.
+Both expose the same vec-style API for the trainer:
+
+    vec = DiggerVecEnv(num_envs=N)
+    obs = vec.reset()                    # (N, frame_stack, H, W) uint8
+    obs, rewards, dones, infos = vec.step(actions)   # actions: (N,) int
 """
 
 from __future__ import annotations
 
+import collections
 import gc
+import multiprocessing as mp
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -234,6 +240,181 @@ class DiggerEnv:
     def _read_lives(self) -> int:
         m = self._core.read_memory_region(0)
         return m[LIVES_OFFSET]
+
+
+# -- Vectorised wrapper -----------------------------------------------------
+
+def preprocess_uint8(rgba: np.ndarray, size: int = 84) -> np.ndarray:
+    """Raw (H, W, 4) RGBA uint8 -> (size, size) uint8 grayscale.
+
+    Mirrors the original train_ppo.preprocess float pipeline; emits uint8
+    so workers can pipe small frames over multiprocessing and the trainer
+    converts to float once on the device. Lazily imports torch.
+    """
+    import torch
+    import torch.nn.functional as F
+    rgb = rgba[..., :3].astype(np.float32) * (1.0 / 255.0)
+    gray = 0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2]
+    t = torch.from_numpy(gray)[None, None]
+    t = F.interpolate(t, size=(size, size), mode="area")
+    return (t[0, 0].numpy() * 255.0).clip(0, 255).astype(np.uint8)
+
+
+class FrameStack:
+    """Rolling stack of the last k preprocessed frames."""
+
+    def __init__(self, k: int = 4, size: int = 84):
+        self.k = k
+        self.size = size
+        self.frames: collections.deque[np.ndarray] = collections.deque(maxlen=k)
+
+    def reset(self, frame: np.ndarray) -> np.ndarray:
+        self.frames.clear()
+        for _ in range(self.k):
+            self.frames.append(frame)
+        return np.stack(self.frames, axis=0)
+
+    def push(self, frame: np.ndarray) -> np.ndarray:
+        self.frames.append(frame)
+        return np.stack(self.frames, axis=0)
+
+
+def _env_step_skipped(env: DiggerEnv, action: int, skip: int):
+    """Hold action across `skip` emulator frames; return last raw obs."""
+    total_r = 0.0
+    info: dict = {}
+    obs = None
+    done = False
+    for _ in range(skip):
+        s = env.step(action)
+        total_r += s.reward
+        obs = s.obs
+        info = s.info
+        if s.done:
+            done = True
+            break
+    return obs, total_r, done, info
+
+
+def _vec_worker(conn, env_kwargs, frame_skip, obs_size, frame_stack) -> None:
+    """One DiggerEnv per subprocess; pipe protocol = (cmd, payload)."""
+    env = DiggerEnv(**env_kwargs)
+    stack = FrameStack(k=frame_stack, size=obs_size)
+    obs = stack.reset(preprocess_uint8(env.reset(), obs_size))
+    try:
+        while True:
+            cmd, payload = conn.recv()
+            if cmd == "reset":
+                obs = stack.reset(preprocess_uint8(env.reset(), obs_size))
+                conn.send(obs)
+            elif cmd == "step":
+                raw, r, done, info = _env_step_skipped(
+                    env, int(payload), frame_skip)
+                if done:
+                    # CleanRL-style auto-reset: ship the new episode's first
+                    # obs alongside the dead episode's reward/done.
+                    obs = stack.reset(preprocess_uint8(env.reset(), obs_size))
+                else:
+                    obs = stack.push(preprocess_uint8(raw, obs_size))
+                conn.send((obs, float(r), bool(done), info))
+            elif cmd == "close":
+                break
+    except (KeyboardInterrupt, EOFError):
+        pass
+    except Exception as exc:
+        import traceback; traceback.print_exc()
+        try: conn.send(("error", repr(exc)))
+        except Exception: pass
+    finally:
+        try: env.close()
+        except Exception: pass
+        conn.close()
+
+
+class DiggerVecEnv:
+    """Parallel DiggerEnv with frame_skip + frame_stack + preprocess built in.
+
+    num_envs=1 runs in-process (no IPC); num_envs>1 spawns workers. Both
+    return identically shaped (N, frame_stack, obs_size, obs_size) uint8
+    observations so the trainer doesn't branch.
+    """
+
+    def __init__(self, num_envs: int = 1, frame_skip: int = 4,
+                 frame_stack: int = 4, obs_size: int = 84,
+                 env_kwargs: dict | None = None,
+                 ctx: str = "spawn"):
+        self.num_envs = num_envs
+        self.frame_skip = frame_skip
+        self.frame_stack = frame_stack
+        self.obs_size = obs_size
+        env_kwargs = dict(env_kwargs or {})
+
+        self._inproc = num_envs == 1
+        if self._inproc:
+            self._env = DiggerEnv(**env_kwargs)
+            self._stack = FrameStack(k=frame_stack, size=obs_size)
+            self._conns = self._procs = []
+        else:
+            mp_ctx = mp.get_context(ctx)
+            self._conns, self._procs = [], []
+            for _ in range(num_envs):
+                parent, child = mp_ctx.Pipe(duplex=True)
+                p = mp_ctx.Process(target=_vec_worker, daemon=True,
+                                   args=(child, env_kwargs, frame_skip,
+                                         obs_size, frame_stack))
+                p.start()
+                child.close()
+                self._conns.append(parent)
+                self._procs.append(p)
+
+    def reset(self) -> np.ndarray:
+        if self._inproc:
+            obs = self._stack.reset(
+                preprocess_uint8(self._env.reset(), self.obs_size))
+            return obs[None]  # (1, k, H, W)
+        for c in self._conns:
+            c.send(("reset", None))
+        return np.stack([c.recv() for c in self._conns], axis=0)
+
+    def step(self, actions):
+        if self._inproc:
+            raw, r, done, info = _env_step_skipped(
+                self._env, int(actions[0]), self.frame_skip)
+            if done:
+                obs = self._stack.reset(
+                    preprocess_uint8(self._env.reset(), self.obs_size))
+            else:
+                obs = self._stack.push(preprocess_uint8(raw, self.obs_size))
+            return (obs[None],
+                    np.array([r], dtype=np.float32),
+                    np.array([done], dtype=bool),
+                    [info])
+        for c, a in zip(self._conns, actions):
+            c.send(("step", int(a)))
+        results = [c.recv() for c in self._conns]
+        for i, r in enumerate(results):
+            if isinstance(r, tuple) and len(r) == 2 and r[0] == "error":
+                raise RuntimeError(f"vec worker {i} failed: {r[1]}")
+        obs = np.stack([r[0] for r in results], axis=0)
+        rewards = np.array([r[1] for r in results], dtype=np.float32)
+        dones = np.array([r[2] for r in results], dtype=bool)
+        infos = [r[3] for r in results]
+        return obs, rewards, dones, infos
+
+    def close(self) -> None:
+        if self._inproc:
+            self._env.close()
+            return
+        for c in self._conns:
+            try: c.send(("close", None))
+            except (BrokenPipeError, EOFError): pass
+        for p in self._procs:
+            p.join(timeout=5)
+            if p.is_alive():
+                p.terminate()
+        for c in self._conns:
+            try: c.close()
+            except Exception: pass
 
 
 def _smoke_test() -> None:
