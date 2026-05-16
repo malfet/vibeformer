@@ -119,3 +119,9 @@
 [2026-05-16] But curious, after latest change previous checkouts are not usable but run_ppo are they?
 
 [2026-05-16] Let's make color option default, but yes, looks good
+
+[2026-05-16] From existing BW trace, do you mind figuring out the position of the digger, and as we've discussed a while ago, create a penalty when one presses the move button but digger is not moving (though wouldn't that make noop/fire a preferred action?)
+
+[2026-05-16] And I have trace1_color to try
+
+[2026-05-16] Can you try implementing Dreamer?
