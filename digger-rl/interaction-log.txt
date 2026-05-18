@@ -135,3 +135,13 @@
 [2026-05-16] start phase 3
 
 [2026-05-16] Hmm, why are you using `np.empty` rather than torch.empty?
+
+[2026-05-16] Let's launch it
+
+[2026-05-16] While you waiting for this one, can we try a very different approach - come up with the GameState object, that contains digger position, scores, can fire, life remains, where enemies are, cherry-state, etc (you can peek at ~/git/sobomax/digger/ to figure out how this state should look like) and I want you to write a classic (our using a CV approach) algorithm that extract this state from an RGB frame. And then let's try to find a best RL algorithm that can learn play strategy from this state
+
+[2026-05-17] You have the digger source code, don't you, can you infer how the game state should look like and where those things will be mapped eventually?
+
+[2026-05-18] Or may be can you train a small ML network that will distinguish between those?
+
+[2026-05-18] I.e. all you need is to classify I guess 16x16 blocks into enemy/digger/bag of gold or dirt?
