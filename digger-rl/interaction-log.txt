@@ -169,3 +169,7 @@
 [2026-05-18] Another interesting aspect - it sometimes confuses nobbin with digger (if purple X always means digger)
 
 [2026-05-18] And frequent cause of death are being crushed by a bag of gold
+
+[2026-05-18] Sure, do that, but also please note that your recent change make playtruth much worse
+
+[2026-05-18] Can you summarize current state of problems to README.MD or something so that I can continue on another machine?

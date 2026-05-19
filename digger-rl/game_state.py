@@ -339,17 +339,21 @@ def extract_state_fast(frame_rgba: np.ndarray) -> GameState:
 
     state = GameState()
 
-    # Digger vs nobbin discriminator. Both sprites contain red pixels
-    # (digger body is red; nobbin has red eyes/feet) and both have green
-    # somewhere. The reliable difference is:
-    #   digger body  = lots of bright RED, almost no dark-green
-    #   nobbin body  = lots of dark-GREEN, only a few red pixels (eyes)
-    # So weight the tile score by (red - K * dgreen) to dock dark-green
-    # tiles. Then a minimum-red threshold rejects empty / dead-digger
-    # frames where no large red sprite is present.
-    digger_score = red_c.astype(np.int32) - 4 * dgrn_c.astype(np.int32)
-    flat_idx = int(digger_score.argmax())
-    if red_c.flat[flat_idx] >= 30 and dgrn_c.flat[flat_idx] < 20:
+    # Monsters first so we can excise them from the digger search.
+    # Nobbin signature: large dark-green body + yellow head + a few red
+    # eye/foot pixels. Digger signature: bright-red body dominates, so
+    # red_c will be much higher in the digger tile than the floor of
+    # 3-5 red eye pixels a nobbin contributes.
+    monster_mask = ((dgrn_c >= 20) & (yel_c >= 6) &
+                    (red_c >= 2) & (red_c < 25))
+    # Digger: tile with the most red pixels among NON-monster tiles.
+    # The exclusion avoids the corner case where a nobbin's red eye-
+    # pixels would otherwise win argmax during a frame where the
+    # digger sprite is mid-animation with reduced red mass.
+    red_for_digger = red_c.copy()
+    red_for_digger[monster_mask] = 0
+    flat_idx = int(red_for_digger.argmax())
+    if red_for_digger.flat[flat_idx] >= 30:
         d_row, d_col = divmod(flat_idx, MWIDTH)
         state.digger = DiggerPos(col=int(d_col), row=int(d_row), alive=True)
 
@@ -361,12 +365,11 @@ def extract_state_fast(frame_rgba: np.ndarray) -> GameState:
     # ~1500 px; >300 dirt pixels = clearly undisturbed.
     state.dirt = dirt_c > 300
 
-    # Monsters: large dark-green body (the sprite torso), yellow head, a
-    # few red pixels (eyes/feet). Must NOT be the digger tile.
-    monster_tiles = (dgrn_c >= 20) & (yel_c >= 6) & (red_c >= 2) & (red_c < 25)
+    # Monsters: emit positions from the mask we computed above. Exclude
+    # the digger tile in case both signatures fire there.
     if state.digger is not None:
-        monster_tiles[state.digger.row, state.digger.col] = False
-    for r, c in zip(*np.where(monster_tiles)):
+        monster_mask[state.digger.row, state.digger.col] = False
+    for r, c in zip(*np.where(monster_mask)):
         state.monsters.append(MonsterPos(col=int(c), row=int(r), is_hobbin=False))
 
     # Bags: yellow $ glyph (smaller blob than an emerald's inner glow,
