@@ -155,3 +155,17 @@
 [2026-05-18] Try replace BFS with more CV algos running backed by PT (you can use torchvision if it'll be of any help)
 
 [2026-05-18] let's do 2
+
+[2026-05-18] Let's do 1 and 3
+
+[2026-05-18] So which command I need to run to explore greedy or smart algorithms?
+
+[2026-05-18] And let's start to kick training to improve on those
+
+[2026-05-18] Err, heuristic=agend does not render anything, nor does it have neither `--live` nor smart options
+
+[2026-05-18] Sorry, I forgot to `git pull`, but why does it renders big X over digger?
+
+[2026-05-18] Another interesting aspect - it sometimes confuses nobbin with digger (if purple X always means digger)
+
+[2026-05-18] And frequent cause of death are being crushed by a bag of gold

@@ -339,10 +339,17 @@ def extract_state_fast(frame_rgba: np.ndarray) -> GameState:
 
     state = GameState()
 
-    # Digger: tile holding the most red pixels. Threshold rejects frames
-    # where the digger is dead/off-screen (no large red blob).
-    flat_idx = int(red_c.argmax())
-    if red_c.flat[flat_idx] >= 30:
+    # Digger vs nobbin discriminator. Both sprites contain red pixels
+    # (digger body is red; nobbin has red eyes/feet) and both have green
+    # somewhere. The reliable difference is:
+    #   digger body  = lots of bright RED, almost no dark-green
+    #   nobbin body  = lots of dark-GREEN, only a few red pixels (eyes)
+    # So weight the tile score by (red - K * dgreen) to dock dark-green
+    # tiles. Then a minimum-red threshold rejects empty / dead-digger
+    # frames where no large red sprite is present.
+    digger_score = red_c.astype(np.int32) - 4 * dgrn_c.astype(np.int32)
+    flat_idx = int(digger_score.argmax())
+    if red_c.flat[flat_idx] >= 30 and dgrn_c.flat[flat_idx] < 20:
         d_row, d_col = divmod(flat_idx, MWIDTH)
         state.digger = DiggerPos(col=int(d_col), row=int(d_row), alive=True)
 
@@ -354,9 +361,9 @@ def extract_state_fast(frame_rgba: np.ndarray) -> GameState:
     # ~1500 px; >300 dirt pixels = clearly undisturbed.
     state.dirt = dirt_c > 300
 
-    # Monsters: dark-green body + yellow head + a few red pixels (eyes/
-    # feet). Exclude the digger's own tile.
-    monster_tiles = (dgrn_c >= 15) & (yel_c >= 6) & (red_c >= 2) & (red_c < 30)
+    # Monsters: large dark-green body (the sprite torso), yellow head, a
+    # few red pixels (eyes/feet). Must NOT be the digger tile.
+    monster_tiles = (dgrn_c >= 20) & (yel_c >= 6) & (red_c >= 2) & (red_c < 25)
     if state.digger is not None:
         monster_tiles[state.digger.row, state.digger.col] = False
     for r, c in zip(*np.where(monster_tiles)):
@@ -373,34 +380,45 @@ def extract_state_fast(frame_rgba: np.ndarray) -> GameState:
 
 # ---- Visualization helper -------------------------------------------------
 
-def render_overlay(frame_rgba: np.ndarray, state: GameState) -> np.ndarray:
-    """Draw GameState markers on top of frame for visual validation."""
+def render_overlay(frame_rgba: np.ndarray, state: GameState,
+                    show_digger: bool = False,
+                    show_monsters: bool = True,
+                    show_bags: bool = True,
+                    show_emeralds: bool = False) -> np.ndarray:
+    """Draw GameState markers on top of frame for visual validation.
+
+    Defaults: only mark monsters (blue) and bags (orange) -- the digger
+    sprite is already obvious to a human, and emerald markers tend to
+    clutter the dense level-1 layout. Pass show_emeralds=True / show_
+    digger=True to enable them.
+    """
     out = frame_rgba[..., :3].copy()
+    H, W = out.shape[:2]
 
-    def cross(cx, cy, color, sz=4):
-        H, W = out.shape[:2]
+    def cross(cx, cy, color, sz):
+        # Single-pixel-thick cross of total span 2*sz+1.
         for dx in range(-sz, sz + 1):
-            if 0 <= cx + dx < W:
-                out[max(0, cy - 1):min(H, cy + 2), cx + dx] = color
+            if 0 <= cx + dx < W and 0 <= cy < H:
+                out[cy, cx + dx] = color
         for dy in range(-sz, sz + 1):
-            if 0 <= cy + dy < H:
-                out[cy + dy, max(0, cx - 1):min(W, cx + 2)] = color
+            if 0 <= cy + dy < H and 0 <= cx < W:
+                out[cy + dy, cx] = color
 
-    if state.digger is not None and state.digger.present:
+    if show_digger and state.digger is not None and state.digger.present:
         cx, cy = tile_center(state.digger.col, state.digger.row)
-        cross(cx, cy, (255, 0, 255), sz=8)  # magenta cross on digger
-
-    for m in state.monsters:
-        cx, cy = tile_center(m.col, m.row)
-        cross(cx, cy, (0, 0, 255), sz=6)    # blue cross on monster
-
-    for b in state.bags:
-        cx, cy = tile_center(b.col, b.row)
-        cross(cx, cy, (255, 128, 0), sz=4)  # orange cross on bag
-
-    for r in range(MHEIGHT):
-        for c in range(MWIDTH):
-            if state.emeralds[r, c]:
-                cx, cy = tile_center(c, r)
-                cross(cx, cy, (0, 255, 255), sz=2)  # cyan dot on emerald
+        cross(cx, cy, (255, 0, 255), sz=3)
+    if show_monsters:
+        for m in state.monsters:
+            cx, cy = tile_center(m.col, m.row)
+            cross(cx, cy, (0, 0, 255), sz=4)
+    if show_bags:
+        for b in state.bags:
+            cx, cy = tile_center(b.col, b.row)
+            cross(cx, cy, (255, 128, 0), sz=3)
+    if show_emeralds:
+        for r in range(MHEIGHT):
+            for c in range(MWIDTH):
+                if state.emeralds[r, c]:
+                    cx, cy = tile_center(c, r)
+                    cross(cx, cy, (0, 255, 255), sz=1)
     return out

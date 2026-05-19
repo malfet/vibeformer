@@ -211,7 +211,13 @@ def run_live(args) -> None:
     raw = env._env._core.get_frame()
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.set_axis_off()
-    img = ax.imshow(render_overlay(raw, env._last_state))
+    if args.overlay:
+        img = ax.imshow(render_overlay(
+            raw, env._last_state,
+            show_digger=args.show_digger,
+            show_emeralds=args.show_emeralds))
+    else:
+        img = ax.imshow(raw[..., :3])
     fig.tight_layout(pad=0)
     fig.canvas.manager.set_window_title("DIGGER heuristic (live)")
     plt.ion()
@@ -241,7 +247,13 @@ def run_live(args) -> None:
         step_no += args.frame_skip
 
         raw = env._env._core.get_frame()
-        img.set_data(render_overlay(raw, env._last_state))
+        if args.overlay:
+            img.set_data(render_overlay(
+                raw, env._last_state,
+                show_digger=args.show_digger,
+                show_emeralds=args.show_emeralds))
+        else:
+            img.set_data(raw[..., :3])
         fig.canvas.draw_idle()
         fig.canvas.flush_events()
 
@@ -277,6 +289,13 @@ def parse_args():
     p.add_argument("--fire-range", type=int, default=5)
     p.add_argument("--live", action="store_true",
                    help="open a matplotlib window and watch the policy play")
+    p.add_argument("--overlay", action="store_true",
+                   help="draw small markers for detected monsters/bags "
+                        "(off by default; the digger sprite is already visible)")
+    p.add_argument("--show-digger", action="store_true",
+                   help="with --overlay, also mark the digger position")
+    p.add_argument("--show-emeralds", action="store_true",
+                   help="with --overlay, mark every detected emerald")
     return p.parse_args()
 
 

@@ -27,6 +27,7 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 from torch.optim import Adam
 
+from heuristic_agent import greedy_emerald
 from symbolic_env import OBS_CHANNELS, OBS_SHAPE, SymbolicDiggerEnv
 from train_ppo import layer_init, select_device
 
@@ -55,6 +56,13 @@ class Config:
     episodic_life: bool = True
     death_penalty: float = 0.0
     shaping_coef: float = 0.0    # potential-based shaping toward nearest emerald
+    # Imitation-learning warmup from the greedy heuristic. If bc_steps>0,
+    # collect that many transitions from the heuristic before PPO, BC the
+    # actor for bc_epochs, then continue with PPO from the warm start.
+    bc_steps: int = 0
+    bc_epochs: int = 5
+    bc_batch_size: int = 64
+    bc_anchor_coef: float = 0.0  # CE-to-heuristic loss term during PPO
     run_name: str = "symbolic"
     save_every: int = 50
     seed: int = 1
@@ -98,6 +106,77 @@ class SymbolicAgent(nn.Module):
         return action, dist.log_prob(action), dist.entropy(), self.critic(z).squeeze(-1)
 
 
+def collect_heuristic_data(env: SymbolicDiggerEnv, num_steps: int, frame_skip: int):
+    """Roll out the greedy heuristic for num_steps policy steps; return arrays.
+
+    Each step:
+      obs (current symbolic state) -> heuristic action -> frame-skipped env step.
+    Auto-resets on done.
+
+    Returns (obs, actions, score_rewards) where obs is uint8-cast-friendly
+    float32 arrays of the symbolic state seen at the moment of decision.
+    """
+    obs_list, act_list, rew_list = [], [], []
+    obs = env.reset()
+    for _ in range(num_steps):
+        # Record the obs *at decision time*, then act.
+        action = greedy_emerald(env._last_state)
+        obs_list.append(obs.copy())
+        act_list.append(action)
+        # Frame skip
+        total_r = 0.0
+        done = False
+        for _ in range(frame_skip):
+            obs, r, done_, info = env.step(action)
+            total_r += float(r)
+            if done_:
+                done = True
+                break
+        rew_list.append(total_r)
+        if done:
+            obs = env.reset()
+    return (np.stack(obs_list, axis=0),
+            np.array(act_list, dtype=np.int64),
+            np.array(rew_list, dtype=np.float32))
+
+
+def bc_pretrain(agent: nn.Module, optim: Adam,
+                obs: np.ndarray, actions: np.ndarray,
+                epochs: int, batch_size: int, device: torch.device) -> None:
+    """Cross-entropy on (symbolic_obs, heuristic_action) for a few epochs."""
+    obs_t = torch.from_numpy(obs).to(device)
+    acts_t = torch.from_numpy(actions).to(device)
+    M = obs_t.shape[0]
+    print(f"bc: {M} (obs, action) pairs, {epochs} epochs, batch={batch_size}",
+          flush=True)
+    # Action distribution sanity
+    counts = np.bincount(actions, minlength=SymbolicDiggerEnv.NUM_ACTIONS)
+    print(f"bc: teacher action dist (NOOP/L/R/U/D/FIRE) = {counts.tolist()}",
+          flush=True)
+    rng = np.random.default_rng(0)
+    for epoch in range(epochs):
+        perm = rng.permutation(M)
+        ce_sum = acc_sum = 0.0
+        n_batches = 0
+        for start in range(0, M, batch_size):
+            mb = perm[start:start + batch_size]
+            mb_obs = obs_t[mb]; mb_act = acts_t[mb]
+            z = agent.encode(mb_obs)
+            logits = agent.actor(z)
+            ce = F.cross_entropy(logits, mb_act)
+            optim.zero_grad()
+            ce.backward()
+            nn.utils.clip_grad_norm_(agent.parameters(), 5.0)
+            optim.step()
+            with torch.no_grad():
+                acc_sum += (logits.argmax(-1) == mb_act).float().mean().item()
+            ce_sum += ce.item()
+            n_batches += 1
+        print(f"  bc epoch {epoch+1}/{epochs}  "
+              f"ce {ce_sum/n_batches:.3f}  acc {acc_sum/n_batches:.3f}",
+              flush=True)
+
+
 def env_step_skipped(env: SymbolicDiggerEnv, action: int, skip: int):
     """Hold action across skip emulator frames; return last obs + summed reward."""
     total_r = 0.0
@@ -127,6 +206,14 @@ def parse_args() -> Config:
     p.add_argument("--shaping-coef", type=float, default=Config.shaping_coef,
                    help="potential-based reward per step for moving toward the "
                         "nearest emerald (try 0.5-2.0)")
+    p.add_argument("--bc-steps", type=int, default=Config.bc_steps,
+                   help="number of (obs, action) transitions to collect from "
+                        "the greedy heuristic for BC pretrain (try 5000-20000)")
+    p.add_argument("--bc-epochs", type=int, default=Config.bc_epochs)
+    p.add_argument("--bc-batch-size", type=int, default=Config.bc_batch_size)
+    p.add_argument("--bc-anchor-coef", type=float, default=Config.bc_anchor_coef,
+                   help="if >0, add a CE-to-heuristic anchor loss term to "
+                        "every PPO minibatch (keeps policy near the teacher)")
     p.add_argument("--save-every", type=int, default=Config.save_every)
     p.add_argument("--seed", type=int, default=Config.seed)
     p.add_argument("--force-cpu", action="store_true")
@@ -137,6 +224,8 @@ def parse_args() -> Config:
         num_steps=a.num_steps, ent_coef=a.ent_coef, ent_coef_final=a.ent_coef_final,
         frame_skip=a.frame_skip, episodic_life=a.episodic_life,
         death_penalty=a.death_penalty, shaping_coef=a.shaping_coef,
+        bc_steps=a.bc_steps, bc_epochs=a.bc_epochs,
+        bc_batch_size=a.bc_batch_size, bc_anchor_coef=a.bc_anchor_coef,
         save_every=a.save_every, seed=a.seed,
         device=str(select_device(a.force_cpu)), run_name=a.run_name,
     )
@@ -159,6 +248,19 @@ def main() -> None:
     print(f"[{cfg.run_name}] agent: {n_params:,} params", flush=True)
     optim = Adam(agent.parameters(), lr=cfg.learning_rate, eps=1e-5)
 
+    # ---- BC pretrain from greedy heuristic (optional) ----
+    bc_obs_t = bc_acts_t = None
+    if cfg.bc_steps > 0:
+        print(f"[{cfg.run_name}] collecting {cfg.bc_steps} heuristic transitions...",
+              flush=True)
+        bc_obs_np, bc_acts_np, _ = collect_heuristic_data(
+            env, cfg.bc_steps, cfg.frame_skip)
+        bc_pretrain(agent, optim, bc_obs_np, bc_acts_np,
+                    cfg.bc_epochs, cfg.bc_batch_size, device)
+        # Keep on-device tensors for the anchor loss during PPO.
+        if cfg.bc_anchor_coef > 0:
+            bc_obs_t = torch.from_numpy(bc_obs_np).to(device)
+            bc_acts_t = torch.from_numpy(bc_acts_np).to(device)
     N = cfg.num_steps
     obs_buf = torch.zeros(N, *OBS_SHAPE, device=device)
     act_buf = torch.zeros(N, dtype=torch.long, device=device)
@@ -167,6 +269,7 @@ def main() -> None:
     done_buf = torch.zeros(N, device=device)
     val_buf = torch.zeros(N, device=device)
 
+    # Fresh env state for PPO (post-BC traces left it mid-episode).
     obs_np = env.reset()
     obs_t = torch.from_numpy(obs_np).unsqueeze(0).to(device)
     done_t = torch.zeros(1, device=device)
@@ -254,6 +357,15 @@ def main() -> None:
                     v_loss = 0.5 * ((new_val - returns[mb]) ** 2).mean()
                 ent = entropy.mean()
                 loss = pg_loss - current_ent * ent + cfg.vf_coef * v_loss
+                if bc_obs_t is not None:
+                    # BC anchor: keep the actor's distribution close to the
+                    # heuristic's choice on demonstration states. Sample a
+                    # mini-batch of demo states each step.
+                    M_bc = bc_obs_t.shape[0]
+                    bc_idx = torch.randint(M_bc, (mb_size,), device=device)
+                    bc_logits = agent.actor(agent.encode(bc_obs_t[bc_idx]))
+                    bc_ce = F.cross_entropy(bc_logits, bc_acts_t[bc_idx])
+                    loss = loss + cfg.bc_anchor_coef * bc_ce
                 optim.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(agent.parameters(), cfg.max_grad_norm)
