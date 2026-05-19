@@ -51,8 +51,8 @@ def _direction_toward(target_row: int, target_col: int,
     return DiggerEnv.NOOP
 
 
-def greedy_emerald(state) -> int:
-    """One greedy Manhattan step toward the nearest emerald (no dodging)."""
+def _greedy_step(state) -> int:
+    """One stateless greedy Manhattan step toward the nearest emerald."""
     if state.digger is None or not state.digger.present:
         return DiggerEnv.NOOP
     em_rows, em_cols = np.where(state.emeralds)
@@ -64,6 +64,51 @@ def greedy_emerald(state) -> int:
     er, ec = int(em_rows[i]), int(em_cols[i])
     return _direction_toward(er, ec, dr, dc,
                               prefer_col_first=abs(ec - dc) >= abs(er - dr))
+
+
+class GreedyEmerald:
+    """Per-step greedy nearest-emerald chaser with anti-jitter stickiness.
+
+    Each step we pick the action that takes us one Manhattan step closer
+    to the currently-nearest emerald, so we adapt naturally when the
+    digger crosses a tile boundary and a different emerald becomes
+    closest.
+
+    But when the digger's CV-detected position briefly snaps to the tile
+    it's actively moving toward (mid-frame straddle), `_greedy_step`
+    sees "we're on the target" and returns NOOP -- even though the
+    emerald hasn't actually been consumed. Without correction the agent
+    appears to hesitate at the edge of every emerald tile. So: if the
+    one-shot decision is NOOP but there are still emeralds in the grid,
+    fall back to the last directional action we took. The fallback
+    naturally clears once we've actually consumed the emerald (no more
+    near-tile jitter to trigger the NOOP path).
+
+    Call .reset() between episodes.
+    """
+
+    MOVE_ACTIONS = (DiggerEnv.LEFT, DiggerEnv.RIGHT,
+                    DiggerEnv.UP, DiggerEnv.DOWN)
+
+    def __init__(self):
+        self.last_dir: int = DiggerEnv.NOOP
+
+    def reset(self) -> None:
+        self.last_dir = DiggerEnv.NOOP
+
+    def __call__(self, state) -> int:
+        action = _greedy_step(state)
+        if action == DiggerEnv.NOOP and state.emeralds.any() \
+                and self.last_dir != DiggerEnv.NOOP:
+            return self.last_dir
+        if action in self.MOVE_ACTIONS:
+            self.last_dir = action
+        return action
+
+
+def greedy_emerald(state) -> int:
+    """Stateless one-shot wrapper. For repeated use prefer GreedyEmerald()."""
+    return _greedy_step(state)
 
 
 class SmartHeuristic:
@@ -78,9 +123,11 @@ class SmartHeuristic:
         self.dodge_range = dodge_range
         self.fire_range = fire_range
         self.prev_dir: int = DiggerEnv.NOOP
+        self._chaser = GreedyEmerald()
 
     def reset(self) -> None:
         self.prev_dir = DiggerEnv.NOOP
+        self._chaser.reset()
 
     def __call__(self, state) -> int:
         action = self._decide(state)
@@ -115,7 +162,7 @@ class SmartHeuristic:
                 if abs(mr - dr) <= self.dodge_range:
                     return self._escape_axis(state, dr, dc, axis="col")
 
-        return greedy_emerald(state)
+        return self._chaser(state)
 
     def _escape_axis(self, state, dr: int, dc: int, axis: str) -> int:
         """Move perpendicular to the threat axis, preferring toward an emerald.
@@ -152,8 +199,8 @@ def run_headless(args) -> None:
         policy = SmartHeuristic(args.dodge_range, args.fire_range)
         pol_name = f"smart(dodge={args.dodge_range}, fire={args.fire_range})"
     else:
-        policy = None
-        pol_name = "greedy"
+        policy = GreedyEmerald()
+        pol_name = "greedy(anti-jitter)"
 
     scores: list[int] = []
     lengths: list[int] = []
@@ -161,15 +208,11 @@ def run_headless(args) -> None:
 
     for ep in range(args.episodes):
         env.reset()
-        if policy is not None:
-            policy.reset()
+        policy.reset()
         ep_score = 0
         ep_len = 0
         for step in range(args.max_steps):
-            if policy is not None:
-                action = policy(env._last_state)
-            else:
-                action = greedy_emerald(env._last_state)
+            action = policy(env._last_state)
             done = False
             for _ in range(args.frame_skip):
                 obs, r, done_, info = env.step(action)
@@ -205,7 +248,7 @@ def run_live(args) -> None:
     env = SymbolicDiggerEnv(max_steps=10**9,
                             episodic_life=not args.no_episodic_life)
     policy = (SmartHeuristic(args.dodge_range, args.fire_range)
-              if args.smart else None)
+              if args.smart else GreedyEmerald())
 
     obs = env.reset()
     raw = env._env._core.get_frame()
@@ -229,15 +272,14 @@ def run_live(args) -> None:
     fps_ema = 1.0 / target_dt
     step_no = 0
     seen_alive = False
-    if policy is not None: policy.reset()
+    policy.reset()
 
     while plt.fignum_exists(fig.number):
         now = time.monotonic()
         elapsed = now - last_wall
         last_wall = now
 
-        action = (policy(env._last_state) if policy is not None
-                  else greedy_emerald(env._last_state))
+        action = policy(env._last_state)
 
         done = False
         info = {}

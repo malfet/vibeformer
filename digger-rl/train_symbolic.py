@@ -27,7 +27,7 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 from torch.optim import Adam
 
-from heuristic_agent import greedy_emerald
+from heuristic_agent import GreedyEmerald
 from symbolic_env import OBS_CHANNELS, OBS_SHAPE, SymbolicDiggerEnv
 from train_ppo import layer_init, select_device
 
@@ -118,9 +118,10 @@ def collect_heuristic_data(env: SymbolicDiggerEnv, num_steps: int, frame_skip: i
     """
     obs_list, act_list, rew_list = [], [], []
     obs = env.reset()
+    chaser = GreedyEmerald()
     for _ in range(num_steps):
         # Record the obs *at decision time*, then act.
-        action = greedy_emerald(env._last_state)
+        action = chaser(env._last_state)
         obs_list.append(obs.copy())
         act_list.append(action)
         # Frame skip
@@ -135,6 +136,7 @@ def collect_heuristic_data(env: SymbolicDiggerEnv, num_steps: int, frame_skip: i
         rew_list.append(total_r)
         if done:
             obs = env.reset()
+            chaser.reset()
     return (np.stack(obs_list, axis=0),
             np.array(act_list, dtype=np.int64),
             np.array(rew_list, dtype=np.float32))

@@ -173,3 +173,9 @@
 [2026-05-18] Sure, do that, but also please note that your recent change make playtruth much worse
 
 [2026-05-18] Can you summarize current state of problems to README.MD or something so that I can continue on another machine?
+
+[2026-05-19] Let's do BC from heuristic
+
+[2026-05-19] One obvious problem to fix with the greedy algorithm - for some reason, when digger is in the top right corner and there is a emerald right on top of it, it thinks for quite some time before going up, even though this is clearly a closes one. Can you check how many diamonds are there in total when you start the game? Should be 30
+
+[2026-05-19] Let's do #1

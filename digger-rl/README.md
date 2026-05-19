@@ -11,7 +11,8 @@ results today are:
 
 | Approach | Mean ep score | Max ep | Notes |
 |---|---:|---:|---|
-| **Greedy heuristic on symbolic state** | **1410** | **2425** | 50 LOC, no learning. Current SOTA. |
+| **Greedy heuristic on symbolic state, anti-jitter** | **1645** | **3075** | 50 LOC, no learning. Current SOTA. |
+| Greedy heuristic, plain | 1410 | 2425 | Re-evaluates each step; hesitates at tile boundaries |
 | BC + PPO from color trace (pixels, 20k frames) | ~70 sustained | 1625 | Wider net + 2 traces + 30 BC epochs |
 | BC + PPO from color trace (pixels, 500k frames) | ~50 | 1175 | Long training collapses to one action |
 | Dreamer online (world model + AC, 500k frames) | 225 | 875 | Actor entropy collapsed to 0 |
