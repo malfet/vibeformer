@@ -181,3 +181,11 @@
 [2026-05-19] Let's do #1
 
 [2026-05-19] Can you do a small refactoring and move all auxiliary scripts to say tools folder, and only keep DiggerEnv, train, run scripts in the top folder
+
+[2026-05-19] So can you hypothesize why it never outperforms teacher?
+
+[2026-05-19] Or should we try original PPO from pixels, but using the symbolic heuristic instead of play traces
+
+[2026-05-19] Trying DQN also sounds nice
+
+[2026-05-19] Let's start training pixel-PPO with the teacher and in parallel write DQN
