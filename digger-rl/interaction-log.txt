@@ -153,3 +153,5 @@
 [2026-05-18] Let's do 1 first, but you don't even need an A*, as digger can dig thru everything but bags
 
 [2026-05-18] Try replace BFS with more CV algos running backed by PT (you can use torchvision if it'll be of any help)
+
+[2026-05-18] let's do 2
