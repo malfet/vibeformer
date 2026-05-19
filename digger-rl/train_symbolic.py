@@ -27,8 +27,8 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 from torch.optim import Adam
 
-from heuristic_agent import GreedyEmerald
-from symbolic_env import OBS_CHANNELS, OBS_SHAPE, SymbolicDiggerEnv
+from tools.heuristic_agent import GreedyEmerald
+from tools.symbolic_env import OBS_CHANNELS, OBS_SHAPE, SymbolicDiggerEnv
 from train_ppo import layer_init, select_device
 
 REPO = Path(__file__).parent.resolve()

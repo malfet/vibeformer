@@ -23,7 +23,7 @@ import torch
 import torch.nn.functional as F
 
 from digger_env import DiggerEnv, preprocess_uint8
-from dreamer import Actor, Critic, DreamerConfig, WorldModel
+from tools.dreamer import Actor, Critic, DreamerConfig, WorldModel
 from train_ppo import select_device
 
 ACTION_NAMES = ["NOOP", "LEFT", "RIGHT", "UP", "DOWN", "FIRE"]

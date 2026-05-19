@@ -13,24 +13,30 @@ the nearest emerald, with a small overlay of threat-aware behaviour:
             facing direction, so this hits the threat.
 
 Headless usage (compares to the previous baseline):
-    python heuristic_agent.py --episodes 5 --no-episodic-life
+    python -m tools.heuristic_agent --episodes 5 --no-episodic-life
 
 Interactive viewer (matplotlib window showing live gameplay with
 detected GameState overlaid as markers, plus title with current
 action / score / lives):
-    python heuristic_agent.py --live
+    python -m tools.heuristic_agent --live
 """
 
 from __future__ import annotations
 
 import argparse
+import sys
 import time
+from pathlib import Path
+
+# Allow running this file directly (`python tools/heuristic_agent.py`)
+# by ensuring the project root is on sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
 
 from digger_env import DiggerEnv
-from game_state import MHEIGHT, MWIDTH, render_overlay, tile_center
-from symbolic_env import SymbolicDiggerEnv
+from tools.game_state import MHEIGHT, MWIDTH, render_overlay, tile_center
+from tools.symbolic_env import SymbolicDiggerEnv
 
 ACTION_NAMES = ["NOOP", "LEFT", "RIGHT", "UP", "DOWN", "FIRE"]
 

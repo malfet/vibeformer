@@ -19,7 +19,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from dreamer import Actor, Critic, DreamerConfig, WorldModel
+from tools.dreamer import Actor, Critic, DreamerConfig, WorldModel
 
 REPO = Path(__file__).parent.resolve()
 

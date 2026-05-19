@@ -28,17 +28,19 @@ PPO** on the symbolic state.
 
 | File | Purpose |
 | --- | --- |
-| `run_digger.py` | Manual play (matplotlib `--live`) + trace recording (`--record-playtrace`, `--color`). R resets to level 1. |
 | `digger_env.py` | `DiggerEnv` (single env, RGBA frames, score/lives via RAM at 0x282E0/0x259F2) and `DiggerVecEnv` (in-proc for `num_envs=1`, subprocess workers for >1). |
-| `game_state.py` | `GameState` dataclasses + `extract_state_fast(frame)` — vectorised CV extractor running at ~2 ms/frame (no BFS, just `np.bincount` per-tile per-color). |
-| `symbolic_env.py` | `SymbolicDiggerEnv` wraps `DiggerEnv` and emits `(6, 10, 15)` mask tensors: dirt / emerald / digger / monster / bag / cherry. Optional `shaping_coef` for potential-based reward shaping toward nearest emerald. |
-| `heuristic_agent.py` | The current SOTA: greedy walk to nearest emerald. `--smart` adds dodge + fire (currently regresses, see "Known issues"). `--live` opens a matplotlib viewer. |
 | `train_ppo.py` | Pixel PPO (NatureCNN, width-configurable). Supports BC from `.npz` traces, BC anchor during PPO, color RGB obs. |
 | `train_symbolic.py` | Tiny symbolic-state PPO. `--bc-steps N` collects N transitions from the heuristic and BC-pretrains the actor; `--bc-anchor-coef` keeps PPO near the heuristic. |
 | `train_dreamer.py` | Offline world-model training on color traces. Phase 1 / Phase 2 done. |
 | `train_dreamer_online.py` | Full Dreamer V3-ish online loop (replay buffer + WM + AC, real env). |
-| `run_ppo.py`, `run_dreamer.py`, `analyze_ppo.py` | Live / headless playback of saved checkpoints. |
-| `tile_classifier.py` | Nearest-prototype tile classifier (alternative to CV thresholds, partial). |
+| `run_digger.py` | Manual play (matplotlib `--live`) + trace recording (`--record-playtrace`, `--color`). R resets to level 1. |
+| `run_ppo.py` / `run_dreamer.py` | Live playback of saved PPO / Dreamer checkpoints. |
+| `tools/game_state.py` | `GameState` dataclasses + `extract_state_fast(frame)` — vectorised CV extractor running at ~2 ms/frame (no BFS, just `np.bincount` per-tile per-color). |
+| `tools/symbolic_env.py` | `SymbolicDiggerEnv` wraps `DiggerEnv` and emits `(6, 10, 15)` mask tensors: dirt / emerald / digger / monster / bag / cherry. Optional `shaping_coef` for potential-based reward shaping toward nearest emerald. |
+| `tools/heuristic_agent.py` | The current SOTA: greedy walk to nearest emerald (anti-jitter). `--smart` adds dodge + fire (currently regresses, see "Known issues"). `--live` opens a matplotlib viewer. |
+| `tools/dreamer.py` | Dreamer-V3-ish model code: Encoder, RSSM, Decoder, Actor, Critic, ReplayBuffer. |
+| `tools/analyze_ppo.py` | Headless per-step rollout analyzer for PPO checkpoints (action distribution, entropy, value estimates). |
+| `tools/tile_classifier.py` | Nearest-prototype tile classifier (alternative to CV thresholds, partial). |
 | `interaction-log.txt` | Full chronological log of every prompt; the journey. |
 
 ## How to run
@@ -46,17 +48,17 @@ PPO** on the symbolic state.
 ### Watch the heuristic play
 
 ```bash
-python heuristic_agent.py --live
-python heuristic_agent.py --live --overlay              # mark detected monsters/bags
-python heuristic_agent.py --live --overlay --show-digger --show-emeralds
-python heuristic_agent.py --live --smart                # regresses; see below
+python -m tools.heuristic_agent --live
+python -m tools.heuristic_agent --live --overlay              # mark detected monsters/bags
+python -m tools.heuristic_agent --live --overlay --show-digger --show-emeralds
+python -m tools.heuristic_agent --live --smart                # regresses; see below
 ```
 
-### Headless benchmark (5 episodes, no episodic-life so full game-over)
+### Headless benchmark (10 episodes, no episodic-life so full game-over)
 
 ```bash
-python heuristic_agent.py --episodes 5 --no-episodic-life          # greedy = 1410 mean
-python heuristic_agent.py --episodes 5 --no-episodic-life --smart  # smart  =  925 mean (worse)
+python -m tools.heuristic_agent --episodes 10 --no-episodic-life          # greedy = 1645 mean
+python -m tools.heuristic_agent --episodes 10 --no-episodic-life --smart  # smart  =  925 mean (worse)
 ```
 
 ### Train symbolic PPO with BC from heuristic (recommended next experiment)

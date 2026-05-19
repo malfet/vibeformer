@@ -4,13 +4,16 @@ Runs the agent through `--episodes` full games (no episodic-life soft reset),
 prints a per-event log (reward / life change), and an end-of-episode summary
 with action distribution, average entropy, value-estimate stats.
 
-    python analyze_ppo.py data/checkpoints/exp4_both_traces/ppo_digger_final.pt
+    python -m tools.analyze_ppo data/checkpoints/exp4_both_traces/ppo_digger_final.pt
 """
 
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
 import torch

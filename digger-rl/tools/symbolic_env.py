@@ -25,7 +25,7 @@ from __future__ import annotations
 import numpy as np
 
 from digger_env import DiggerEnv
-from game_state import MHEIGHT, MWIDTH, extract_state_fast as extract_state
+from tools.game_state import MHEIGHT, MWIDTH, extract_state_fast as extract_state
 
 OBS_CHANNELS = 6
 OBS_SHAPE = (OBS_CHANNELS, MHEIGHT, MWIDTH)

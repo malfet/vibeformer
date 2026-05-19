@@ -27,7 +27,7 @@ from pathlib import Path
 
 import numpy as np
 
-from game_state import PLAY_TOP, TILE_H, TILE_W
+from tools.game_state import PLAY_TOP, TILE_H, TILE_W
 
 
 class TileClass(Enum):
@@ -103,7 +103,7 @@ class PrototypeBank:
 
 def harvest_tile_patches(frame_rgba: np.ndarray) -> dict[tuple[int, int], np.ndarray]:
     """Return {(col, row): patch} for every tile in the play area of a frame."""
-    from game_state import MWIDTH, MHEIGHT
+    from tools.game_state import MWIDTH, MHEIGHT
     rgb = frame_rgba[..., :3]
     out = {}
     for r in range(MHEIGHT):
@@ -159,7 +159,7 @@ def bootstrap_from_env() -> PrototypeBank:
     f2 = core.get_frame()[..., :3]
     # Use the CV partial detector to find the largest dark-green blob;
     # that's the nobbin. We crop the surrounding tile.
-    from game_state import (_color_mask, _largest_components, PAL_DGREEN,
+    from tools.game_state import (_color_mask, _largest_components, PAL_DGREEN,
                             PLAY_TOP, pixel_to_tile)
     play = f2[PLAY_TOP:]
     dgreen_blobs = _largest_components(_color_mask(play, PAL_DGREEN),
@@ -173,7 +173,7 @@ def bootstrap_from_env() -> PrototypeBank:
 
 def label_image(frame_rgba: np.ndarray, bank: PrototypeBank) -> np.ndarray:
     """Classify every tile of the frame; return (MHEIGHT, MWIDTH) of TileClass enum values (by name)."""
-    from game_state import MWIDTH, MHEIGHT
+    from tools.game_state import MWIDTH, MHEIGHT
     out = np.empty((MHEIGHT, MWIDTH), dtype=object)
     rgb = frame_rgba[..., :3]
     for r in range(MHEIGHT):

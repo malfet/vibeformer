@@ -26,7 +26,7 @@ import torch
 import torch.nn.functional as F
 
 from digger_env import DiggerVecEnv
-from dreamer import Actor, Critic, DreamerConfig, ReplayBuffer, WorldModel
+from tools.dreamer import Actor, Critic, DreamerConfig, ReplayBuffer, WorldModel
 from train_dreamer import ac_loss, imagine_rollout
 from train_ppo import select_device
 
