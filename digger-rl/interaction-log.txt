@@ -145,3 +145,11 @@
 [2026-05-18] Or may be can you train a small ML network that will distinguish between those?
 
 [2026-05-18] I.e. all you need is to classify I guess 16x16 blocks into enemy/digger/bag of gold or dirt?
+
+[2026-05-18] Sure, let's try building an agent that can learn to play based on this state
+
+[2026-05-18] But wouldn't it be subject to the same problem - PPO can not strategize about "Move towards X"?
+
+[2026-05-18] Let's do 1 first, but you don't even need an A*, as digger can dig thru everything but bags
+
+[2026-05-18] Try replace BFS with more CV algos running backed by PT (you can use torchvision if it'll be of any help)

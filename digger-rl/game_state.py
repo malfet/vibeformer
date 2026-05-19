@@ -272,6 +272,105 @@ def extract_state(frame_rgba: np.ndarray) -> GameState:
     return state
 
 
+# ---- Fast vectorized extractor --------------------------------------------
+
+_TILE_INDEX_CACHE: dict[tuple[int, int], np.ndarray] = {}
+
+
+def _tile_index_for_play(play_h: int, play_w: int) -> np.ndarray:
+    """Build a (play_h, play_w) int32 map: each pixel -> linear tile index 0..149.
+
+    Cached because the play-area dimensions never change between frames.
+    """
+    key = (play_h, play_w)
+    cached = _TILE_INDEX_CACHE.get(key)
+    if cached is not None:
+        return cached
+    ys = np.arange(play_h, dtype=np.int32)
+    xs = np.arange(play_w, dtype=np.int32)
+    tile_row = (ys * MHEIGHT // play_h)            # (H,) in 0..MHEIGHT-1
+    tile_col = (xs * MWIDTH // play_w)             # (W,) in 0..MWIDTH-1
+    idx = tile_row[:, None] * MWIDTH + tile_col[None, :]
+    _TILE_INDEX_CACHE[key] = idx
+    return idx
+
+
+def extract_state_fast(frame_rgba: np.ndarray) -> GameState:
+    """Vectorised CV extractor, ~10x faster than extract_state.
+
+    No Python loops over pixels and no connected-components BFS. Instead:
+      1. Compute 6 boolean colour masks against the exact palette
+         (one elementwise compare per colour).
+      2. Use a precomputed (play_h, play_w) -> tile_index lookup and
+         np.bincount to get per-tile per-colour counts in one pass.
+      3. Classify each tile from those count vectors.
+
+    Loses the sub-tile centroid precision of the BFS version but for a
+    tile-aligned game like Digger this is fine.
+    """
+    assert frame_rgba.shape == (FRAME_H, FRAME_W, 4), \
+        f"expected 400x640 RGBA, got {frame_rgba.shape}"
+    rgb = frame_rgba[..., :3]
+    play = rgb[PLAY_TOP:PLAY_BOTTOM]
+    H, W = play.shape[:2]
+    tile_idx_flat = _tile_index_for_play(H, W).ravel()
+    n_tiles = MWIDTH * MHEIGHT
+
+    # All boolean masks computed in one sweep through `play`.
+    pr = play[..., 0]; pg = play[..., 1]; pb = play[..., 2]
+    m_red   = (pr == PAL_RED[0])   & (pg == PAL_RED[1])   & (pb == PAL_RED[2])
+    m_grn   = (pr == PAL_GREEN[0]) & (pg == PAL_GREEN[1]) & (pb == PAL_GREEN[2])
+    m_dgrn  = (pr == PAL_DGREEN[0]) & (pg == PAL_DGREEN[1]) & (pb == PAL_DGREEN[2])
+    m_yel   = (pr == PAL_YELLOW[0]) & (pg == PAL_YELLOW[1]) & (pb == PAL_YELLOW[2])
+    m_dgray = (pr == PAL_DGRAY[0]) & (pg == PAL_DGRAY[1]) & (pb == PAL_DGRAY[2])
+    m_dirt  = (((pr == PAL_DIRT_A[0]) & (pg == PAL_DIRT_A[1]) & (pb == PAL_DIRT_A[2])) |
+               ((pr == PAL_DIRT_B[0]) & (pg == PAL_DIRT_B[1]) & (pb == PAL_DIRT_B[2])))
+
+    def per_tile(mask: np.ndarray) -> np.ndarray:
+        return np.bincount(tile_idx_flat[mask.ravel()],
+                           minlength=n_tiles).reshape(MHEIGHT, MWIDTH)
+
+    red_c   = per_tile(m_red)
+    grn_c   = per_tile(m_grn)
+    dgrn_c  = per_tile(m_dgrn)
+    yel_c   = per_tile(m_yel)
+    dgray_c = per_tile(m_dgray)
+    dirt_c  = per_tile(m_dirt)
+
+    state = GameState()
+
+    # Digger: tile holding the most red pixels. Threshold rejects frames
+    # where the digger is dead/off-screen (no large red blob).
+    flat_idx = int(red_c.argmax())
+    if red_c.flat[flat_idx] >= 30:
+        d_row, d_col = divmod(flat_idx, MWIDTH)
+        state.digger = DiggerPos(col=int(d_col), row=int(d_row), alive=True)
+
+    # Emeralds: bright-green pixels in tile, no red (avoids the digger
+    # body and monster eyes contaminating).
+    state.emeralds = (grn_c >= 25) & (red_c < 4)
+
+    # Dirt: enough brown pixels in tile to call it "covered". Tile area
+    # ~1500 px; >300 dirt pixels = clearly undisturbed.
+    state.dirt = dirt_c > 300
+
+    # Monsters: dark-green body + yellow head + a few red pixels (eyes/
+    # feet). Exclude the digger's own tile.
+    monster_tiles = (dgrn_c >= 15) & (yel_c >= 6) & (red_c >= 2) & (red_c < 30)
+    if state.digger is not None:
+        monster_tiles[state.digger.row, state.digger.col] = False
+    for r, c in zip(*np.where(monster_tiles)):
+        state.monsters.append(MonsterPos(col=int(c), row=int(r), is_hobbin=False))
+
+    # Bags: yellow $ glyph (smaller blob than an emerald's inner glow,
+    # but the discriminator is the dgray sack body next to it).
+    bag_tiles = (yel_c >= 4) & (yel_c <= 25) & (dgray_c >= 20)
+    for r, c in zip(*np.where(bag_tiles)):
+        state.bags.append(BagPos(col=int(c), row=int(r)))
+
+    return state
+
+
 # ---- Visualization helper -------------------------------------------------
 
 def render_overlay(frame_rgba: np.ndarray, state: GameState) -> np.ndarray:
