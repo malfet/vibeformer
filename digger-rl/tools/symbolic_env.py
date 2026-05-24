@@ -11,7 +11,7 @@ Channel layout (each plane is a 10x15 float32 mask):
   1 emerald
   2 digger
   3 monster (any nobbin / hobbin in that tile)
-  4 bag intact          (currently always zero; CV doesn't detect bags yet)
+  4 bag intact
   5 cherry              (currently always zero; CV doesn't detect cherry)
 
 Plus a small per-step scalar tail (concatenated by the trainer if

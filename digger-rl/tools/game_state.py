@@ -69,11 +69,55 @@ PAL_YELLOW    = (255, 255, 0)    # bag '$', monster head, digger trim
 PAL_RED       = (255, 0,   0)    # digger body, monster eyes/feet
 PAL_WHITE     = (255, 255, 255)  # text
 PAL_GRAY      = (130, 130, 130)  # sprite outlines / dim
-PAL_DGRAY     = (65,  65,  65)   # bag outline
 PAL_DCYAN     = (0,   130, 130)  # title-screen text
 
 DIRT_COLORS = {PAL_DIRT_A, PAL_DIRT_B}
 SPRITE_COLORS = {PAL_GREEN, PAL_DGREEN, PAL_YELLOW, PAL_RED}
+
+
+# ---- Bag sprite ----------------------------------------------------------
+# Intact bag: a 32x30 pure-black sprite (circular outline + solid "$")
+# drawn over dirt. The bag uses NO colour of its own -- the brown sack we
+# see is the dirt showing through the open parts of the outline, and the
+# "$" is just black carved out of the dirt. So bag detection is an exact
+# template match against the framebuffer's black mask.
+_BAG_TEMPLATE_STR = (
+    '00000000000111111111100000000000',
+    '00000000001000000000010000000000',
+    '00000000001000000000010000000000',
+    '00000000001100000000110000000000',
+    '00000000000011000011000000000000',
+    '00000000000011000011000000000000',
+    '00000000001100000000110000000000',
+    '00000000110000000000001100000000',
+    '00000001000000000000000010000000',
+    '00000010000000111100000001000000',
+    '00000100000000111100000000100000',
+    '00001000001111111111100000010000',
+    '00010000111111111111111000001000',
+    '00100001111111111111111110000100',
+    '01000011111000111100111110000010',
+    '01000011110000111100000000000010',
+    '10000011111111111100000000000001',
+    '10000001111111111111111000000001',
+    '10000000011111111111111110000001',
+    '10000000000000111111111111000001',
+    '10000000000000111100001111000001',
+    '10000001111100111100011111000001',
+    '01000001111111111111111110000010',
+    '01000000111111111111111100000010',
+    '00100000000111111111100000000100',
+    '00010000000000111100000000001000',
+    '00001100000000111100000000110000',
+    '00000011000000000000000011000000',
+    '00000000111110000001111100000000',
+    '00000000000001111110000000000000',
+)
+BAG_TEMPLATE: np.ndarray = np.array(
+    [[c == '1' for c in row] for row in _BAG_TEMPLATE_STR], dtype=bool)
+BAG_TPL_H, BAG_TPL_W = BAG_TEMPLATE.shape           # 30, 32
+# Offset from the template's top-left to the bag's centre pixel.
+BAG_CENTER_DY, BAG_CENTER_DX = BAG_TPL_H // 2, BAG_TPL_W // 2
 
 
 # ---- GameState dataclasses ------------------------------------------------
@@ -144,6 +188,59 @@ def _color_mask(frame_rgb: np.ndarray, rgb: tuple[int, int, int]) -> np.ndarray:
     return (frame_rgb[..., 0] == r) & (frame_rgb[..., 1] == g) & (frame_rgb[..., 2] == b)
 
 
+def _find_bags_by_template(m_blk_play: np.ndarray) -> list[tuple[int, int]]:
+    """Locate bags by exact template match against the play-area black mask.
+
+    Returns a list of (col, row) tile coordinates -- one per bag -- whose
+    centres fall on the corresponding tile centre. The template is matched
+    exactly (black-where-template-says-black AND not-black-elsewhere), so
+    tunnels and other large black regions do not false-match -- they fail
+    the not-black check on the bag's internal-dirt pixels.
+
+    Implementation: two-stage vectorised filter. The cheap stage AND-reduces
+    one row of the bag's central "$" spine (must-be-black) with one row of
+    the bag's interior gap (must-NOT-be-black). That rejects almost every
+    non-bag pixel in the frame, including all of the tunnel interiors which
+    are entirely black. The few survivors get a full template check.
+    """
+    H, W = m_blk_play.shape
+    if H < BAG_TPL_H or W < BAG_TPL_W:
+        return []
+
+    TH, TW = BAG_TPL_H, BAG_TPL_W
+    out_h, out_w = H - TH + 1, W - TW + 1  # valid top-left positions
+
+    # Cheap pre-filter at template positions:
+    #   (12, 14..17) = the $ spine, must be black (4 pixels)
+    #   (14, 11..13) = the dirt gap just left of the spine, must NOT be black
+    # In a tunnel, the "gap" positions are also black, so the filter rejects.
+    # In dirt, the "spine" positions are not black, so the filter rejects.
+    # Only an aligned bag passes both rows.
+    spine = (m_blk_play[12:12+out_h, 14:14+out_w]
+             & m_blk_play[12:12+out_h, 15:15+out_w]
+             & m_blk_play[12:12+out_h, 16:16+out_w]
+             & m_blk_play[12:12+out_h, 17:17+out_w])
+    gap   = ~(m_blk_play[14:14+out_h, 11:11+out_w]
+              | m_blk_play[14:14+out_h, 12:12+out_w]
+              | m_blk_play[14:14+out_h, 13:13+out_w])
+    candidates = spine & gap
+    cand_ys, cand_xs = np.where(candidates)
+
+    out: list[tuple[int, int]] = []
+    seen: set[tuple[int, int]] = set()
+    for ty, tx in zip(cand_ys.tolist(), cand_xs.tolist()):
+        if (ty, tx) in seen:
+            continue
+        if not np.array_equal(m_blk_play[ty:ty + TH, tx:tx + TW], BAG_TEMPLATE):
+            continue
+        seen.add((ty, tx))
+        sprite_cy = ty + BAG_CENTER_DY
+        sprite_cx = tx + BAG_CENTER_DX
+        col, row = pixel_to_tile(sprite_cx, sprite_cy + PLAY_TOP)
+        out.append((col, row))
+    return out
+
+
 def _largest_components(mask: np.ndarray, min_area: int = 20) -> list[tuple[int, tuple[int, int]]]:
     """Return list of (area, (cy, cx)) for each connected blob >= min_area.
 
@@ -197,8 +294,6 @@ def extract_state(frame_rgba: np.ndarray) -> GameState:
     m_blk   = _color_mask(play, PAL_BLACK)
     m_dirt  = _color_mask(play, PAL_DIRT_A) | _color_mask(play, PAL_DIRT_B)
 
-    m_dgray = _color_mask(play, PAL_DGRAY)
-
     # --- digger: largest connected RED blob. Player sprite is dominated
     # by red; monster eyes/feet are also red but smaller (a few px each).
     red_blobs = _largest_components(m_red, min_area=30)
@@ -207,20 +302,11 @@ def extract_state(frame_rgba: np.ndarray) -> GameState:
         col, row = pixel_to_tile(cx, cy + PLAY_TOP)
         state.digger = DiggerPos(col=col, row=row, alive=True)
 
-    # --- bags: each bag has a yellow '$' glyph (~15-30 px) AND a
-    # dark-gray sack body (~30+ px). The dark-gray test is the key
-    # discriminator vs emerald highlights (which can also have yellow
-    # but never have the gray sack).
+    # --- bags: intact bags are an exact-pixel template (circular black
+    # outline + solid "$" carved from dirt). Use sprite-exact matching
+    # against the framebuffer's black mask; see _find_bags_by_template.
     bag_seen: set[tuple[int, int]] = set()
-    half_w_b, half_h_b = int(TILE_W * 0.5), int(TILE_H * 0.5)
-    for area, (cy, cx) in _largest_components(m_yel, min_area=8):
-        if area > 50:
-            continue
-        y0 = max(0, cy - half_h_b); y1 = min(m_dgray.shape[0], cy + half_h_b)
-        x0 = max(0, cx - half_w_b); x1 = min(m_dgray.shape[1], cx + half_w_b)
-        if int(m_dgray[y0:y1, x0:x1].sum()) < 25:
-            continue                  # no sack body -> not a bag
-        col, row = pixel_to_tile(cx, cy + PLAY_TOP)
+    for col, row in _find_bags_by_template(m_blk):
         if (col, row) in bag_seen:
             continue
         bag_seen.add((col, row))
@@ -322,7 +408,7 @@ def extract_state_fast(frame_rgba: np.ndarray) -> GameState:
     m_grn   = (pr == PAL_GREEN[0]) & (pg == PAL_GREEN[1]) & (pb == PAL_GREEN[2])
     m_dgrn  = (pr == PAL_DGREEN[0]) & (pg == PAL_DGREEN[1]) & (pb == PAL_DGREEN[2])
     m_yel   = (pr == PAL_YELLOW[0]) & (pg == PAL_YELLOW[1]) & (pb == PAL_YELLOW[2])
-    m_dgray = (pr == PAL_DGRAY[0]) & (pg == PAL_DGRAY[1]) & (pb == PAL_DGRAY[2])
+    m_blk   = (pr == 0) & (pg == 0) & (pb == 0)
     m_dirt  = (((pr == PAL_DIRT_A[0]) & (pg == PAL_DIRT_A[1]) & (pb == PAL_DIRT_A[2])) |
                ((pr == PAL_DIRT_B[0]) & (pg == PAL_DIRT_B[1]) & (pb == PAL_DIRT_B[2])))
 
@@ -334,7 +420,6 @@ def extract_state_fast(frame_rgba: np.ndarray) -> GameState:
     grn_c   = per_tile(m_grn)
     dgrn_c  = per_tile(m_dgrn)
     yel_c   = per_tile(m_yel)
-    dgray_c = per_tile(m_dgray)
     dirt_c  = per_tile(m_dirt)
 
     state = GameState()
@@ -372,11 +457,14 @@ def extract_state_fast(frame_rgba: np.ndarray) -> GameState:
     for r, c in zip(*np.where(monster_mask)):
         state.monsters.append(MonsterPos(col=int(c), row=int(r), is_hobbin=False))
 
-    # Bags: yellow $ glyph (smaller blob than an emerald's inner glow,
-    # but the discriminator is the dgray sack body next to it).
-    bag_tiles = (yel_c >= 4) & (yel_c <= 25) & (dgray_c >= 20)
-    for r, c in zip(*np.where(bag_tiles)):
-        state.bags.append(BagPos(col=int(c), row=int(r)))
+    # Bags: intact bags are a pure-black sprite (circular outline + "$")
+    # over dirt. Exact-match the template against the black mask.
+    bag_seen: set[tuple[int, int]] = set()
+    for col, row in _find_bags_by_template(m_blk):
+        if (col, row) in bag_seen:
+            continue
+        bag_seen.add((col, row))
+        state.bags.append(BagPos(col=col, row=row))
 
     return state
 

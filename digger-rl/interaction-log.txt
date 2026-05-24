@@ -189,3 +189,5 @@
 [2026-05-19] Trying DQN also sounds nice
 
 [2026-05-19] Let's start training pixel-PPO with the teacher and in parallel write DQN
+I want you to have a look at tools/heuristic_agent.py and fix a few things - first bags of gold detection
+Sure, let's comit those changes and start implementic bag aware heuristic
