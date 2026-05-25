@@ -11,12 +11,15 @@ results today are:
 
 | Approach | Mean ep score | Max ep | Notes |
 |---|---:|---:|---|
-| **Greedy heuristic on symbolic state, anti-jitter** | **1645** | **3075** | 50 LOC, no learning. Current SOTA. |
-| Greedy heuristic, plain | 1410 | 2425 | Re-evaluates each step; hesitates at tile boundaries |
-| BC + PPO from color trace (pixels, 20k frames) | ~70 sustained | 1625 | Wider net + 2 traces + 30 BC epochs |
-| BC + PPO from color trace (pixels, 500k frames) | ~50 | 1175 | Long training collapses to one action |
-| Dreamer online (world model + AC, 500k frames) | 225 | 875 | Actor entropy collapsed to 0 |
-| Symbolic PPO from scratch + shaping (20k frames) | ~2 | 8 | Sparse-reward death spiral |
+| **Greedy heuristic, anti-jitter, bag-blind** | **1645** | **3075** | 50 LOC, no learning. Previous SOTA — relied on accidental bag-break bonuses. |
+| Greedy heuristic + bag-aware step | 1472 | — | Routes around bags; forfeits the accidental 500-pt break bonus. |
+| Smart heuristic + bag-aware + fire-cooldown + closest-threat | 1082 | — | Dodge path still parks on bags (open issue). |
+| DAGGER on symbolic state (8 iters, 29k labels) | 960 | 1850 | BC acc 99.8%, but score caps below teacher; no FIRE labels. |
+| Greedy heuristic, plain | 1410 | 2425 | Re-evaluates each step; hesitates at tile boundaries. |
+| BC + PPO from color trace (pixels, 20k frames) | ~70 sustained | 1625 | Wider net + 2 traces + 30 BC epochs. |
+| BC + PPO from color trace (pixels, 500k frames) | ~50 | 1175 | Long training collapses to one action. |
+| Dreamer online (world model + AC, 500k frames) | 225 | 875 | Actor entropy collapsed to 0. |
+| Symbolic PPO from scratch + shaping (20k frames) | ~2 | 8 | Sparse-reward death spiral. |
 
 Conclusion: the symbolic GameState extracted from the framebuffer is
 **fully sufficient** to play Digger level 1 well. The bottleneck for the
@@ -80,43 +83,51 @@ python run_digger.py --live --record-playtrace data/t.npz   # record (color by d
 
 ## Known open problems
 
-### 1. CV bag detection is broken (high priority)
+### 1. CV bag detection — RESOLVED (commit `1a7a743`)
 
-`extract_state_fast` never reports `bags`. Yellow `$` glyphs are small
-(~5-10 px) and look like emerald inner-highlights to the size+colour
-threshold. Without bag positions, the heuristic can't avoid them and
-**death-by-falling-bag is the most common cause** of episode end.
+Exact-pixel template match (`BAG_TEMPLATE`, 30×32 bool) against the
+black mask of the framebuffer. Finds all 7 bags on frame 0 with zero
+false positives in tunnel cavities. End-to-end `extract_state_fast`
+runtime: 4.4 ms/frame (was 41 ms with naive sliding window).
+`BagPos.moving` and `BagPos.broken` still default to False — those
+sub-states (mid-fall, broken sack with gold pile) are **not** yet
+decoded, which limits the smart heuristic (see §2, §3).
 
-Two paths to fix:
-- Tighten the bag signature: `$` glyph + dark-gray sack body, but with
-  a more careful spatial check (e.g. yellow blob bounded by dark pixels
-  on all four sides). Investigate by sampling the actual `data/cv_samples/`
-  PNG at known bag coordinates.
-- Use `tile_classifier.py` (nearest-prototype on pixel patches) — already
-  scaffolded; just needs prototype patches for `BAG_INTACT` and
-  `BAG_SPILLED` captured from frames where a bag is visible (record a
-  playthrough that creates bags and inspect frames).
+### 2. Smart heuristic still regresses vs greedy (medium priority)
 
-### 2. Smart heuristic regresses vs greedy (medium priority)
+Latest 20-ep means at frame_skip=4, no-episodic-life (commit `4839372`):
 
-`--smart` scores ~925 vs greedy's 1410. Two suspected causes:
-- **Phantom monsters at borders**: CV occasionally tags col 0/14 or
-  row 0/9 tiles as nobbin because the playfield border patterns match
-  the dark-green threshold. Each phantom triggers an unnecessary dodge.
-  Fix: explicitly exclude border tiles in `extract_state_fast`, or
-  require a minimum sprite extent (`dgrn_c >= 30` rather than 20).
-- **Dodge logic over-cautious**: moves perpendicular even when the
-  monster isn't actually closing on us. Could check monster `dir` /
-  velocity, but CV doesn't extract those yet.
+| Variant | Mean |
+|---|---:|
+| bare greedy + bag-avoid | 1472 |
+| smart + bag-avoid + fire-spam (no cooldown) | 892 |
+| smart + bag-avoid + 50-step cooldown | 1020 |
+| smart + bag-avoid + 50-cd + closest-threat | 1082 |
 
-Reproduce with `--live --smart --overlay` and watch where blue crosses
-appear without a visible green sprite.
+Remaining gap vs the 1645 historical greedy is dominated by:
+- **Bag-break bonus forfeited.** The old greedy occasionally pushed a
+  bag off a ledge and crushed a monster underneath (+500). Bag-aware
+  step refuses to push, losing that accidental scoring path.
+  Recovering it cleanly requires `BagPos.moving` / `BagPos.broken`
+  from CV (so we can push only when the drop kills a monster).
+- **Dodge parks on bags.** `_escape_axis` ignores `state.bags`, so the
+  perpendicular dodge can send the digger straight under a falling
+  bag. Small standalone fix.
+- **Phantom monsters at borders** (older issue, still latent): CV
+  occasionally tags col 0/14 / row 0/9 tiles as nobbin. Each phantom
+  triggers an unnecessary dodge. Fix: exclude border tiles in
+  `extract_state_fast`, or require `dgrn_c >= 30` rather than 20.
 
-### 3. Bag-crushing avoidance not implemented (depends on #1)
+Reproduce with `--live --smart --overlay`.
 
-Once bag detection works, the heuristic should refuse to walk *up
-into* the column below a bag, and refuse to dig dirt below a bag.
-Roughly: `if state.bags[any].col == digger.col and bag.row == digger.row - 1: don't go UP`.
+### 3. Bag-crushing avoidance — PARTIALLY DONE (commit `4839372`)
+
+`_greedy_step` now treats intact bags as obstacles and routes around
+them. Still missing: refusing to dig dirt directly below a bag (the
+dig opens a gap, the bag falls and crushes the digger on the way back).
+Needs the simple column-scan `if any(b.col == dc and b.row < dr for b
+in state.bags): don't go DOWN`. Dodge-path bag awareness is the other
+half (see §2).
 
 ### 4. BC-from-heuristic run hasn't been launched yet (the actual experiment)
 
@@ -145,12 +156,15 @@ historical struggle.
 
 Recent significant commits:
 
-- `bf7ebdf` — overlay tweaks + digger/nobbin discriminator (improved heuristic to 1410 mean)
+- `4839372` — bag-aware greedy step + SmartHeuristic fire-cooldown + closest-threat targeting
+- `2d6889d` — DAGGER imitation trainer on symbolic state
+- `1a7a743` — bag detection by exact sprite template (resolves §1)
+- `35d5d2d` — heuristic-BC trace generator + DQN trainer on symbolic state
+- `771fc48` — anti-jitter greedy heuristic: 1410 → 1645 mean
+- `bf7ebdf` — overlay tweaks + digger/nobbin discriminator
 - `21ce642` — smart heuristic + `--live` viewer
 - `0a4440b` — first greedy baseline (1170 mean)
 - `c51ebe9` — vectorised extractor (39 ms → 2 ms per frame)
-- `edbce90` — nearest-prototype tile classifier scaffold
-- `1042947` — first CV extractor (partial, BFS-based)
 - `565072b` — Dreamer phase 3 (online training loop)
 
 The `interaction-log.txt` has every prompt in chronological order with
