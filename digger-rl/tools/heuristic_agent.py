@@ -57,8 +57,27 @@ def _direction_toward(target_row: int, target_col: int,
     return DiggerEnv.NOOP
 
 
+# Per-action (drow, dcol) tile offsets.
+_ACTION_DELTA: dict[int, tuple[int, int]] = {
+    DiggerEnv.LEFT:  (0, -1),
+    DiggerEnv.RIGHT: (0,  1),
+    DiggerEnv.UP:    (-1, 0),
+    DiggerEnv.DOWN:  ( 1, 0),
+}
+
+
 def _greedy_step(state) -> int:
-    """One stateless greedy Manhattan step toward the nearest emerald."""
+    """One stateless greedy Manhattan step toward the nearest emerald.
+
+    Bag-aware: intact bags are obstacles. The digger CAN push a bag
+    horizontally if there's empty space behind it, but the push wastes
+    several frames and risks shoving the bag onto a ledge where it
+    falls and breaks (and can land on the digger on the way back).
+    So we route around: when the preferred axis step would land on a
+    bag tile, try the alternate axis. Only if BOTH axes are blocked
+    do we accept the push, since otherwise the digger could be stuck
+    forever facing a single bag.
+    """
     if state.digger is None or not state.digger.present:
         return DiggerEnv.NOOP
     em_rows, em_cols = np.where(state.emeralds)
@@ -68,8 +87,28 @@ def _greedy_step(state) -> int:
     distances = np.abs(em_rows - dr) + np.abs(em_cols - dc)
     i = int(np.argmin(distances))
     er, ec = int(em_rows[i]), int(em_cols[i])
-    return _direction_toward(er, ec, dr, dc,
-                              prefer_col_first=abs(ec - dc) >= abs(er - dr))
+
+    bag_tiles = {(b.row, b.col) for b in state.bags}
+
+    # Per-axis candidate actions (None if already aligned on that axis).
+    col_act = (DiggerEnv.LEFT if ec < dc else
+               DiggerEnv.RIGHT if ec > dc else None)
+    row_act = (DiggerEnv.UP if er < dr else
+               DiggerEnv.DOWN if er > dr else None)
+    # Step on the longer-distance axis first; ties favour columns to match
+    # the historical behaviour of _direction_toward(prefer_col_first=True).
+    order = ([col_act, row_act] if abs(ec - dc) >= abs(er - dr)
+             else [row_act, col_act])
+    order = [a for a in order if a is not None]
+    if not order:
+        return DiggerEnv.NOOP
+
+    for action in order:
+        ddr, ddc = _ACTION_DELTA[action]
+        if (dr + ddr, dc + ddc) not in bag_tiles:
+            return action
+    # Both axes hit bags -- accept the push on the preferred axis.
+    return order[0]
 
 
 class GreedyEmerald:
@@ -121,22 +160,41 @@ class SmartHeuristic:
     """Greedy emerald-chaser with monster dodging + opportunistic firing.
 
     Keeps `prev_dir` so we know which way the digger is facing (needed
-    for firing -- the bullet travels in the facing direction). Reset
-    via .reset() between episodes.
+    for firing -- the bullet travels in the facing direction). Also
+    tracks an explicit fire cooldown: after FIRE the in-game turret
+    is "down" for ~200 game frames (visible as the lowered turret on
+    the digger-life icon in the score bar), during which further FIRE
+    presses are no-ops. Without this counter the agent mashes FIRE on
+    every step it sees a line-of-sight monster, wasting most of those
+    steps as no-ops while a monster closes in. Reset via .reset()
+    between episodes.
     """
 
-    def __init__(self, dodge_range: int = 2, fire_range: int = 5):
+    # Default in *agent-steps* (== game-frames / frame_skip). With the
+    # default frame_skip=4, 50 agent-steps ≈ 200 game frames, matching
+    # the observed turret-recharge duration on the score-bar icon.
+    DEFAULT_FIRE_COOLDOWN_STEPS = 50
+
+    def __init__(self, dodge_range: int = 2, fire_range: int = 5,
+                 fire_cooldown_steps: int = DEFAULT_FIRE_COOLDOWN_STEPS):
         self.dodge_range = dodge_range
         self.fire_range = fire_range
+        self.fire_cooldown_steps = fire_cooldown_steps
         self.prev_dir: int = DiggerEnv.NOOP
         self._chaser = GreedyEmerald()
+        self._fire_cd: int = 0
 
     def reset(self) -> None:
         self.prev_dir = DiggerEnv.NOOP
         self._chaser.reset()
+        self._fire_cd = 0
 
     def __call__(self, state) -> int:
         action = self._decide(state)
+        if action == DiggerEnv.FIRE:
+            self._fire_cd = self.fire_cooldown_steps
+        elif self._fire_cd > 0:
+            self._fire_cd -= 1
         if action in (DiggerEnv.LEFT, DiggerEnv.RIGHT,
                       DiggerEnv.UP, DiggerEnv.DOWN):
             self.prev_dir = action
@@ -146,28 +204,38 @@ class SmartHeuristic:
         if state.digger is None or not state.digger.present:
             return DiggerEnv.NOOP
         dr, dc = state.digger.row, state.digger.col
+        can_fire = self._fire_cd == 0
 
-        # ---- Threat assessment ----
-        # A threat is a monster collinear with the digger within fire_range.
+        # ---- Threat ranking ----
+        # Bullets travel along the digger's facing direction, so a monster
+        # is "fireable" only if it's collinear AND we'd be aimed at it.
+        # Collect every in-range threat with its distance + which press
+        # would aim at it, then act on the CLOSEST one. The previous logic
+        # iterated monsters in arbitrary order and would happily burn the
+        # 50-step cooldown on a far enemy in our facing direction while a
+        # closer enemy in a perpendicular direction was the real problem.
+        threats: list[tuple[int, int, int, int]] = []  # (dist, dir_press, mr, mc)
         for m in state.monsters:
             mr, mc = m.row, m.col
             if mr == dr and 0 < abs(mc - dc) <= self.fire_range:
-                # Monster in same row. Are we already aimed at it?
-                facing_toward = (mc < dc and self.prev_dir == DiggerEnv.LEFT) \
-                              or (mc > dc and self.prev_dir == DiggerEnv.RIGHT)
-                if facing_toward:
-                    return DiggerEnv.FIRE
-                if abs(mc - dc) <= self.dodge_range:
-                    # Too close to safely turn-and-fire; dodge vertically.
-                    return self._escape_axis(state, dr, dc, axis="row")
-            if mc == dc and 0 < abs(mr - dr) <= self.fire_range:
-                facing_toward = (mr < dr and self.prev_dir == DiggerEnv.UP) \
-                              or (mr > dr and self.prev_dir == DiggerEnv.DOWN)
-                if facing_toward:
-                    return DiggerEnv.FIRE
-                if abs(mr - dr) <= self.dodge_range:
-                    return self._escape_axis(state, dr, dc, axis="col")
+                dir_press = DiggerEnv.LEFT if mc < dc else DiggerEnv.RIGHT
+                threats.append((abs(mc - dc), dir_press, mr, mc))
+            elif mc == dc and 0 < abs(mr - dr) <= self.fire_range:
+                dir_press = DiggerEnv.UP if mr < dr else DiggerEnv.DOWN
+                threats.append((abs(mr - dr), dir_press, mr, mc))
 
+        if not threats:
+            return self._chaser(state)
+
+        threats.sort()
+        nearest_dist, nearest_dir, nmr, nmc = threats[0]
+        if can_fire and self.prev_dir == nearest_dir:
+            return DiggerEnv.FIRE
+        if nearest_dist <= self.dodge_range:
+            axis = "row" if nearest_dir in (DiggerEnv.LEFT, DiggerEnv.RIGHT) else "col"
+            return self._escape_axis(state, dr, dc, axis=axis)
+        # Threat is line-of-sight but outside dodge range and we're not
+        # facing it. Keep chasing emeralds; facing tends to align naturally.
         return self._chaser(state)
 
     def _escape_axis(self, state, dr: int, dc: int, axis: str) -> int:
@@ -202,8 +270,10 @@ def run_headless(args) -> None:
     env = SymbolicDiggerEnv(max_steps=10**9,
                             episodic_life=not args.no_episodic_life)
     if args.smart:
-        policy = SmartHeuristic(args.dodge_range, args.fire_range)
-        pol_name = f"smart(dodge={args.dodge_range}, fire={args.fire_range})"
+        policy = SmartHeuristic(args.dodge_range, args.fire_range,
+                                args.fire_cooldown)
+        pol_name = (f"smart(dodge={args.dodge_range}, fire={args.fire_range}, "
+                    f"cd={args.fire_cooldown})")
     else:
         policy = GreedyEmerald()
         pol_name = "greedy(anti-jitter)"
@@ -253,7 +323,8 @@ def run_live(args) -> None:
 
     env = SymbolicDiggerEnv(max_steps=10**9,
                             episodic_life=not args.no_episodic_life)
-    policy = (SmartHeuristic(args.dodge_range, args.fire_range)
+    policy = (SmartHeuristic(args.dodge_range, args.fire_range,
+                             args.fire_cooldown)
               if args.smart else GreedyEmerald())
 
     obs = env.reset()
@@ -335,6 +406,10 @@ def parse_args():
                    help="enable monster dodge + opportunistic FIRE")
     p.add_argument("--dodge-range", type=int, default=2)
     p.add_argument("--fire-range", type=int, default=5)
+    p.add_argument("--fire-cooldown", type=int,
+                   default=SmartHeuristic.DEFAULT_FIRE_COOLDOWN_STEPS,
+                   help="agent-steps to wait between FIREs "
+                        "(~200 game frames / frame_skip)")
     p.add_argument("--live", action="store_true",
                    help="open a matplotlib window and watch the policy play")
     p.add_argument("--overlay", action="store_true",

@@ -207,3 +207,7 @@ push it
 And can I somehow replay the DAGGER-learned traces?
 
 Commit and push this
+
+I want you to have a look at tools/heuristic_agent.py and fix a few things - first bags of gold detection
+Sure, let's comit those changes and start implementic bag aware heuristic
+Can you fetch latest, rebase checkout and commit current changes on top, though smart should till remain the opt-in
