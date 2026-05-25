@@ -28,7 +28,12 @@ from torch.distributions import Categorical
 from torch.optim import Adam
 
 from tools.heuristic_agent import GreedyEmerald
-from tools.symbolic_env import OBS_CHANNELS, OBS_SHAPE, SymbolicDiggerEnv
+from tools.symbolic_env import (
+    BASE_OBS_CHANNELS,
+    MHEIGHT,
+    MWIDTH,
+    SymbolicDiggerEnv,
+)
 from train_ppo import layer_init, select_device
 
 REPO = Path(__file__).parent.resolve()
@@ -53,6 +58,7 @@ class Config:
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
     frame_skip: int = 4
+    frame_stack: int = 1
     episodic_life: bool = True
     death_penalty: float = 0.0
     shaping_coef: float = 0.0    # potential-based shaping toward nearest emerald
@@ -78,9 +84,9 @@ class SymbolicAgent(nn.Module):
 
     NUM_ACTIONS = SymbolicDiggerEnv.NUM_ACTIONS
 
-    def __init__(self, in_channels: int = OBS_CHANNELS):
+    def __init__(self, in_channels: int = BASE_OBS_CHANNELS):
         super().__init__()
-        h = OBS_SHAPE[1]; w = OBS_SHAPE[2]
+        h = MHEIGHT; w = MWIDTH
         self.encoder = nn.Sequential(
             layer_init(nn.Conv2d(in_channels, 32, 3, padding=1)), nn.ReLU(),
             layer_init(nn.Conv2d(32, 64, 3, padding=1)), nn.ReLU(),
@@ -202,6 +208,10 @@ def parse_args() -> Config:
     p.add_argument("--ent-coef", type=float, default=Config.ent_coef)
     p.add_argument("--ent-coef-final", type=float, default=Config.ent_coef_final)
     p.add_argument("--frame-skip", type=int, default=Config.frame_skip)
+    p.add_argument("--frame-stack", type=int, default=Config.frame_stack,
+                   help="symbolic-obs frame stack (1 = single frame). "
+                        "Higher values give the agent monster velocity / "
+                        "bag-fall information at the cost of more channels.")
     p.add_argument("--episodic-life", action="store_true", default=Config.episodic_life)
     p.add_argument("--no-episodic-life", action="store_false", dest="episodic_life")
     p.add_argument("--death-penalty", type=float, default=Config.death_penalty)
@@ -224,7 +234,8 @@ def parse_args() -> Config:
     return Config(
         total_timesteps=a.total_timesteps, learning_rate=a.lr,
         num_steps=a.num_steps, ent_coef=a.ent_coef, ent_coef_final=a.ent_coef_final,
-        frame_skip=a.frame_skip, episodic_life=a.episodic_life,
+        frame_skip=a.frame_skip, frame_stack=a.frame_stack,
+        episodic_life=a.episodic_life,
         death_penalty=a.death_penalty, shaping_coef=a.shaping_coef,
         bc_steps=a.bc_steps, bc_epochs=a.bc_epochs,
         bc_batch_size=a.bc_batch_size, bc_anchor_coef=a.bc_anchor_coef,
@@ -244,8 +255,9 @@ def main() -> None:
     env = SymbolicDiggerEnv(
         shaping_coef=cfg.shaping_coef,
         max_steps=10**9, episodic_life=cfg.episodic_life,
-        death_penalty=cfg.death_penalty)
-    agent = SymbolicAgent().to(device)
+        death_penalty=cfg.death_penalty,
+        frame_stack=cfg.frame_stack)
+    agent = SymbolicAgent(in_channels=env.obs_channels).to(device)
     n_params = sum(p.numel() for p in agent.parameters())
     print(f"[{cfg.run_name}] agent: {n_params:,} params", flush=True)
     optim = Adam(agent.parameters(), lr=cfg.learning_rate, eps=1e-5)
@@ -264,7 +276,7 @@ def main() -> None:
             bc_obs_t = torch.from_numpy(bc_obs_np).to(device)
             bc_acts_t = torch.from_numpy(bc_acts_np).to(device)
     N = cfg.num_steps
-    obs_buf = torch.zeros(N, *OBS_SHAPE, device=device)
+    obs_buf = torch.zeros(N, *env.obs_shape, device=device)
     act_buf = torch.zeros(N, dtype=torch.long, device=device)
     logp_buf = torch.zeros(N, device=device)
     rew_buf = torch.zeros(N, device=device)

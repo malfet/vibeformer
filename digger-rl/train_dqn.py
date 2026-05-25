@@ -35,7 +35,12 @@ import torch.nn.functional as F
 from torch.optim import Adam
 
 from tools.heuristic_agent import GreedyEmerald
-from tools.symbolic_env import OBS_CHANNELS, OBS_SHAPE, SymbolicDiggerEnv
+from tools.symbolic_env import (
+    BASE_OBS_CHANNELS,
+    MHEIGHT,
+    MWIDTH,
+    SymbolicDiggerEnv,
+)
 from train_ppo import layer_init, select_device
 
 REPO = Path(__file__).parent.resolve()
@@ -57,6 +62,7 @@ class Config:
     learning_starts: int = 1_000      # env steps before first gradient update
     target_update_frequency: int = 1  # soft-update target net per train step
     frame_skip: int = 4
+    frame_stack: int = 1
     episodic_life: bool = True
     death_penalty: float = 0.0
     shaping_coef: float = 0.0
@@ -72,12 +78,16 @@ class Config:
 
 
 class QNet(nn.Module):
-    """Small CNN on the (C, MHEIGHT, MWIDTH) grid -> Q values for 6 actions."""
+    """Small CNN on the (C, MHEIGHT, MWIDTH) grid -> Q values for 6 actions.
 
-    def __init__(self, in_channels: int = OBS_CHANNELS,
+    in_channels = BASE_OBS_CHANNELS * frame_stack; callers must pass the
+    right value.
+    """
+
+    def __init__(self, in_channels: int = BASE_OBS_CHANNELS,
                  num_actions: int = SymbolicDiggerEnv.NUM_ACTIONS):
         super().__init__()
-        h, w = OBS_SHAPE[1], OBS_SHAPE[2]
+        h, w = MHEIGHT, MWIDTH
         self.body = nn.Sequential(
             layer_init(nn.Conv2d(in_channels, 32, 3, padding=1)), nn.ReLU(),
             layer_init(nn.Conv2d(32, 64, 3, padding=1)), nn.ReLU(),
@@ -225,6 +235,8 @@ def parse_args() -> Config:
     p.add_argument("--train-frequency", type=int, default=Config.train_frequency)
     p.add_argument("--learning-starts", type=int, default=Config.learning_starts)
     p.add_argument("--frame-skip", type=int, default=Config.frame_skip)
+    p.add_argument("--frame-stack", type=int, default=Config.frame_stack,
+                   help="symbolic-obs frame stack (1 = single frame)")
     p.add_argument("--episodic-life", default=Config.episodic_life,
                    action=argparse.BooleanOptionalAction)
     p.add_argument("--death-penalty", type=float, default=Config.death_penalty)
@@ -245,7 +257,8 @@ def parse_args() -> Config:
         epsilon_start=a.eps_start, epsilon_end=a.eps_end,
         epsilon_decay_frac=a.eps_decay_frac,
         train_frequency=a.train_frequency, learning_starts=a.learning_starts,
-        frame_skip=a.frame_skip, episodic_life=a.episodic_life,
+        frame_skip=a.frame_skip, frame_stack=a.frame_stack,
+        episodic_life=a.episodic_life,
         death_penalty=a.death_penalty, shaping_coef=a.shaping_coef,
         bc_steps=a.bc_steps, bc_pretrain_epochs=a.bc_pretrain_epochs,
         seed=a.seed, run_name=a.run_name, save_every=a.save_every,
@@ -266,14 +279,15 @@ def main() -> None:
     env = SymbolicDiggerEnv(shaping_coef=cfg.shaping_coef,
                             max_steps=10**9,
                             episodic_life=cfg.episodic_life,
-                            death_penalty=cfg.death_penalty)
-    qnet = QNet().to(device)
-    target = QNet().to(device)
+                            death_penalty=cfg.death_penalty,
+                            frame_stack=cfg.frame_stack)
+    qnet = QNet(in_channels=env.obs_channels).to(device)
+    target = QNet(in_channels=env.obs_channels).to(device)
     target.load_state_dict(qnet.state_dict())
     for p in target.parameters():
         p.requires_grad_(False)
     optim = Adam(qnet.parameters(), lr=cfg.learning_rate)
-    buffer = ReplayBuffer(cfg.buffer_size, OBS_SHAPE, device)
+    buffer = ReplayBuffer(cfg.buffer_size, env.obs_shape, device)
 
     n_params = sum(p.numel() for p in qnet.parameters())
     print(f"{tag}qnet: {n_params:,} params", flush=True)

@@ -211,3 +211,11 @@ Commit and push this
 I want you to have a look at tools/heuristic_agent.py and fix a few things - first bags of gold detection
 Sure, let's comit those changes and start implementic bag aware heuristic
 Can you fetch latest, rebase checkout and commit current changes on top, though smart should till remain the opt-in
+
+[2026-05-25] Looks at the current codebase and interaction log. Numerous attempts to apply RL to teach it play better than teacher (or even pass first level without loosing a life) failed. Can you summarize why and may be suggest a few strategies how to overcome it
+
+[2026-05-25] Look at the recent commit, looks like the bag detection was fixed, please confirm and update readme. Elaborate on C
+
+[2026-05-25] implement C.1 frame stacking
+
+[2026-05-25] commit this and kick off dagger_fs4

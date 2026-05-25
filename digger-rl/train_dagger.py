@@ -37,7 +37,12 @@ import torch.nn.functional as F
 from torch.optim import Adam
 
 from tools.heuristic_agent import GreedyEmerald
-from tools.symbolic_env import OBS_CHANNELS, OBS_SHAPE, SymbolicDiggerEnv
+from tools.symbolic_env import (
+    BASE_OBS_CHANNELS,
+    MHEIGHT,
+    MWIDTH,
+    SymbolicDiggerEnv,
+)
 from train_ppo import layer_init, select_device
 
 REPO = Path(__file__).parent.resolve()
@@ -56,6 +61,7 @@ class Config:
     eval_episodes: int = 3             # argmax rollouts after each iter
     eval_max_steps: int = 4000
     frame_skip: int = 4
+    frame_stack: int = 1               # symbolic-obs frame stack (1 = single-frame)
     episodic_life: bool = True
     seed: int = 1
     run_name: str = "dagger"
@@ -64,12 +70,16 @@ class Config:
 
 
 class PolicyNet(nn.Module):
-    """Same CNN body as SymbolicAgent; just a single action-logits head."""
+    """Same CNN body as SymbolicAgent; just a single action-logits head.
 
-    def __init__(self, in_channels: int = OBS_CHANNELS,
+    in_channels = BASE_OBS_CHANNELS * frame_stack. Callers must pass the
+    right value (or read it from env.obs_channels / saved checkpoint).
+    """
+
+    def __init__(self, in_channels: int = BASE_OBS_CHANNELS,
                  num_actions: int = SymbolicDiggerEnv.NUM_ACTIONS):
         super().__init__()
-        h, w = OBS_SHAPE[1], OBS_SHAPE[2]
+        h, w = MHEIGHT, MWIDTH
         self.body = nn.Sequential(
             layer_init(nn.Conv2d(in_channels, 32, 3, padding=1)), nn.ReLU(),
             layer_init(nn.Conv2d(32, 64, 3, padding=1)), nn.ReLU(),
@@ -158,20 +168,22 @@ def train_bc(policy: PolicyNet, optim: Adam,
 def evaluate(env: SymbolicDiggerEnv, policy: PolicyNet,
              episodes: int, max_steps: int, frame_skip: int,
              device: torch.device) -> tuple[float, float, int]:
-    """Argmax-policy rollouts. Returns (mean_score, max_score, mean_length)."""
+    """Argmax-policy rollouts. Returns (mean_score, max_score, mean_length).
+
+    Uses the stacked obs returned by env.reset/step directly, so it
+    respects whatever frame_stack the env was constructed with.
+    """
     scores: list[int] = []
     lengths: list[int] = []
     for _ in range(episodes):
-        env.reset()
+        obs = env.reset()
         score = 0
         steps = 0
         for _ in range(max_steps):
-            obs = env._last_state
-            obs_tensor = torch.from_numpy(
-                _state_to_obs(env)).unsqueeze(0).to(device)
+            obs_tensor = torch.from_numpy(obs).unsqueeze(0).to(device)
             with torch.no_grad():
                 action = int(policy(obs_tensor).argmax(-1).item())
-            _, _, done, info = env_step_skipped(env, action, frame_skip)
+            obs, _, done, info = env_step_skipped(env, action, frame_skip)
             score = int(info.get("score", score))
             steps += 1
             if done:
@@ -179,15 +191,6 @@ def evaluate(env: SymbolicDiggerEnv, policy: PolicyNet,
         scores.append(score)
         lengths.append(steps)
     return float(np.mean(scores)), float(max(scores)), int(np.mean(lengths))
-
-
-def _state_to_obs(env: SymbolicDiggerEnv) -> np.ndarray:
-    """Pull the current observation tensor without a step. We can't query
-    env.step without advancing; instead reuse the cached state via the
-    public state_to_tensor helper.
-    """
-    from tools.symbolic_env import state_to_tensor
-    return state_to_tensor(env._last_state)
 
 
 def parse_args() -> Config:
@@ -201,6 +204,10 @@ def parse_args() -> Config:
     p.add_argument("--lr", type=float, default=Config.learning_rate)
     p.add_argument("--eval-episodes", type=int, default=Config.eval_episodes)
     p.add_argument("--frame-skip", type=int, default=Config.frame_skip)
+    p.add_argument("--frame-stack", type=int, default=Config.frame_stack,
+                   help="symbolic-obs frame stack (1 = single frame). "
+                        "Higher values give the agent monster velocity / "
+                        "bag-fall information at the cost of more channels.")
     p.add_argument("--episodic-life", default=Config.episodic_life,
                    action=argparse.BooleanOptionalAction)
     p.add_argument("--seed", type=int, default=Config.seed)
@@ -212,7 +219,8 @@ def parse_args() -> Config:
         steps_per_iter=a.steps_per_iter, epochs_per_iter=a.epochs_per_iter,
         initial_epochs=a.initial_epochs, batch_size=a.batch_size,
         learning_rate=a.lr, eval_episodes=a.eval_episodes,
-        frame_skip=a.frame_skip, episodic_life=a.episodic_life,
+        frame_skip=a.frame_skip, frame_stack=a.frame_stack,
+        episodic_life=a.episodic_life,
         seed=a.seed, run_name=a.run_name,
         device=str(select_device(a.force_cpu)),
     )
@@ -231,7 +239,8 @@ def main() -> None:
     # Single env: LibretroCore is per-process singleton. We toggle
     # `_env.episodic_life` between collection (True) and eval (False)
     # phases via a reset-and-flip helper.
-    env = SymbolicDiggerEnv(max_steps=10**9, episodic_life=cfg.episodic_life)
+    env = SymbolicDiggerEnv(max_steps=10**9, episodic_life=cfg.episodic_life,
+                            frame_stack=cfg.frame_stack)
     teacher = GreedyEmerald()
 
     def reset_eval_mode():
@@ -240,7 +249,7 @@ def main() -> None:
     def reset_train_mode():
         env._env.episodic_life = cfg.episodic_life
 
-    policy = PolicyNet().to(device)
+    policy = PolicyNet(in_channels=env.obs_channels).to(device)
     n_params = sum(p.numel() for p in policy.parameters())
     print(f"{tag}policy: {n_params:,} params", flush=True)
     optim = Adam(policy.parameters(), lr=cfg.learning_rate)

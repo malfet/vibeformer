@@ -14,6 +14,7 @@ by tools.symbolic_env.state_to_tensor, not raw pixels.
 from __future__ import annotations
 
 import argparse
+import collections
 import time
 from pathlib import Path
 
@@ -23,7 +24,7 @@ from torch.distributions import Categorical
 
 from digger_env import DiggerEnv, _env_step_skipped
 from tools.game_state import extract_state_fast, render_overlay
-from tools.symbolic_env import state_to_tensor
+from tools.symbolic_env import BASE_OBS_CHANNELS, state_to_tensor
 from train_dagger import PolicyNet
 from train_ppo import select_device
 
@@ -60,11 +61,17 @@ def main() -> None:
     device = select_device(args.force_cpu)
 
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
-    policy = PolicyNet().to(device)
+    # frame_stack lives in cfg.__dict__; older checkpoints don't have it
+    # and implicitly used single frames.
+    saved_cfg = ckpt.get("config", {}) or {}
+    frame_stack = int(saved_cfg.get("frame_stack", 1))
+    in_channels = BASE_OBS_CHANNELS * frame_stack
+    policy = PolicyNet(in_channels=in_channels).to(device)
     policy.load_state_dict(ckpt["policy"])
     policy.eval()
     iter_no = ckpt.get("iter", "?")
     print(f"loaded {args.checkpoint} (DAGGER iter {iter_no}, "
+          f"frame_stack={frame_stack}, "
           f"{'stochastic' if args.stochastic else 'argmax'} policy)",
           flush=True)
 
@@ -73,6 +80,18 @@ def main() -> None:
     env = DiggerEnv()
     raw = env.reset()
     state = extract_state_fast(raw)
+    # Mirror SymbolicDiggerEnv's frame stack on the consumer side: fill
+    # with N copies of the initial frame, then push one fresh frame per
+    # step. concatenation order matches SymbolicDiggerEnv.current_obs().
+    frame_buf: collections.deque[np.ndarray] = collections.deque(
+        maxlen=frame_stack)
+    init_frame = state_to_tensor(state)
+    for _ in range(frame_stack):
+        frame_buf.append(init_frame.copy())
+
+    def stacked_obs() -> np.ndarray:
+        return (frame_buf[0].copy() if frame_stack == 1
+                else np.concatenate(frame_buf, axis=0))
 
     target_fps = 70.087
     target_dt = (1.0 / target_fps) * args.frame_skip
@@ -102,7 +121,7 @@ def main() -> None:
         elapsed = now - last_wall
         last_wall = now
 
-        obs = state_to_tensor(state)
+        obs = stacked_obs()
         obs_t = torch.from_numpy(obs).unsqueeze(0).to(device)
         with torch.no_grad():
             logits = policy(obs_t)
@@ -115,6 +134,7 @@ def main() -> None:
         raw, reward, done, info = _env_step_skipped(env, action, args.frame_skip)
         step_no += args.frame_skip
         state = extract_state_fast(raw)
+        frame_buf.append(state_to_tensor(state))
 
         if args.overlay:
             img.set_data(render_overlay(raw, state,
@@ -146,6 +166,10 @@ def main() -> None:
                 break
             raw = env.reset()
             state = extract_state_fast(raw)
+            init_frame = state_to_tensor(state)
+            frame_buf.clear()
+            for _ in range(frame_stack):
+                frame_buf.append(init_frame.copy())
             seen_alive = False
             step_no = 0
 
