@@ -201,3 +201,9 @@
 [2026-05-20] I.e. there are no vairability/ambiguity, as diamonds do not move and should always match the same pattern. Bags of gold are a bit tricky, but again, pattern is always the same
 
 Re-read repo state (it has bag detection now) and commit train-dagger.py (adjust if necessary)
+
+push it
+
+And can I somehow replay the DAGGER-learned traces?
+
+Commit and push this
