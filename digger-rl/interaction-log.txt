@@ -219,3 +219,15 @@ Can you fetch latest, rebase checkout and commit current changes on top, though 
 [2026-05-25] implement C.1 frame stacking
 
 [2026-05-25] commit this and kick off dagger_fs4
+
+[2026-05-26] Hmm, is dagger trained on visual clues of on the already interpreted game state
+
+[2026-05-26] I guess what I'm curious about, is to build a system that can learn from frame stacked RGB input to achieve similar score as teacher from SymbolicDigggerEnv
+
+[2026-05-26] Let's try vanilla and kick the training
+
+[2026-05-26] For heuristic training, can you try implementing dodge enemy strategy where goal of the game is just stay away from the enemies as long as possible?
+
+[2026-05-27] Sure, let's try bigger encoder-width
+
+[2026-05-27] And let's try to improve the dodge strategy. Or may be let's start with overlay - can you draw centers of nobbinns when overlay is enabled
