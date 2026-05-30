@@ -46,6 +46,16 @@ class DreamerConfig:
     embed_dim: int = 1024                     # post-CNN flattened width
     kl_free_nats: float = 1.0                 # free bits / dims
     reward_clip: float = 100.0                # gradient sanity
+    # ---- Observation type ---------------------------------------------------
+    # "pixel": 3x64x64 RGB, MSE recon, CNNEncoder/CNNDecoder.
+    # "symbolic": (obs_channels x sym_h x sym_w) binary masks, BCE recon,
+    #             SymbolicEncoder/SymbolicDecoder. The 10x15 Digger tile grid
+    #             is too small to convolve meaningfully; we treat it as a
+    #             flat feature vector.
+    obs_type: str = "pixel"
+    sym_channels: int = 6
+    sym_h: int = 10
+    sym_w: int = 15
 
 
 # -------- Encoder / Decoder --------------------------------------------------
@@ -98,6 +108,51 @@ class CNNDecoder(nn.Module):
         h = self.lin(feat).reshape(-1, c4, 4, 4)
         x = self.deconv(h)
         return x.reshape(*lead, 3, self.cfg.obs_size, self.cfg.obs_size)
+
+
+# -------- Symbolic encoder / decoder ----------------------------------------
+# 10x15 tile grid is too small for repeated stride-2 conv. We flatten the
+# (C, H, W) mask tensor and run an MLP -> embed_dim. The decoder mirrors
+# this and outputs (C, H, W) logits (BCE recon downstream).
+
+class SymbolicEncoder(nn.Module):
+    def __init__(self, cfg: DreamerConfig):
+        super().__init__()
+        in_flat = cfg.sym_channels * cfg.sym_h * cfg.sym_w
+        self.net = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(in_flat, cfg.hidden_dim), nn.SiLU(),
+            nn.Linear(cfg.hidden_dim, cfg.embed_dim), nn.SiLU(),
+        )
+        self.cfg = cfg
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        lead = x.shape[:-3]
+        flat_in = (self.cfg.sym_channels * self.cfg.sym_h * self.cfg.sym_w)
+        x = x.reshape(-1, flat_in)
+        e = self.net(x)
+        return e.reshape(*lead, -1)
+
+
+class SymbolicDecoder(nn.Module):
+    """(deter + stoch) -> per-tile per-channel logits (no sigmoid here)."""
+
+    def __init__(self, cfg: DreamerConfig):
+        super().__init__()
+        feat = cfg.deter_dim + cfg.stoch_dim
+        out_flat = cfg.sym_channels * cfg.sym_h * cfg.sym_w
+        self.net = nn.Sequential(
+            nn.Linear(feat, cfg.hidden_dim), nn.SiLU(),
+            nn.Linear(cfg.hidden_dim, cfg.hidden_dim), nn.SiLU(),
+            nn.Linear(cfg.hidden_dim, out_flat),
+        )
+        self.cfg = cfg
+
+    def forward(self, feat: torch.Tensor) -> torch.Tensor:
+        lead = feat.shape[:-1]
+        logits = self.net(feat)
+        return logits.reshape(*lead, self.cfg.sym_channels,
+                              self.cfg.sym_h, self.cfg.sym_w)
 
 
 # -------- RSSM ---------------------------------------------------------------
@@ -233,8 +288,14 @@ class WorldModel(nn.Module):
     def __init__(self, cfg: DreamerConfig):
         super().__init__()
         self.cfg = cfg
-        self.encoder = CNNEncoder(cfg)
-        self.decoder = CNNDecoder(cfg)
+        if cfg.obs_type == "symbolic":
+            self.encoder = SymbolicEncoder(cfg)
+            self.decoder = SymbolicDecoder(cfg)
+        elif cfg.obs_type == "pixel":
+            self.encoder = CNNEncoder(cfg)
+            self.decoder = CNNDecoder(cfg)
+        else:
+            raise ValueError(f"unknown obs_type: {cfg.obs_type!r}")
         self.rssm = RSSM(cfg)
         feat_dim = cfg.deter_dim + cfg.stoch_dim
         self.reward_head = MLPHead(feat_dim, cfg.hidden_dim)
@@ -284,7 +345,12 @@ class WorldModel(nn.Module):
         feats = torch.cat([h_seq, z_seq], dim=-1)
 
         recon = self.decoder(feats)
-        recon_loss = F.mse_loss(recon, obs)
+        if cfg.obs_type == "symbolic":
+            # `recon` is logits; `obs` is in {0, 1}. BCE-with-logits handles
+            # the per-tile binary nature of each channel.
+            recon_loss = F.binary_cross_entropy_with_logits(recon, obs)
+        else:
+            recon_loss = F.mse_loss(recon, obs)
 
         pred_reward = self.reward_head(feats)
         pred_continue = self.continue_head(feats)
@@ -327,11 +393,20 @@ class ReplayBuffer:
     """
 
     def __init__(self, capacity: int, num_envs: int,
-                 obs_shape: tuple[int, ...]):
+                 obs_shape: tuple[int, ...],
+                 obs_dtype: np.dtype = np.uint8,
+                 obs_scale: float = 1.0 / 255.0):
+        """`obs_dtype` is what's stored on disk-equivalent (uint8 for pixels,
+        float32 for symbolic mask grids). `obs_scale` is the multiplier
+        applied at sample time when promoting to float (1/255 for pixels,
+        1.0 for already-in-[0,1] symbolic obs).
+        """
         self.capacity = capacity
         self.num_envs = num_envs
         self.obs_shape = obs_shape
-        self.obs = np.zeros((num_envs, capacity, *obs_shape), dtype=np.uint8)
+        self.obs_dtype = obs_dtype
+        self.obs_scale = obs_scale
+        self.obs = np.zeros((num_envs, capacity, *obs_shape), dtype=obs_dtype)
         self.actions = np.zeros((num_envs, capacity), dtype=np.int64)
         self.rewards = np.zeros((num_envs, capacity), dtype=np.float32)
         self.dones = np.zeros((num_envs, capacity), dtype=bool)
@@ -369,7 +444,8 @@ class ReplayBuffer:
         envs = rng.integers(self.num_envs, size=batch_size)
         starts = rng.integers(0, max_start + 1, size=batch_size)
 
-        obs = np.empty((batch_size, seq_length, *self.obs_shape), dtype=np.uint8)
+        obs = np.empty((batch_size, seq_length, *self.obs_shape),
+                       dtype=self.obs_dtype)
         act = np.empty((batch_size, seq_length), dtype=np.int64)
         rew = np.empty((batch_size, seq_length), dtype=np.float32)
         don = np.empty((batch_size, seq_length), dtype=bool)
@@ -381,7 +457,9 @@ class ReplayBuffer:
             don[i] = self.dones[e, s:s + seq_length]
 
         cont = 1.0 - don.astype(np.float32)
-        obs_t = torch.from_numpy(obs).to(device).float().mul_(1.0 / 255.0)
+        obs_t = torch.from_numpy(obs).to(device).float()
+        if self.obs_scale != 1.0:
+            obs_t.mul_(self.obs_scale)
         return (obs_t,
                 torch.from_numpy(act).to(device),
                 torch.from_numpy(rew).to(device),

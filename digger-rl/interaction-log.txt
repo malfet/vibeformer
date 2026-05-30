@@ -247,3 +247,5 @@ Can you fetch latest, rebase checkout and commit current changes on top, though 
 [2026-05-29] So please resume, you've run the training in the background, what were the results?
 
 [2026-05-29] And continue with the enemy dections in SymbolicDigger
+
+[2026-05-30] Let's try training dagger_fs4 but I wonder if in parallel you can write a Dreamer trainer as well
