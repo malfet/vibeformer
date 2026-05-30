@@ -120,6 +120,40 @@ BAG_TPL_H, BAG_TPL_W = BAG_TEMPLATE.shape           # 30, 32
 BAG_CENTER_DY, BAG_CENTER_DX = BAG_TPL_H // 2, BAG_TPL_W // 2
 
 
+# ---- Nobbin body template -------------------------------------------------
+# Captured directly from DOSBox Pure output: this is the GREEN-pixel mask
+# of the nobbin's head + upper-body, which is pixel-identical across the
+# 3 walking-animation frames (only the legs below row 9 animate). 52
+# body pixels in a 9-row x 13-col window.
+#
+# Body colour is PAL_GREEN (0, 255, 0). The old monster_mask in this file
+# used PAL_DGREEN, which is why detection fired on only ~2.5% of frames.
+#
+# Only nobbins are detected -- hobbins (dig-through-dirt monsters) have
+# distinct left- and right-facing sprites and need their own templates,
+# which we skip until they're actually needed.
+_NOBBIN_BODY_STR = (
+    '........X....',
+    '.....XXXX....',
+    '......XX.....',
+    '.....XXXX....',
+    '....XXXXXX...',
+    '....X.XX.X...',
+    '..XXXXXXXXXX.',
+    '.XXX.XXXX.XXX',
+    'X.XXXXXXXXXX.',
+)
+NOBBIN_BODY_TEMPLATE: np.ndarray = np.array(
+    [[c == 'X' for c in row] for row in _NOBBIN_BODY_STR], dtype=bool)
+NOBBIN_TPL_H, NOBBIN_TPL_W = NOBBIN_BODY_TEMPLATE.shape   # 9, 13
+NOBBIN_BODY_COUNT: int = int(NOBBIN_BODY_TEMPLATE.sum())  # 52 expected body pixels
+_NOBBIN_OFFSETS = list(zip(*np.where(NOBBIN_BODY_TEMPLATE)))
+_nob_rows = [dy for dy, _ in _NOBBIN_OFFSETS]
+_nob_cols = [dx for _, dx in _NOBBIN_OFFSETS]
+NOBBIN_BODY_CY = (min(_nob_rows) + max(_nob_rows)) // 2
+NOBBIN_BODY_CX = (min(_nob_cols) + max(_nob_cols)) // 2
+
+
 # ---- GameState dataclasses ------------------------------------------------
 
 @dataclass
@@ -144,6 +178,12 @@ class MonsterPos:
     dir: int = DIR_NONE
     is_hobbin: bool = False        # hobbin = digger-monster (can dig dirt)
     alive: bool = True
+    # Sub-tile pixel centroid of the body in full-frame coords. None if
+    # the extractor only resolved tile-level. When set, this tracks the
+    # sprite smoothly as it crosses tile boundaries -- useful for the
+    # overlay and for future velocity estimation.
+    cx: Optional[int] = None
+    cy: Optional[int] = None
 
 
 @dataclass
@@ -381,6 +421,91 @@ def _tile_index_for_play(play_h: int, play_w: int) -> np.ndarray:
     return idx
 
 
+def _find_nobbins_by_template(m_grn_play: np.ndarray,
+                                min_match_frac: float = 0.85
+                                ) -> list[tuple[int, int, int, int]]:
+    """Locate nobbins by sparse-template match against the play-area GREEN mask.
+
+    Returns a list of (col, row, cx, cy) per detection, where:
+      - (col, row) is the tile coordinate of the body centre,
+      - (cx, cy) is the full-frame pixel coordinate of the body centre.
+
+    Vectorised by stacking template-pixel offsets and summing m_grn slices.
+    A non-maximum-suppression pass keeps only local peaks (one per nobbin)
+    since strong matches produce a small neighbourhood of partial matches.
+
+    `min_match_frac` controls leniency: at 0.85 we require 44 / 52
+    template body pixels to be green, which tolerates the leg-animation
+    differences across the 3 walk frames while still ruling out emerald
+    blobs (a single emerald has ~30-60 green pixels, but they're laid
+    out as a single ~10x10 blob that can't hit 44 of the 52 specific
+    head+upper-body offsets).
+    """
+    H, W = m_grn_play.shape
+    TH, TW = NOBBIN_TPL_H, NOBBIN_TPL_W
+    if H < TH or W < TW:
+        return []
+    out_h, out_w = H - TH + 1, W - TW + 1
+    # match_count[y, x] = number of template body-pixels that are green
+    # if the template's top-left is placed at (y, x).
+    match_count = np.zeros((out_h, out_w), dtype=np.int32)
+    for dy, dx in _NOBBIN_OFFSETS:
+        match_count += m_grn_play[dy:dy + out_h, dx:dx + out_w].astype(np.int32)
+    threshold = int(NOBBIN_BODY_COUNT * min_match_frac)
+    candidate_mask = match_count >= threshold
+    if not candidate_mask.any():
+        return []
+
+    # Non-max suppression: iteratively take the global argmax and zero
+    # out a NOBBIN_TPL-sized neighbourhood around it. Cheap because the
+    # number of nobbins is small (<= ~6).
+    detections: list[tuple[int, int, int, int]] = []
+    work = match_count.copy()
+    work[~candidate_mask] = 0
+    while True:
+        flat = int(work.argmax())
+        peak = int(work.flat[flat])
+        if peak < threshold:
+            break
+        ty, tx = divmod(flat, out_w)
+        sprite_cx = tx + NOBBIN_BODY_CX
+        sprite_cy_play = ty + NOBBIN_BODY_CY
+        sprite_cy_full = sprite_cy_play + PLAY_TOP
+        col, row = pixel_to_tile(sprite_cx, sprite_cy_full)
+        detections.append((col, row, sprite_cx, sprite_cy_full))
+        # Zero a TH x TW box around (ty, tx) so a single nobbin isn't
+        # double-detected at its near-aligned partial-match positions.
+        y0 = max(0, ty - TH // 2)
+        y1 = min(out_h, ty + TH // 2 + 1)
+        x0 = max(0, tx - TW // 2)
+        x1 = min(out_w, tx + TW // 2 + 1)
+        work[y0:y1, x0:x1] = 0
+    return detections
+
+
+def _monster_pixel_center(dgrn_play_mask: np.ndarray,
+                           col: int, row: int) -> tuple[int, int]:
+    """Sub-tile pixel centroid of a nobbin's dark-green body in
+    full-frame coords. The detected (col, row) is whichever tile has
+    most of the body+head+eyes, but a moving nobbin straddles two
+    tiles -- so we look at a 2-tile-wide window centred on (col, row)
+    and average dgreen pixel positions. Falls back to tile_center if
+    no body pixels are visible (e.g. during a death animation).
+    """
+    pad_x = int(TILE_W * 0.5)
+    pad_y = int(TILE_H * 0.5)
+    H, W = dgrn_play_mask.shape
+    x0 = max(0, int(col * TILE_W) - pad_x)
+    x1 = min(W, int((col + 1) * TILE_W) + pad_x)
+    y0 = max(0, int(row * TILE_H) - pad_y)
+    y1 = min(H, int((row + 1) * TILE_H) + pad_y)
+    sub = dgrn_play_mask[y0:y1, x0:x1]
+    ys, xs = np.where(sub)
+    if ys.size == 0:
+        return tile_center(col, row)
+    return int(xs.mean()) + x0, int(ys.mean()) + y0 + PLAY_TOP
+
+
 def extract_state_fast(frame_rgba: np.ndarray) -> GameState:
     """Vectorised CV extractor, ~10x faster than extract_state.
 
@@ -424,38 +549,43 @@ def extract_state_fast(frame_rgba: np.ndarray) -> GameState:
 
     state = GameState()
 
-    # Monsters first so we can excise them from the digger search.
-    # Nobbin signature: large dark-green body + yellow head + a few red
-    # eye/foot pixels. Digger signature: bright-red body dominates, so
-    # red_c will be much higher in the digger tile than the floor of
-    # 3-5 red eye pixels a nobbin contributes.
-    monster_mask = ((dgrn_c >= 20) & (yel_c >= 6) &
-                    (red_c >= 2) & (red_c < 25))
-    # Digger: tile with the most red pixels among NON-monster tiles.
-    # The exclusion avoids the corner case where a nobbin's red eye-
-    # pixels would otherwise win argmax during a frame where the
-    # digger sprite is mid-animation with reduced red mass.
+    # Nobbins: sparse-template match against the GREEN mask (body color).
+    # Returns (col, row, cx, cy) per detection so we get pixel-precise
+    # sprite centroids for free. The per-tile bincount heuristic used
+    # before fired on only ~2.5% of frames -- it was looking for the
+    # wrong body colour (PAL_DGREEN) and ignored the heart-shape entirely.
+    nobbin_detections = _find_nobbins_by_template(m_grn)
+
+    # Digger: tile with the most red pixels. Exclude the tiles claimed by
+    # a nobbin so a nobbin's eye/foot pixels in its tile don't win the
+    # argmax.
+    nobbin_tiles = {(c, r) for c, r, _, _ in nobbin_detections}
     red_for_digger = red_c.copy()
-    red_for_digger[monster_mask] = 0
+    for c, r in nobbin_tiles:
+        red_for_digger[r, c] = 0
     flat_idx = int(red_for_digger.argmax())
     if red_for_digger.flat[flat_idx] >= 30:
         d_row, d_col = divmod(flat_idx, MWIDTH)
         state.digger = DiggerPos(col=int(d_col), row=int(d_row), alive=True)
 
-    # Emeralds: bright-green pixels in tile, no red (avoids the digger
-    # body and monster eyes contaminating).
-    state.emeralds = (grn_c >= 25) & (red_c < 4)
+    # Emeralds: bright-green pixels in tile, no red, and not occluded by
+    # a nobbin (which would put a heart-shape of green into the tile too).
+    emerald_mask = (grn_c >= 25) & (red_c < 4)
+    for c, r in nobbin_tiles:
+        emerald_mask[r, c] = False
+    state.emeralds = emerald_mask
 
     # Dirt: enough brown pixels in tile to call it "covered". Tile area
     # ~1500 px; >300 dirt pixels = clearly undisturbed.
     state.dirt = dirt_c > 300
 
-    # Monsters: emit positions from the mask we computed above. Exclude
-    # the digger tile in case both signatures fire there.
-    if state.digger is not None:
-        monster_mask[state.digger.row, state.digger.col] = False
-    for r, c in zip(*np.where(monster_mask)):
-        state.monsters.append(MonsterPos(col=int(c), row=int(r), is_hobbin=False))
+    # Emit MonsterPos entries from the template detections.
+    for c, r, cx, cy in nobbin_detections:
+        if state.digger is not None \
+                and (c, r) == (state.digger.col, state.digger.row):
+            continue
+        state.monsters.append(MonsterPos(col=c, row=r, cx=cx, cy=cy,
+                                          is_hobbin=False))
 
     # Bags: intact bags are a pure-black sprite (circular outline + "$")
     # over dirt. Exact-match the template against the black mask.
@@ -500,7 +630,10 @@ def render_overlay(frame_rgba: np.ndarray, state: GameState,
         cross(cx, cy, (255, 0, 255), sz=3)
     if show_monsters:
         for m in state.monsters:
-            cx, cy = tile_center(m.col, m.row)
+            if m.cx is not None and m.cy is not None:
+                cx, cy = m.cx, m.cy
+            else:
+                cx, cy = tile_center(m.col, m.row)
             cross(cx, cy, (0, 0, 255), sz=4)
     if show_bags:
         for b in state.bags:

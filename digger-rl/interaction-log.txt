@@ -231,3 +231,19 @@ Can you fetch latest, rebase checkout and commit current changes on top, though 
 [2026-05-27] Sure, let's try bigger encoder-width
 
 [2026-05-27] And let's try to improve the dodge strategy. Or may be let's start with overlay - can you draw centers of nobbinns when overlay is enabled
+
+[2026-05-27] But I don't, when I run `python -m tools.heuristic_agent --live --overlay --dodge` I don't see a blue cross on mosters
+
+[2026-05-27] Commit pixel dagger and interaction log
+
+[2026-05-27] But I want better understand the strategy. May be 84x84 pixel is just too small to learn from pixel data?
+
+[2026-05-27] Because, if backprop works correctly, it feels like RL should learn to mimic teacher from pixel inputs, shouldn't it?
+
+[2026-05-27] Let's do 3. And for monster detection, can you again look at sobomax and compare it with sprites you are seeing and just add them, same way as you have a bag of gold. And for basic enemy, you don't care about leg movements, all you need is to detect a heart-shaped body, right?
+
+[2026-05-27] Can you elaborate on the strategy? Why pattern matching + visibility mask would not work 100% of the time?
+
+[2026-05-29] So please resume, you've run the training in the background, what were the results?
+
+[2026-05-29] And continue with the enemy dections in SymbolicDigger

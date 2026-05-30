@@ -264,12 +264,90 @@ class SmartHeuristic:
             return DiggerEnv.LEFT if dc > 0 else DiggerEnv.RIGHT
 
 
+class DodgeMonsters:
+    """Maximize time alive; ignore emeralds entirely.
+
+    Each step, pick the move whose resulting tile keeps the minimum
+    Manhattan distance to any monster as large as possible. Ties broken
+    by (1) staying farther from walls (avoid corner traps), then (2)
+    continuing in the previous direction to suppress one-step
+    oscillations between two equal-distance moves.
+
+    Bags are treated as obstacles (won't step onto a bag tile). Walls
+    clamp the candidate set. FIRE is not in the candidate set: a 50-
+    step cooldown plus a directional bullet makes it useless as the
+    primary survival action -- we'd rather spend the step actually
+    moving away.
+
+    Designed as a DAGGER teacher whose label distribution covers every
+    near-monster state (since chasing emeralds tends to walk INTO
+    monsters, the greedy teacher's coverage of "monster nearby" is
+    biased toward the actions that got the digger killed). Use this
+    teacher to bias the BC dataset toward survival, then mix with
+    GreedyEmerald to recover scoring behaviour.
+    """
+
+    # Movement candidates (excludes FIRE; see class docstring).
+    _CANDIDATES: tuple[tuple[int, int, int], ...] = (
+        (DiggerEnv.NOOP,  0,  0),
+        (DiggerEnv.LEFT,  0, -1),
+        (DiggerEnv.RIGHT, 0,  1),
+        (DiggerEnv.UP,   -1,  0),
+        (DiggerEnv.DOWN,  1,  0),
+    )
+
+    MOVE_ACTIONS = (DiggerEnv.LEFT, DiggerEnv.RIGHT,
+                    DiggerEnv.UP, DiggerEnv.DOWN)
+
+    def __init__(self):
+        self.last_dir: int = DiggerEnv.NOOP
+
+    def reset(self) -> None:
+        self.last_dir = DiggerEnv.NOOP
+
+    def __call__(self, state) -> int:
+        if state.digger is None or not state.digger.present:
+            return DiggerEnv.NOOP
+        if not state.monsters:
+            # No threat: sit still. Wandering invites trouble (e.g.
+            # walking into a tile a bag is about to fall onto).
+            return DiggerEnv.NOOP
+
+        dr, dc = state.digger.row, state.digger.col
+        bag_tiles = {(b.row, b.col) for b in state.bags}
+
+        best_key: tuple[int, int, int] | None = None
+        best_action = DiggerEnv.NOOP
+        for action, ddr, ddc in self._CANDIDATES:
+            nr, nc = dr + ddr, dc + ddc
+            if nr < 0 or nr >= MHEIGHT or nc < 0 or nc >= MWIDTH:
+                continue
+            if (nr, nc) in bag_tiles:
+                continue
+            min_dist = min(abs(m.row - nr) + abs(m.col - nc)
+                           for m in state.monsters)
+            wall_dist = min(nr, MHEIGHT - 1 - nr, nc, MWIDTH - 1 - nc)
+            sticky = 1 if action == self.last_dir \
+                and action != DiggerEnv.NOOP else 0
+            key = (min_dist, wall_dist, sticky)
+            if best_key is None or key > best_key:
+                best_key = key
+                best_action = action
+
+        if best_action in self.MOVE_ACTIONS:
+            self.last_dir = best_action
+        return best_action
+
+
 # ---- Runners --------------------------------------------------------------
 
 def run_headless(args) -> None:
     env = SymbolicDiggerEnv(max_steps=10**9,
                             episodic_life=not args.no_episodic_life)
-    if args.smart:
+    if args.dodge:
+        policy = DodgeMonsters()
+        pol_name = "dodge(survival)"
+    elif args.smart:
         policy = SmartHeuristic(args.dodge_range, args.fire_range,
                                 args.fire_cooldown)
         pol_name = (f"smart(dodge={args.dodge_range}, fire={args.fire_range}, "
@@ -323,9 +401,13 @@ def run_live(args) -> None:
 
     env = SymbolicDiggerEnv(max_steps=10**9,
                             episodic_life=not args.no_episodic_life)
-    policy = (SmartHeuristic(args.dodge_range, args.fire_range,
-                             args.fire_cooldown)
-              if args.smart else GreedyEmerald())
+    if args.dodge:
+        policy = DodgeMonsters()
+    elif args.smart:
+        policy = SmartHeuristic(args.dodge_range, args.fire_range,
+                                args.fire_cooldown)
+    else:
+        policy = GreedyEmerald()
 
     obs = env.reset()
     raw = env._env._core.get_frame()
@@ -404,6 +486,10 @@ def parse_args():
     p.add_argument("--no-episodic-life", action="store_true")
     p.add_argument("--smart", action="store_true",
                    help="enable monster dodge + opportunistic FIRE")
+    p.add_argument("--dodge", action="store_true",
+                   help="survival-only policy: ignore emeralds, "
+                        "maximise distance from monsters. Mutually "
+                        "exclusive with --smart.")
     p.add_argument("--dodge-range", type=int, default=2)
     p.add_argument("--fire-range", type=int, default=5)
     p.add_argument("--fire-cooldown", type=int,
@@ -424,6 +510,8 @@ def parse_args():
 
 def main() -> None:
     args = parse_args()
+    if args.dodge and args.smart:
+        raise SystemExit("--dodge and --smart are mutually exclusive")
     if args.live:
         run_live(args)
     else:
