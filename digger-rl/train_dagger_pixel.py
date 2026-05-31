@@ -36,6 +36,7 @@ from torch.optim import Adam
 from digger_env import DiggerEnv, FrameStack, _env_step_skipped, preprocess_uint8
 from tools.game_state import extract_state_fast
 from tools.heuristic_agent import GreedyEmerald
+from tools.symbolic_env import BASE_OBS_CHANNELS, state_to_tensor
 from train_ppo import Agent, select_device
 
 REPO = Path(__file__).parent.resolve()
@@ -59,6 +60,10 @@ class Config:
     color: bool = True
     episodic_life: bool = True
     encoder_width: int = 1
+    # Auxiliary symbolic-state prediction head: forces the pixel CNN to
+    # learn features that recover the (6, 10, 15) tile grid that the
+    # teacher's decisions depend on. 0 = head disabled (vanilla DAGGER).
+    aux_symbolic_weight: float = 0.0
     seed: int = 1
     run_name: str = "dagger_pixel"
     save_every_iter: bool = True
@@ -67,6 +72,31 @@ class Config:
     # 84 uint8 ~ 2.4 GB, so the cap matters once we run beyond default
     # budgets. Default 50k is roomy for the default 8-iter schedule.
     max_dataset_size: int = 50_000
+
+
+class SymbolicHead(nn.Module):
+    """Predict the (6, 10, 15) symbolic tile grid from the encoder's
+    feature vector. Output is per-tile per-channel logits; train with
+    BCE-with-logits against the binary grid from extract_state_fast.
+
+    The point isn't accurate reconstruction -- it's that the gradient
+    from this loss pushes the shared encoder to retain *exactly* the
+    information the teacher uses to decide its action. Without it, the
+    CE-on-action loss alone has no incentive to localise nobbins down
+    to a single tile in the encoder's feature space.
+    """
+
+    OUT_DIM = BASE_OBS_CHANNELS * 10 * 15  # 900
+
+    def __init__(self, in_features: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_features, 256), nn.ReLU(),
+            nn.Linear(256, self.OUT_DIM),
+        )
+
+    def forward(self, feat: torch.Tensor) -> torch.Tensor:
+        return self.net(feat).reshape(-1, BASE_OBS_CHANNELS, 10, 15)
 
 
 class PixelEnv:
@@ -114,11 +144,15 @@ class PixelEnv:
 
 def rollout_collect(env: PixelEnv, policy_fn, n_steps: int, frame_skip: int,
                     teacher: GreedyEmerald, teacher_acts: bool,
-                    aggregated: collections.deque) -> None:
+                    aggregated: collections.deque,
+                    store_symbolic: bool = False) -> None:
     """Roll policy in env for n_steps; label each visited state with the
     teacher. obs (the pixel stack) is what the student trains against;
     raw_frame is what the teacher reads CV from. Both refer to the same
     point in time.
+
+    If `store_symbolic`, also stash the (6, 10, 15) symbolic tile grid
+    from the same frame so the auxiliary head has a regression target.
     """
     obs = env.reset()
     teacher.reset()
@@ -127,7 +161,11 @@ def rollout_collect(env: PixelEnv, policy_fn, n_steps: int, frame_skip: int,
         state = extract_state_fast(env.raw_frame)
         a_teacher = teacher(state)
         a_taken = a_teacher if teacher_acts else policy_fn(obs)
-        aggregated.append((obs.copy(), a_teacher))
+        if store_symbolic:
+            sym = state_to_tensor(state)  # (6, 10, 15) float32 in {0, 1}
+            aggregated.append((obs.copy(), a_teacher, sym))
+        else:
+            aggregated.append((obs.copy(), a_teacher))
         obs, _r, done, _info = env.step_skipped(a_taken, frame_skip)
         collected += 1
         if done:
@@ -143,8 +181,17 @@ def _obs_to_device(obs_u8: torch.Tensor, device: torch.device) -> torch.Tensor:
 def train_bc(policy: Agent, optim: Adam,
              aggregated: collections.deque,
              epochs: int, batch_size: int, device: torch.device,
-             rng: np.random.Generator) -> tuple[float, float]:
-    """Cross-entropy BC over the aggregated dataset; returns (ce, acc).
+             rng: np.random.Generator,
+             aux_head: SymbolicHead | None = None,
+             aux_weight: float = 0.0,
+             ) -> tuple[float, float, float, float]:
+    """Cross-entropy BC over the aggregated dataset.
+
+    Returns (ce, acc, aux_bce, aux_acc). When `aux_head` is provided,
+    also predicts the (6, 10, 15) symbolic grid from the encoder feature
+    and trains it with BCE-with-logits. The action CE and auxiliary BCE
+    are summed (with `aux_weight` scaling the BCE) and backpropped
+    together so the shared encoder learns features useful for both.
 
     Dataset is kept on CPU as uint8 (84672 B/sample) so 50k samples
     fit in ~4 GB. Each minibatch is copied to device and cast to
@@ -155,7 +202,11 @@ def train_bc(policy: Agent, optim: Adam,
     act_np = np.array([a[1] for a in aggregated], dtype=np.int64)
     obs_cpu = torch.from_numpy(obs_np)
     act_cpu = torch.from_numpy(act_np)
-    ce_sum = acc_sum = 0.0
+    use_aux = aux_head is not None and aux_weight > 0.0
+    if use_aux:
+        sym_np = np.stack([a[2] for a in aggregated], axis=0)  # (N, 6, 10, 15)
+        sym_cpu = torch.from_numpy(sym_np)
+    ce_sum = acc_sum = aux_sum = aux_acc_sum = 0.0
     total_batches = 0
     for _ in range(epochs):
         perm = rng.permutation(n)
@@ -163,17 +214,35 @@ def train_bc(policy: Agent, optim: Adam,
             mb = perm[start:start + batch_size]
             obs_t = _obs_to_device(obs_cpu[mb], device)
             act_t = act_cpu[mb].to(device)
-            logits = policy.actor(policy.encode(obs_t))
+            feat = policy.encode(obs_t)
+            logits = policy.actor(feat)
             ce = F.cross_entropy(logits, act_t)
+            if use_aux:
+                sym_t = sym_cpu[mb].to(device)
+                sym_pred = aux_head(feat)
+                aux_bce = F.binary_cross_entropy_with_logits(sym_pred, sym_t)
+                loss = ce + aux_weight * aux_bce
+            else:
+                aux_bce = torch.zeros((), device=device)
+                loss = ce
             optim.zero_grad()
-            ce.backward()
-            nn.utils.clip_grad_norm_(policy.parameters(), 5.0)
+            loss.backward()
+            params = list(policy.parameters())
+            if use_aux:
+                params += list(aux_head.parameters())
+            nn.utils.clip_grad_norm_(params, 5.0)
             optim.step()
             with torch.no_grad():
                 acc_sum += (logits.argmax(-1) == act_t).float().mean().item()
+                if use_aux:
+                    # Per-tile-per-channel binary accuracy at threshold 0.5.
+                    pred_bin = (sym_pred > 0).float()
+                    aux_acc_sum += (pred_bin == sym_t).float().mean().item()
             ce_sum += ce.item()
+            aux_sum += float(aux_bce.item())
             total_batches += 1
-    return ce_sum / total_batches, acc_sum / total_batches
+    return (ce_sum / total_batches, acc_sum / total_batches,
+             aux_sum / total_batches, aux_acc_sum / total_batches)
 
 
 def evaluate(env: PixelEnv, policy: Agent, episodes: int, max_steps: int,
@@ -216,6 +285,10 @@ def parse_args() -> Config:
     p.add_argument("--obs-size", type=int, default=Config.obs_size)
     p.add_argument("--encoder-width", type=int, default=Config.encoder_width,
                    help="NatureCNN width multiplier (1 = ~1.7M params, 2 = ~6M)")
+    p.add_argument("--aux-symbolic-weight", type=float,
+                   default=Config.aux_symbolic_weight,
+                   help="weight on auxiliary symbolic-state BCE loss "
+                        "(0 disables the head; suggested 1.0-3.0)")
     p.add_argument("--color", default=Config.color,
                    action=argparse.BooleanOptionalAction)
     p.add_argument("--episodic-life", default=Config.episodic_life,
@@ -232,6 +305,7 @@ def parse_args() -> Config:
         learning_rate=a.lr, eval_episodes=a.eval_episodes,
         frame_skip=a.frame_skip, frame_stack=a.frame_stack,
         obs_size=a.obs_size, encoder_width=a.encoder_width,
+        aux_symbolic_weight=a.aux_symbolic_weight,
         color=a.color, episodic_life=a.episodic_life,
         max_dataset_size=a.max_dataset_size, seed=a.seed,
         run_name=a.run_name, device=str(select_device(a.force_cpu)),
@@ -245,7 +319,9 @@ def _recent_action_counts(aggregated: collections.deque, n: int) -> list[int]:
         return [0] * DiggerEnv.NUM_ACTIONS
     # deque slicing isn't supported; islice from the right via list.
     tail = list(aggregated)[-n:]
-    counts = np.bincount([a for _, a in tail],
+    # Each entry is (obs, action) or (obs, action, symbolic). Index [1]
+    # is the action either way.
+    counts = np.bincount([t[1] for t in tail],
                           minlength=DiggerEnv.NUM_ACTIONS)
     return counts.tolist()
 
@@ -266,10 +342,24 @@ def main() -> None:
     policy = Agent(num_actions=DiggerEnv.NUM_ACTIONS,
                    in_channels=env.obs_channels,
                    width=cfg.encoder_width).to(device)
+    use_aux = cfg.aux_symbolic_weight > 0.0
+    aux_head: SymbolicHead | None = None
+    if use_aux:
+        # Pull the encoder's output dim from the final Linear layer in
+        # policy.encoder. Order in the Sequential: [Conv, ReLU, Conv, ReLU,
+        # Conv, ReLU, Flatten, Linear, ReLU] -> the Linear is index -2.
+        feat_dim = policy.encoder[-2].out_features
+        aux_head = SymbolicHead(feat_dim).to(device)
     n_params = sum(p.numel() for p in policy.parameters())
-    print(f"{tag}policy: {n_params:,} params  obs_channels={env.obs_channels}",
+    aux_params = sum(p.numel() for p in aux_head.parameters()) if use_aux else 0
+    print(f"{tag}policy: {n_params:,} params  obs_channels={env.obs_channels}"
+          + (f"  aux_head: {aux_params:,} params  "
+              f"aux_weight={cfg.aux_symbolic_weight}" if use_aux else ""),
           flush=True)
-    optim = Adam(policy.parameters(), lr=cfg.learning_rate)
+    optim_params = list(policy.parameters())
+    if use_aux:
+        optim_params += list(aux_head.parameters())
+    optim = Adam(optim_params, lr=cfg.learning_rate)
 
     aggregated: collections.deque = collections.deque(
         maxlen=cfg.max_dataset_size)
@@ -287,13 +377,15 @@ def main() -> None:
     env.set_episodic_life(cfg.episodic_life)
     rollout_collect(env, policy_argmax, cfg.initial_steps,
                     cfg.frame_skip, teacher, teacher_acts=True,
-                    aggregated=aggregated)
+                    aggregated=aggregated, store_symbolic=use_aux)
     counts = _recent_action_counts(aggregated, cfg.initial_steps)
-    ce, acc = train_bc(policy, optim, aggregated,
-                        cfg.initial_epochs, cfg.batch_size, device, rng)
+    ce, acc, aux_bce, aux_acc = train_bc(
+        policy, optim, aggregated, cfg.initial_epochs, cfg.batch_size,
+        device, rng, aux_head=aux_head, aux_weight=cfg.aux_symbolic_weight)
+    aux_str = f"  aux bce={aux_bce:.3f} acc={aux_acc:.3f}" if use_aux else ""
     print(f"{tag}iter 0: |D|={len(aggregated)}  "
           f"action dist (N/L/R/U/D/F) {counts}  "
-          f"bc ce={ce:.3f} acc={acc:.3f}", flush=True)
+          f"bc ce={ce:.3f} acc={acc:.3f}{aux_str}", flush=True)
     mean_s, max_s, mean_len = evaluate(
         env, policy, cfg.eval_episodes, cfg.eval_max_steps,
         cfg.frame_skip, device)
@@ -307,13 +399,16 @@ def main() -> None:
         env.set_episodic_life(cfg.episodic_life)
         rollout_collect(env, policy_argmax, cfg.steps_per_iter,
                         cfg.frame_skip, teacher, teacher_acts=False,
-                        aggregated=aggregated)
+                        aggregated=aggregated, store_symbolic=use_aux)
         counts = _recent_action_counts(aggregated, cfg.steps_per_iter)
-        ce, acc = train_bc(policy, optim, aggregated,
-                            cfg.epochs_per_iter, cfg.batch_size, device, rng)
+        ce, acc, aux_bce, aux_acc = train_bc(
+            policy, optim, aggregated, cfg.epochs_per_iter, cfg.batch_size,
+            device, rng, aux_head=aux_head,
+            aux_weight=cfg.aux_symbolic_weight)
+        aux_str = f"  aux bce={aux_bce:.3f} acc={aux_acc:.3f}" if use_aux else ""
         print(f"{tag}iter {it}: |D|={len(aggregated)}  "
               f"action dist (N/L/R/U/D/F) {counts}  "
-              f"bc ce={ce:.3f} acc={acc:.3f}", flush=True)
+              f"bc ce={ce:.3f} acc={acc:.3f}{aux_str}", flush=True)
         mean_s, max_s, mean_len = evaluate(
             env, policy, cfg.eval_episodes, cfg.eval_max_steps,
             cfg.frame_skip, device)
@@ -323,13 +418,19 @@ def main() -> None:
               f"wall {elapsed:.0f}s", flush=True)
         if cfg.save_every_iter:
             ckpt = ckpt_dir / f"dagger_pixel_iter{it:02d}.pt"
-            torch.save({"policy": policy.state_dict(), "iter": it,
-                        "config": cfg.__dict__}, ckpt)
+            ckpt_payload = {"policy": policy.state_dict(), "iter": it,
+                            "config": cfg.__dict__}
+            if use_aux:
+                ckpt_payload["aux_head"] = aux_head.state_dict()
+            torch.save(ckpt_payload, ckpt)
 
     final = ckpt_dir / "dagger_pixel_final.pt"
-    torch.save({"policy": policy.state_dict(),
-                "iter": cfg.iterations,
-                "config": cfg.__dict__}, final)
+    final_payload = {"policy": policy.state_dict(),
+                      "iter": cfg.iterations,
+                      "config": cfg.__dict__}
+    if use_aux:
+        final_payload["aux_head"] = aux_head.state_dict()
+    torch.save(final_payload, final)
     print(f"{tag}done. final ckpt {final}  total wall {time.monotonic()-t0:.0f}s",
           flush=True)
     env.close()
