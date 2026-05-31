@@ -177,16 +177,17 @@ class SmartHeuristic:
 
     def __init__(self, dodge_range: int = 2, fire_range: int = 5,
                  fire_cooldown_steps: int = DEFAULT_FIRE_COOLDOWN_STEPS):
+        # `dodge_range` is retained for CLI backward-compat but no longer
+        # used: the new lex-scored selection caps safety at distance 3 and
+        # blends emerald-chase in continuously.
         self.dodge_range = dodge_range
         self.fire_range = fire_range
         self.fire_cooldown_steps = fire_cooldown_steps
         self.prev_dir: int = DiggerEnv.NOOP
-        self._chaser = GreedyEmerald()
         self._fire_cd: int = 0
 
     def reset(self) -> None:
         self.prev_dir = DiggerEnv.NOOP
-        self._chaser.reset()
         self._fire_cd = 0
 
     def __call__(self, state) -> int:
@@ -200,68 +201,124 @@ class SmartHeuristic:
             self.prev_dir = action
         return action
 
+    # Movement candidates evaluated by the score function. FIRE is handled
+    # separately via the line-of-sight check below.
+    _MOVE_CANDIDATES: tuple[tuple[int, int, int], ...] = (
+        (DiggerEnv.NOOP,  0,  0),
+        (DiggerEnv.LEFT,  0, -1),
+        (DiggerEnv.RIGHT, 0,  1),
+        (DiggerEnv.UP,   -1,  0),
+        (DiggerEnv.DOWN,  1,  0),
+    )
+
     def _decide(self, state) -> int:
         if state.digger is None or not state.digger.present:
             return DiggerEnv.NOOP
         dr, dc = state.digger.row, state.digger.col
-        can_fire = self._fire_cd == 0
 
-        # ---- Threat ranking ----
-        # Bullets travel along the digger's facing direction, so a monster
-        # is "fireable" only if it's collinear AND we'd be aimed at it.
-        # Collect every in-range threat with its distance + which press
-        # would aim at it, then act on the CLOSEST one. The previous logic
-        # iterated monsters in arbitrary order and would happily burn the
-        # 50-step cooldown on a far enemy in our facing direction while a
-        # closer enemy in a perpendicular direction was the real problem.
-        threats: list[tuple[int, int, int, int]] = []  # (dist, dir_press, mr, mc)
-        for m in state.monsters:
-            mr, mc = m.row, m.col
-            if mr == dr and 0 < abs(mc - dc) <= self.fire_range:
-                dir_press = DiggerEnv.LEFT if mc < dc else DiggerEnv.RIGHT
-                threats.append((abs(mc - dc), dir_press, mr, mc))
-            elif mc == dc and 0 < abs(mr - dr) <= self.fire_range:
-                dir_press = DiggerEnv.UP if mr < dr else DiggerEnv.DOWN
-                threats.append((abs(mr - dr), dir_press, mr, mc))
+        # ---- FIRE opportunity ------------------------------------------
+        # Replaces the old "any threat in fire_range" check with a real
+        # line-of-sight scan: bullets stop at dirt/bag tiles, so a monster
+        # collinear with us but behind dirt is NOT actually fireable.
+        # Without this check the old SmartHeuristic burned its 50-step
+        # cooldown on shots that visibly hit a dirt wall.
+        if self._fire_cd == 0:
+            if self._line_of_sight_monster(state, dr, dc, self.prev_dir):
+                return DiggerEnv.FIRE
 
-        if not threats:
-            return self._chaser(state)
-
-        threats.sort()
-        nearest_dist, nearest_dir, nmr, nmc = threats[0]
-        if can_fire and self.prev_dir == nearest_dir:
-            return DiggerEnv.FIRE
-        if nearest_dist <= self.dodge_range:
-            axis = "row" if nearest_dir in (DiggerEnv.LEFT, DiggerEnv.RIGHT) else "col"
-            return self._escape_axis(state, dr, dc, axis=axis)
-        # Threat is line-of-sight but outside dodge range and we're not
-        # facing it. Keep chasing emeralds; facing tends to align naturally.
-        return self._chaser(state)
-
-    def _escape_axis(self, state, dr: int, dc: int, axis: str) -> int:
-        """Move perpendicular to the threat axis, preferring toward an emerald.
-
-        axis="row": threat is in the same row as us, escape vertically.
-        axis="col": threat is in the same col as us, escape horizontally.
-        """
+        # ---- Move selection: lex-scored single pass --------------------
+        # Old logic was binary: inside dodge_range -> escape, outside ->
+        # chase emerald. That walks toward monsters at distance 3-4 because
+        # emerald-chase ignores them. The lex score (safety, -e_dist,
+        # sticky, -is_noop) blends them: among equally-safe moves we pick
+        # the one closer to an emerald; among equally-emerald-close moves
+        # we stay in our previous direction; movement beats NOOP on ties.
+        bag_tiles = {(b.row, b.col) for b in state.bags}
+        monster_tiles = {(m.row, m.col) for m in state.monsters}
         em_rows, em_cols = np.where(state.emeralds)
-        if axis == "row":
-            # Pick UP or DOWN. Prefer the side with an emerald nearby.
-            up_em = ((em_rows < dr).sum() if em_rows.size else 0)
-            dn_em = ((em_rows > dr).sum() if em_rows.size else 0)
-            if up_em > 0 and dr > 0:
-                return DiggerEnv.UP
-            if dn_em > 0 and dr < MHEIGHT - 1:
-                return DiggerEnv.DOWN
-            return DiggerEnv.UP if dr > 0 else DiggerEnv.DOWN
-        else:
-            lf_em = ((em_cols < dc).sum() if em_cols.size else 0)
-            rt_em = ((em_cols > dc).sum() if em_cols.size else 0)
-            if lf_em > 0 and dc > 0:
-                return DiggerEnv.LEFT
-            if rt_em > 0 and dc < MWIDTH - 1:
-                return DiggerEnv.RIGHT
-            return DiggerEnv.LEFT if dc > 0 else DiggerEnv.RIGHT
+        em_targets = (list(zip(em_rows.tolist(), em_cols.tolist()))
+                       if em_rows.size else [])
+
+        def emerald_dist(r: int, c: int) -> int:
+            if not em_targets:
+                return MWIDTH + MHEIGHT
+            return min(abs(er - r) + abs(ec - c) for er, ec in em_targets)
+
+        def monster_min_dist(r: int, c: int) -> int:
+            if not state.monsters:
+                return MWIDTH + MHEIGHT
+            return min(abs(m.row - r) + abs(m.col - c)
+                        for m in state.monsters)
+
+        best_score: tuple | None = None
+        best_action = DiggerEnv.NOOP
+        for action, ddr, ddc in self._MOVE_CANDIDATES:
+            nr, nc = dr + ddr, dc + ddc
+            if nr < 0 or nr >= MHEIGHT or nc < 0 or nc >= MWIDTH:
+                continue
+            if (nr, nc) in bag_tiles:
+                continue
+            if (nr, nc) in monster_tiles:
+                # Stepping onto a monster tile == instant death.
+                continue
+            m_dist = monster_min_dist(nr, nc)
+            e_dist = emerald_dist(nr, nc)
+            # `safety` is capped at 2: only m_dist=1 (imminent next-frame
+            # collision) gets penalised; m_dist>=2 buckets together so
+            # emerald-chase takes over. Cap=3 made the agent reroute
+            # around diagonal monsters that couldn't actually reach it
+            # through dirt; cap=2 only avoids tiles a monster could
+            # collide with next step.
+            safety = min(m_dist, 2)
+            sticky = (1 if action == self.prev_dir
+                       and action != DiggerEnv.NOOP else 0)
+            # `-is_noop` sits above `-e_dist` in the lex order so a NOOP
+            # never wins on emerald-distance alone: standing still has
+            # the same e_dist as the current tile, which trivially ties
+            # any move that walks AWAY from an emerald (e.g. to dodge),
+            # and the old ordering had NOOP win those ties.
+            is_noop = 1 if action == DiggerEnv.NOOP else 0
+            score = (safety, -is_noop, -e_dist, sticky)
+            if best_score is None or score > best_score:
+                best_score = score
+                best_action = action
+        return best_action
+
+    def _line_of_sight_monster(self, state, dr: int, dc: int, facing: int):
+        """Return the closest fireable monster, or None.
+
+        "Fireable" means: collinear with the digger along `facing`, within
+        `fire_range` tiles, with no intact bag in between (bullet stops
+        at a bag).
+
+        We deliberately do NOT check the dirt mask: dirt[r, c] is True
+        whenever the tile's brown-pixel count exceeds a threshold, but
+        tiles that have just been dug through still register as dirt-ish
+        for a frame or two while the texture transitions. A bullet in a
+        cleared tunnel would be flagged as blocked. Empirically, almost
+        every monster the agent could see ended up behind a "dirt" tile
+        by that test, and the FIRE action rate dropped to 0%.
+        """
+        if facing == DiggerEnv.NOOP:
+            return None
+        if facing == DiggerEnv.LEFT:
+            line = ((dr, dc - i) for i in range(1, dc + 1))
+        elif facing == DiggerEnv.RIGHT:
+            line = ((dr, dc + i) for i in range(1, MWIDTH - dc))
+        elif facing == DiggerEnv.UP:
+            line = ((dr - i, dc) for i in range(1, dr + 1))
+        else:  # DOWN
+            line = ((dr + i, dc) for i in range(1, MHEIGHT - dr))
+        monsters_by_tile = {(m.row, m.col): m for m in state.monsters}
+        bag_tiles = {(b.row, b.col) for b in state.bags if not b.broken}
+        for i, (r, c) in enumerate(line, start=1):
+            if i > self.fire_range:
+                return None
+            if (r, c) in bag_tiles:
+                return None  # bullet absorbed by bag
+            if (r, c) in monsters_by_tile:
+                return monsters_by_tile[(r, c)]
+        return None
 
 
 class DodgeMonsters:

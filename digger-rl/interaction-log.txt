@@ -249,3 +249,13 @@ Can you fetch latest, rebase checkout and commit current changes on top, though 
 [2026-05-29] And continue with the enemy dections in SymbolicDigger
 
 [2026-05-30] Let's try training dagger_fs4 but I wonder if in parallel you can write a Dreamer trainer as well
+
+[2026-05-30] Run them concurrently
+
+[2026-05-31] Ok, let's do 2 things in parallel - improve heuristic_agent to combine avoidence with emerald collection and may be fix firing action
+
+[2026-05-31] Also try to explain/come up with strategy on how to make any of the RL algorithms to learn from pixels and teacher
+
+[2026-05-31] Have you heard of Evolving Neural Networks through Augmenting Topologies paper? When does it lands in the spectrum or papers we've discussed so far? (pdf is here https://nn.cs.utexas.edu/downloads/papers/stanley.ec02.pdf )
+
+[2026-05-31] And let's try 1st strategy to improve training
