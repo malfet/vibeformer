@@ -24,6 +24,7 @@ action / score / lives):
 from __future__ import annotations
 
 import argparse
+import collections
 import sys
 import time
 from pathlib import Path
@@ -211,6 +212,8 @@ class SmartHeuristic:
         (DiggerEnv.DOWN,  1,  0),
     )
 
+    _MAX_TUNNEL_DIST: int = MWIDTH * MHEIGHT + 1  # sentinel for "unreachable"
+
     def _decide(self, state) -> int:
         if state.digger is None or not state.digger.present:
             return DiggerEnv.NOOP
@@ -227,12 +230,13 @@ class SmartHeuristic:
                 return DiggerEnv.FIRE
 
         # ---- Move selection: lex-scored single pass --------------------
-        # Old logic was binary: inside dodge_range -> escape, outside ->
-        # chase emerald. That walks toward monsters at distance 3-4 because
-        # emerald-chase ignores them. The lex score (safety, -e_dist,
-        # sticky, -is_noop) blends them: among equally-safe moves we pick
-        # the one closer to an emerald; among equally-emerald-close moves
-        # we stay in our previous direction; movement beats NOOP on ties.
+        # `tunnel_dist[r, c]` is shortest path from any monster to (r, c)
+        # through *non-dirt* tiles. Diagonal monsters separated by dirt
+        # walls register as unreachable, so the safety term no longer
+        # over-penalises moves toward emeralds along the digger's own
+        # tunnel. The v2 used Manhattan, which conflated reachable and
+        # blocked threats and made the agent reroute pointlessly.
+        tunnel_dist = self._compute_monster_tunnel_distance(state)
         bag_tiles = {(b.row, b.col) for b in state.bags}
         monster_tiles = {(m.row, m.col) for m in state.monsters}
         em_rows, em_cols = np.where(state.emeralds)
@@ -243,12 +247,6 @@ class SmartHeuristic:
             if not em_targets:
                 return MWIDTH + MHEIGHT
             return min(abs(er - r) + abs(ec - c) for er, ec in em_targets)
-
-        def monster_min_dist(r: int, c: int) -> int:
-            if not state.monsters:
-                return MWIDTH + MHEIGHT
-            return min(abs(m.row - r) + abs(m.col - c)
-                        for m in state.monsters)
 
         best_score: tuple | None = None
         best_action = DiggerEnv.NOOP
@@ -261,14 +259,13 @@ class SmartHeuristic:
             if (nr, nc) in monster_tiles:
                 # Stepping onto a monster tile == instant death.
                 continue
-            m_dist = monster_min_dist(nr, nc)
+            m_dist = int(tunnel_dist[nr, nc])
             e_dist = emerald_dist(nr, nc)
-            # `safety` is capped at 2: only m_dist=1 (imminent next-frame
-            # collision) gets penalised; m_dist>=2 buckets together so
-            # emerald-chase takes over. Cap=3 made the agent reroute
-            # around diagonal monsters that couldn't actually reach it
-            # through dirt; cap=2 only avoids tiles a monster could
-            # collide with next step.
+            # `safety` is capped at 2: only tiles where a monster could
+            # collide next step (m_dist=1) get penalised. m_dist>=2 buckets
+            # together and emerald-chase takes over. Unreachable monsters
+            # produce m_dist=_MAX_TUNNEL_DIST which trivially clears the
+            # cap.
             safety = min(m_dist, 2)
             sticky = (1 if action == self.prev_dir
                        and action != DiggerEnv.NOOP else 0)
@@ -283,6 +280,39 @@ class SmartHeuristic:
                 best_score = score
                 best_action = action
         return best_action
+
+    def _compute_monster_tunnel_distance(self, state) -> np.ndarray:
+        """(MHEIGHT, MWIDTH) int array of shortest tunnel-distance from
+        any monster to that tile. Unreachable tiles get _MAX_TUNNEL_DIST.
+
+        Nobbins traverse only cleared (non-dirt) tiles, so this BFS skips
+        any tile classified as dirt. A monster sitting in a different
+        tunnel separated by an unbroken dirt wall registers as unreachable
+        and stops contaminating the safety score.
+        """
+        H, W = state.dirt.shape
+        dist = np.full((H, W), self._MAX_TUNNEL_DIST, dtype=np.int32)
+        if not state.monsters:
+            return dist
+        queue: collections.deque[tuple[int, int]] = collections.deque()
+        for m in state.monsters:
+            if 0 <= m.row < H and 0 <= m.col < W:
+                dist[m.row, m.col] = 0
+                queue.append((m.row, m.col))
+        # 4-connected BFS over non-dirt tiles.
+        while queue:
+            r, c = queue.popleft()
+            d = dist[r, c]
+            for dr_, dc_ in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                nr, nc = r + dr_, c + dc_
+                if not (0 <= nr < H and 0 <= nc < W):
+                    continue
+                if state.dirt[nr, nc]:
+                    continue  # dirt blocks nobbin traversal
+                if dist[nr, nc] > d + 1:
+                    dist[nr, nc] = d + 1
+                    queue.append((nr, nc))
+        return dist
 
     def _line_of_sight_monster(self, state, dr: int, dc: int, facing: int):
         """Return the closest fireable monster, or None.

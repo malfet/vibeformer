@@ -259,3 +259,7 @@ Can you fetch latest, rebase checkout and commit current changes on top, though 
 [2026-05-31] Have you heard of Evolving Neural Networks through Augmenting Topologies paper? When does it lands in the spectrum or papers we've discussed so far? (pdf is here https://nn.cs.utexas.edu/downloads/papers/stanley.ec02.pdf )
 
 [2026-05-31] And let's try 1st strategy to improve training
+
+[2026-05-31] Have you succeeded in combining collect / dodge + fire strategies in heuristic? And is there a ml pipeline that beats teacher yet?
+
+[2026-05-31] Both in parallel
