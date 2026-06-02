@@ -36,8 +36,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import numpy as np
 
 from digger_env import DiggerEnv
-from tools.game_state import MHEIGHT, MWIDTH, render_overlay, tile_center
+from tools.game_state import (DIR_DOWN, DIR_LEFT, DIR_NONE, DIR_RIGHT, DIR_UP,
+                                MHEIGHT, MWIDTH, render_overlay, tile_center)
 from tools.symbolic_env import SymbolicDiggerEnv
+
+_DIR_TO_ACTION = {
+    DIR_LEFT:  DiggerEnv.LEFT,
+    DIR_RIGHT: DiggerEnv.RIGHT,
+    DIR_UP:    DiggerEnv.UP,
+    DIR_DOWN:  DiggerEnv.DOWN,
+}
+_ACTION_TO_FACING = {
+    DiggerEnv.LEFT:  DIR_LEFT,
+    DiggerEnv.RIGHT: DIR_RIGHT,
+    DiggerEnv.UP:    DIR_UP,
+    DiggerEnv.DOWN:  DIR_DOWN,
+}
 
 ACTION_NAMES = ["NOOP", "LEFT", "RIGHT", "UP", "DOWN", "FIRE"]
 
@@ -218,16 +232,27 @@ class SmartHeuristic:
         if state.digger is None or not state.digger.present:
             return DiggerEnv.NOOP
         dr, dc = state.digger.row, state.digger.col
+        # Prefer the CV-detected facing; fall back to the action-history
+        # `prev_dir` when CV reports DIR_NONE (sprite mid-animation).
+        cv_dir = getattr(state.digger, "dir", DIR_NONE)
+        facing = (_DIR_TO_ACTION[cv_dir] if cv_dir in _DIR_TO_ACTION
+                   else self.prev_dir)
 
-        # ---- FIRE opportunity ------------------------------------------
-        # Replaces the old "any threat in fire_range" check with a real
-        # line-of-sight scan: bullets stop at dirt/bag tiles, so a monster
-        # collinear with us but behind dirt is NOT actually fireable.
-        # Without this check the old SmartHeuristic burned its 50-step
-        # cooldown on shots that visibly hit a dirt wall.
+        # ---- FIRE / turn-to-fire opportunity ----------------------------
+        # Scan every direction for a line-of-sight monster, not just the
+        # one we're facing. If a fireable target is in *some* direction,
+        # turn toward it: today we move toward it (and face it as a side
+        # effect), then next step the facing matches and we FIRE.
         if self._fire_cd == 0:
-            if self._line_of_sight_monster(state, dr, dc, self.prev_dir):
+            target_dir = self._best_fire_direction(state, dr, dc)
+            if target_dir == facing:
                 return DiggerEnv.FIRE
+            if target_dir != DiggerEnv.NOOP:
+                # Sanity: only turn if the candidate move is otherwise legal
+                # (no wall, no bag, no monster on that tile). Otherwise we'd
+                # waste a step pressing into a wall.
+                if self._move_is_legal(state, dr, dc, target_dir):
+                    return target_dir
 
         # ---- Move selection: lex-scored single pass --------------------
         # `tunnel_dist[r, c]` is shortest path from any monster to (r, c)
@@ -238,6 +263,11 @@ class SmartHeuristic:
         # blocked threats and made the agent reroute pointlessly.
         tunnel_dist = self._compute_monster_tunnel_distance(state)
         bag_tiles = {(b.row, b.col) for b in state.bags}
+        # Tiles directly under a falling bag will be occupied within
+        # a few frames; treat them as obstacles so we don't get crushed.
+        for b in state.bags:
+            if b.moving and b.row + 1 < MHEIGHT:
+                bag_tiles.add((b.row + 1, b.col))
         monster_tiles = {(m.row, m.col) for m in state.monsters}
         em_rows, em_cols = np.where(state.emeralds)
         em_targets = (list(zip(em_rows.tolist(), em_cols.tolist()))
@@ -313,6 +343,40 @@ class SmartHeuristic:
                     dist[nr, nc] = d + 1
                     queue.append((nr, nc))
         return dist
+
+    def _best_fire_direction(self, state, dr: int, dc: int) -> int:
+        """Return the action (LEFT/RIGHT/UP/DOWN) that points at the
+        closest line-of-sight monster, or NOOP if none reachable.
+
+        Used by the turn-to-fire logic: when there's a fireable monster
+        not aligned with the current facing, we move toward it so next
+        step the facing matches and we can FIRE.
+        """
+        best_dir = DiggerEnv.NOOP
+        best_dist: int | float = float("inf")
+        for action in (DiggerEnv.LEFT, DiggerEnv.RIGHT,
+                        DiggerEnv.UP, DiggerEnv.DOWN):
+            m = self._line_of_sight_monster(state, dr, dc, action)
+            if m is None:
+                continue
+            d = abs(m.row - dr) + abs(m.col - dc)
+            if d < best_dist:
+                best_dist = d
+                best_dir = action
+        return best_dir
+
+    def _move_is_legal(self, state, dr: int, dc: int, action: int) -> bool:
+        deltas = {DiggerEnv.LEFT: (0, -1), DiggerEnv.RIGHT: (0, 1),
+                   DiggerEnv.UP: (-1, 0), DiggerEnv.DOWN: (1, 0)}
+        ddr, ddc = deltas.get(action, (0, 0))
+        nr, nc = dr + ddr, dc + ddc
+        if not (0 <= nr < MHEIGHT and 0 <= nc < MWIDTH):
+            return False
+        if any(b.row == nr and b.col == nc for b in state.bags):
+            return False
+        if any(m.row == nr and m.col == nc for m in state.monsters):
+            return False
+        return True
 
     def _line_of_sight_monster(self, state, dr: int, dc: int, facing: int):
         """Return the closest fireable monster, or None.

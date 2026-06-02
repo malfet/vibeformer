@@ -228,14 +228,17 @@ def _color_mask(frame_rgb: np.ndarray, rgb: tuple[int, int, int]) -> np.ndarray:
     return (frame_rgb[..., 0] == r) & (frame_rgb[..., 1] == g) & (frame_rgb[..., 2] == b)
 
 
-def _find_bags_by_template(m_blk_play: np.ndarray) -> list[tuple[int, int]]:
+def _find_bags_by_template(m_blk_play: np.ndarray
+                            ) -> list[tuple[int, int, bool]]:
     """Locate bags by exact template match against the play-area black mask.
 
-    Returns a list of (col, row) tile coordinates -- one per bag -- whose
-    centres fall on the corresponding tile centre. The template is matched
-    exactly (black-where-template-says-black AND not-black-elsewhere), so
-    tunnels and other large black regions do not false-match -- they fail
-    the not-black check on the bag's internal-dirt pixels.
+    Returns a list of (col, row, moving) per detection. `moving=True` if
+    the matched sprite's vertical centre is offset from the assigned
+    tile's centre by more than a quarter tile, which is the signature of
+    a bag mid-fall (the sprite slides smoothly down through tunnel
+    pixels). The template itself matches both static and falling bags
+    because the indexing scans every position, not just tile-aligned
+    ones; we just weren't reading out the offset before.
 
     Implementation: two-stage vectorised filter. The cheap stage AND-reduces
     one row of the bag's central "$" spine (must-be-black) with one row of
@@ -266,7 +269,7 @@ def _find_bags_by_template(m_blk_play: np.ndarray) -> list[tuple[int, int]]:
     candidates = spine & gap
     cand_ys, cand_xs = np.where(candidates)
 
-    out: list[tuple[int, int]] = []
+    out: list[tuple[int, int, bool]] = []
     seen: set[tuple[int, int]] = set()
     for ty, tx in zip(cand_ys.tolist(), cand_xs.tolist()):
         if (ty, tx) in seen:
@@ -277,7 +280,12 @@ def _find_bags_by_template(m_blk_play: np.ndarray) -> list[tuple[int, int]]:
         sprite_cy = ty + BAG_CENTER_DY
         sprite_cx = tx + BAG_CENTER_DX
         col, row = pixel_to_tile(sprite_cx, sprite_cy + PLAY_TOP)
-        out.append((col, row))
+        # `tile_center` returns full-frame coords; compare against the
+        # sprite's full-frame y to decide if it's mid-fall.
+        _, tile_cy_full = tile_center(col, row)
+        y_off = abs(sprite_cy + PLAY_TOP - tile_cy_full)
+        moving = y_off > TILE_H * 0.25
+        out.append((col, row, moving))
     return out
 
 
@@ -346,11 +354,11 @@ def extract_state(frame_rgba: np.ndarray) -> GameState:
     # outline + solid "$" carved from dirt). Use sprite-exact matching
     # against the framebuffer's black mask; see _find_bags_by_template.
     bag_seen: set[tuple[int, int]] = set()
-    for col, row in _find_bags_by_template(m_blk):
+    for col, row, moving in _find_bags_by_template(m_blk):
         if (col, row) in bag_seen:
             continue
         bag_seen.add((col, row))
-        state.bags.append(BagPos(col=col, row=row))
+        state.bags.append(BagPos(col=col, row=row, moving=moving))
 
     # --- emeralds: each is a small bright-green diamond (~15-40 px).
     # Bigger green blobs are emerald clusters that bled together; we
@@ -483,6 +491,51 @@ def _find_nobbins_by_template(m_grn_play: np.ndarray,
     return detections
 
 
+def _digger_facing(m_red_play: np.ndarray, m_yel_play: np.ndarray,
+                    col: int, row: int) -> int:
+    """Estimate digger facing from yellow extent beyond the body.
+
+    The digger sprite has a symmetric yellow trim around its red body
+    and a single yellow barrel that pokes out one tile-edge by a few
+    pixels in the facing direction. The barrel makes the *maximum*
+    yellow extent in the facing direction larger than the other three.
+    We widen the search window to a 3-tile box so the barrel isn't
+    clipped at the tile boundary when the digger is straddling tiles
+    mid-move.
+    """
+    # 3x3-tile window: catches the barrel even if it sticks beyond the
+    # nominal tile and tolerates the digger being mid-animation between
+    # two tiles.
+    H, W = m_red_play.shape
+    x0 = max(0, int((col - 1) * TILE_W))
+    x1 = min(W, int((col + 2) * TILE_W))
+    y0 = max(0, int((row - 1) * TILE_H))
+    y1 = min(H, int((row + 2) * TILE_H))
+    red_sub = m_red_play[y0:y1, x0:x1]
+    yel_sub = m_yel_play[y0:y1, x0:x1]
+    ry, rx = np.where(red_sub)
+    yy, yx = np.where(yel_sub)
+    if ry.size < 5 or yy.size < 5:
+        return DIR_NONE
+    red_cx = float(rx.mean())
+    red_cy = float(ry.mean())
+    # Max yellow extent in each direction, measured from the red centroid.
+    right_ext = float(yx.max() - red_cx)
+    left_ext = float(red_cx - yx.min())
+    down_ext = float(yy.max() - red_cy)
+    up_ext = float(red_cy - yy.min())
+    extents = [(right_ext, DIR_RIGHT), (left_ext, DIR_LEFT),
+                (down_ext, DIR_DOWN), (up_ext, DIR_UP)]
+    extents.sort(reverse=True)
+    best_ext, best_dir = extents[0]
+    second_ext = extents[1][0]
+    # Commit only if the dominant direction's extent clearly beats the
+    # others; otherwise the trim is roughly symmetric.
+    if best_ext - second_ext >= 2 and best_ext >= 8:
+        return best_dir
+    return DIR_NONE
+
+
 def _monster_pixel_center(dgrn_play_mask: np.ndarray,
                            col: int, row: int) -> tuple[int, int]:
     """Sub-tile pixel centroid of a nobbin's dark-green body in
@@ -566,7 +619,9 @@ def extract_state_fast(frame_rgba: np.ndarray) -> GameState:
     flat_idx = int(red_for_digger.argmax())
     if red_for_digger.flat[flat_idx] >= 30:
         d_row, d_col = divmod(flat_idx, MWIDTH)
-        state.digger = DiggerPos(col=int(d_col), row=int(d_row), alive=True)
+        facing = _digger_facing(m_red, m_yel, int(d_col), int(d_row))
+        state.digger = DiggerPos(col=int(d_col), row=int(d_row),
+                                  alive=True, dir=facing)
 
     # Emeralds: bright-green pixels in tile, no red, and not occluded by
     # a nobbin (which would put a heart-shape of green into the tile too).
@@ -588,13 +643,15 @@ def extract_state_fast(frame_rgba: np.ndarray) -> GameState:
                                           is_hobbin=False))
 
     # Bags: intact bags are a pure-black sprite (circular outline + "$")
-    # over dirt. Exact-match the template against the black mask.
+    # over dirt. Exact-match the template against the black mask. The
+    # `moving` flag is set when the sprite is vertically off-tile-centre,
+    # which is the mid-fall signature.
     bag_seen: set[tuple[int, int]] = set()
-    for col, row in _find_bags_by_template(m_blk):
+    for col, row, moving in _find_bags_by_template(m_blk):
         if (col, row) in bag_seen:
             continue
         bag_seen.add((col, row))
-        state.bags.append(BagPos(col=col, row=row))
+        state.bags.append(BagPos(col=col, row=row, moving=moving))
 
     return state
 

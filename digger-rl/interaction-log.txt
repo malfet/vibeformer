@@ -263,3 +263,5 @@ Can you fetch latest, rebase checkout and commit current changes on top, though 
 [2026-05-31] Have you succeeded in combining collect / dodge + fire strategies in heuristic? And is there a ml pipeline that beats teacher yet?
 
 [2026-05-31] Both in parallel
+
+[2026-06-02] But it still does not recognize falling bags? And symbolic state still missing digger's direction (i.e. if digger facing right and monstrer approaches from the left, it will fire to the right rather than turn and then fire
