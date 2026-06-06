@@ -72,6 +72,7 @@ class Config:
     frame_stack: int = 4
     shaping_coef: float = 0.5
     episodic_life: bool = True
+    force_cpu: bool = False
     log_every: int = 1
     save_every: int = 100
     seed: int = 1
@@ -147,6 +148,7 @@ def parse_args() -> Config:
         frame_skip=a.frame_skip, frame_stack=a.frame_stack,
         shaping_coef=a.shaping_coef,
         episodic_life=a.episodic_life,
+        force_cpu=a.force_cpu,
         save_every=a.save_every, seed=a.seed,
         run_name=a.run_name,
     )
@@ -156,7 +158,7 @@ def main() -> None:
     cfg = parse_args()
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
-    device = select_device()
+    device = select_device(cfg.force_cpu)
     ckpt_dir = CKPT_DIR / cfg.run_name
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     tag = f"[{cfg.run_name}]"
