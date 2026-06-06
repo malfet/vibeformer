@@ -272,3 +272,4 @@ But I want to get back to the problem of PPO training collapsing
 Two questions: why dagger_pixel can't even catch up to a teacher? Should we downscale less? Or keep inputs a RGB? And why wider net hurts the network performance? It should be other way around, shouldn't it?
 Can it be that there is a bug in PyTorch itself and if one uses say CPU for training it will work as expected?
 Let's check MPS vs CPU for potential errors
+Sure, but in parallel can you also run some tests to Identify which ops cause divergence
