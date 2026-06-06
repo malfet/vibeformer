@@ -268,3 +268,4 @@ Can you fetch latest, rebase checkout and commit current changes on top, though 
 So, is it all incorporated into a heuristic_agent.py?
 But it still fires in the wall from time and have this eposides when it reaches right end of the field and moves neither up nor down until enemy catches up to it
 Sure
+But I want to get back to the problem of PPO training collapsing
