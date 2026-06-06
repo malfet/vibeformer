@@ -248,10 +248,16 @@ class SmartHeuristic:
             if target_dir == facing:
                 return DiggerEnv.FIRE
             if target_dir != DiggerEnv.NOOP:
-                # Sanity: only turn if the candidate move is otherwise legal
-                # (no wall, no bag, no monster on that tile). Otherwise we'd
-                # waste a step pressing into a wall.
-                if self._move_is_legal(state, dr, dc, target_dir):
+                # Only turn-to-fire when (a) the move is legal and (b) the
+                # post-turn tile is at least 2 tiles from the nearest
+                # monster. Without (b) the agent walks directly into a
+                # nearby monster trying to align its facing: at the right
+                # edge with a monster closing along the same row, this
+                # caused an oscillating LEFT-turn → FIRE → walk back RIGHT
+                # → repeat loop while the next nobbin closed in, with the
+                # digger never digging UP/DOWN to escape.
+                if self._move_is_legal(state, dr, dc, target_dir) \
+                        and self._turn_is_safe(state, dr, dc, target_dir):
                     return target_dir
 
         # ---- Move selection: lex-scored single pass --------------------
@@ -378,20 +384,36 @@ class SmartHeuristic:
             return False
         return True
 
+    def _turn_is_safe(self, state, dr: int, dc: int, action: int) -> bool:
+        """True if the tile we'd step onto for turn-to-fire is at least
+        2 Manhattan tiles from every monster. Prevents walking directly
+        into a nobbin while trying to face it.
+        """
+        deltas = {DiggerEnv.LEFT: (0, -1), DiggerEnv.RIGHT: (0, 1),
+                   DiggerEnv.UP: (-1, 0), DiggerEnv.DOWN: (1, 0)}
+        ddr, ddc = deltas.get(action, (0, 0))
+        nr, nc = dr + ddr, dc + ddc
+        for m in state.monsters:
+            if abs(m.row - nr) + abs(m.col - nc) < 2:
+                return False
+        return True
+
     def _line_of_sight_monster(self, state, dr: int, dc: int, facing: int):
         """Return the closest fireable monster, or None.
 
         "Fireable" means: collinear with the digger along `facing`, within
-        `fire_range` tiles, with no intact bag in between (bullet stops
-        at a bag).
+        `fire_range` tiles, with no intact bag and no unbroken dirt wall
+        in between.
 
-        We deliberately do NOT check the dirt mask: dirt[r, c] is True
-        whenever the tile's brown-pixel count exceeds a threshold, but
-        tiles that have just been dug through still register as dirt-ish
-        for a frame or two while the texture transitions. A bullet in a
-        cleared tunnel would be flagged as blocked. Empirically, almost
-        every monster the agent could see ended up behind a "dirt" tile
-        by that test, and the FIRE action rate dropped to 0%.
+        Dirt check: a previous version of this code ignored `state.dirt`
+        because freshly-dug tiles briefly register as dirt-ish, but
+        skipping the check entirely caused FIREs through real walls
+        ("fires in the wall" from a parallel tunnel). The current
+        compromise is to tolerate dirt on the tile *directly in front of
+        the digger* only (i==1) -- this is the tile most likely to be
+        mid-transition after the digger just dug into it -- and treat
+        any dirt further along the line as a real wall that stops the
+        bullet.
         """
         if facing == DiggerEnv.NOOP:
             return None
@@ -410,6 +432,8 @@ class SmartHeuristic:
                 return None
             if (r, c) in bag_tiles:
                 return None  # bullet absorbed by bag
+            if i >= 2 and state.dirt[r, c]:
+                return None  # real dirt wall stops the bullet
             if (r, c) in monsters_by_tile:
                 return monsters_by_tile[(r, c)]
         return None

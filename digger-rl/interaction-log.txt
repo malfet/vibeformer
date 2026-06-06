@@ -265,3 +265,6 @@ Can you fetch latest, rebase checkout and commit current changes on top, though 
 [2026-05-31] Both in parallel
 
 [2026-06-02] But it still does not recognize falling bags? And symbolic state still missing digger's direction (i.e. if digger facing right and monstrer approaches from the left, it will fire to the right rather than turn and then fire
+So, is it all incorporated into a heuristic_agent.py?
+But it still fires in the wall from time and have this eposides when it reaches right end of the field and moves neither up nor down until enemy catches up to it
+Sure
