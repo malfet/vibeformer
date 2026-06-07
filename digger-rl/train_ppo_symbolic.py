@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import pickle
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -73,6 +74,7 @@ class Config:
     shaping_coef: float = 0.5
     episodic_life: bool = True
     force_cpu: bool = False
+    resume_from: Path | None = None
     log_every: int = 1
     save_every: int = 100
     seed: int = 1
@@ -134,6 +136,14 @@ def parse_args() -> Config:
                         "the reward. 0 disables.")
     p.add_argument("--episodic-life", default=Config.episodic_life,
                    action=argparse.BooleanOptionalAction)
+    p.add_argument("--resume-from", type=Path, default=None,
+                   help="Pickle file produced by env.save_state() or by "
+                        "run_digger.py --live S. If set, every env.reset() "
+                        "is followed by env.load_state(<this file>) so the "
+                        "agent always trains from this scenario rather "
+                        "than the level-1 attract screen. Useful for "
+                        "curriculum-from-checkpoint and for debugging "
+                        "specific positions (e.g. 'stuck at right edge').")
     p.add_argument("--save-every", type=int, default=Config.save_every)
     p.add_argument("--seed", type=int, default=Config.seed)
     p.add_argument("--force-cpu", action="store_true")
@@ -149,6 +159,7 @@ def parse_args() -> Config:
         shaping_coef=a.shaping_coef,
         episodic_life=a.episodic_life,
         force_cpu=a.force_cpu,
+        resume_from=a.resume_from,
         save_every=a.save_every, seed=a.seed,
         run_name=a.run_name,
     )
@@ -156,6 +167,9 @@ def parse_args() -> Config:
 
 def main() -> None:
     cfg = parse_args()
+    if cfg.resume_from is not None and not cfg.resume_from.exists():
+        raise SystemExit(
+            f"--resume-from {cfg.resume_from} does not exist")
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
     device = select_device(cfg.force_cpu)
@@ -170,6 +184,30 @@ def main() -> None:
                              shaping_coef=cfg.shaping_coef)
     in_ch = BASE_OBS_CHANNELS * cfg.frame_stack
     num_actions = env.NUM_ACTIONS
+
+    # If --resume-from was given, load the pickle once. We re-apply it
+    # after every env.reset() so each "episode" starts from that
+    # scenario rather than the level-1 attract screen.
+    resume_state: dict | None = None
+    if cfg.resume_from is not None:
+        with cfg.resume_from.open("rb") as fh:
+            resume_state = pickle.load(fh)
+        # Tolerate either format -- DiggerEnv.save_state() returns a
+        # dict with "core"; run_digger.py --live S returns a dict with
+        # "core" too but no python wrapper fields. SymbolicDiggerEnv
+        # wraps it with an extra layer ({"env": {...}, "prev_dist": ...}).
+        # Lift bare DiggerEnv dicts so load_state finds the expected shape.
+        if "core" in resume_state and "env" not in resume_state:
+            resume_state = {"env": resume_state, "prev_dist": None}
+        print(f"{tag} --resume-from {cfg.resume_from} loaded; "
+              f"every reset() will restore this scenario", flush=True)
+
+    def reset_env():
+        env.reset()
+        if resume_state is not None:
+            return env.load_state(resume_state)
+        return env.current_obs()
+
     agent = SymbolicAgent(in_channels=in_ch, num_actions=num_actions).to(device)
     n_params = sum(p.numel() for p in agent.parameters())
     print(f"{tag} agent params={n_params:,}  in_ch={in_ch}  "
@@ -184,7 +222,7 @@ def main() -> None:
     done_buf = torch.zeros(N, device=device)
     val_buf = torch.zeros(N, device=device)
 
-    obs_np = env.reset()
+    obs_np = reset_env()
     obs_t = torch.from_numpy(obs_np).to(device)
     done_t = torch.zeros((), device=device)
 
@@ -237,7 +275,7 @@ def main() -> None:
                       f"lives={info.get('lives', 0)}", flush=True)
                 ep_return = 0.0
                 ep_length = 0
-                next_obs = env.reset()
+                next_obs = reset_env()
                 done_t = torch.ones((), device=device)
             else:
                 done_t = torch.zeros((), device=device)

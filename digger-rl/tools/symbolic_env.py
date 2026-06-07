@@ -168,5 +168,39 @@ class SymbolicDiggerEnv:
         info["score_reward"] = float(s.reward)  # original raw signal
         return self._push_frame(state), reward, s.done, info
 
+    def save_state(self) -> dict:
+        """Snapshot a state that load_state() can replay. Wraps the
+        underlying DiggerEnv snapshot and adds the symbolic shaping
+        baseline so reward shaping continues consistently.
+        """
+        if self._last_state is None:
+            raise RuntimeError("save_state() called before reset()")
+        return {
+            "env": self._env.save_state(),
+            "prev_dist": self._prev_dist,
+        }
+
+    def load_state(self, state: dict) -> np.ndarray:
+        """Restore a snapshot produced by save_state(). Returns the
+        stacked observation at the restored state.
+
+        The frame stack is refilled with the post-restore frame so the
+        policy doesn't see a stack mixing frames from before and after
+        the restore point.
+        """
+        raw = self._env.load_state(state["env"])
+        parsed = extract_state(raw)
+        self._last_state = parsed
+        # Prefer the saved shaping baseline so the very next step's
+        # delta is consistent with the state that was saved. Fall back to
+        # recomputing if the field is missing (e.g. old pickles).
+        self._prev_dist = state.get(
+            "prev_dist", _nearest_emerald_distance(parsed))
+        frame0 = state_to_tensor(parsed)
+        self._stack.clear()
+        for _ in range(self.frame_stack):
+            self._stack.append(frame0.copy())
+        return self.current_obs()
+
     def close(self) -> None:
         self._env.close()

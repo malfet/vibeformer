@@ -282,12 +282,19 @@ class DiggerEnv:
         # internal state was reverted by unserialize, so the polled input
         # now agrees with what the core remembers.
         self._core.set_held_keys_raw(state["held_keys"])
-        self._last_action = int(state["last_action"])
-        self._last_score = int(state["last_score"])
-        self._seen_alive = bool(state["seen_alive"])
-        self._steps = int(state["steps"])
-        self._prev_lives = int(state["prev_lives"])
-        self._real_game_over = bool(state["real_game_over"])
+        # Wrapper fields are tolerated as missing: a state snapshot from
+        # run_digger.py --live S only contains {core, held_keys} because
+        # the live viewer talks to the raw libretro core, not DiggerEnv.
+        # When the field is absent, recompute from the now-restored
+        # emulator RAM so the env stays consistent.
+        live_score = self._read_score()
+        live_lives = self._read_lives()
+        self._last_action = int(state.get("last_action", self.NOOP))
+        self._last_score = int(state.get("last_score", live_score))
+        self._seen_alive = bool(state.get("seen_alive", live_lives > 0))
+        self._steps = int(state.get("steps", 0))
+        self._prev_lives = int(state.get("prev_lives", live_lives))
+        self._real_game_over = bool(state.get("real_game_over", False))
         return self._core.get_frame()
 
     def _read_score(self) -> int:
