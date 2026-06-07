@@ -160,7 +160,22 @@ def run_live(core, record_path: Path | None = None,
              color: bool = False,
              save_slot_path: Path | None = None,
              resume_at_start: bool = False) -> None:
+    import matplotlib as mpl
     import matplotlib.pyplot as plt
+
+    # Matplotlib reserves several keys for plot navigation that would
+    # otherwise eat our keystrokes before they reach on_press:
+    #   keymap.save  : 's', 'ctrl+s'  (opens "Save figure" file dialog)
+    #   keymap.home  : 'h', 'r'       (reset axes -- collides with our R)
+    #   keymap.yscale: 'l'            (toggle log y-axis -- collides with L)
+    #   keymap.back  : 'left', 'c'    (eats LEFT arrow before our handler)
+    #   keymap.forward: 'right', 'v'  (eats RIGHT arrow before our handler)
+    #   keymap.fullscreen: 'f'        (annoying if pressed accidentally)
+    # Clear them for this process. Local to run_live so other matplotlib
+    # callers in this codebase keep the defaults.
+    for k in ("keymap.save", "keymap.home", "keymap.yscale",
+              "keymap.back", "keymap.forward", "keymap.fullscreen"):
+        mpl.rcParams[k] = []
 
     target_fps = core.get_av_info()[4] or 70.0
     target_dt = 1.0 / target_fps
