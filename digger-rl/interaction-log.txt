@@ -282,3 +282,4 @@ Sure, go for it. And attention gym is an OpenAI's package that implements PPO is
 Do you have a save/restore test script connected to say run digger.py?
 Yes, let's save them on disk and add —resume option
 Hmm, not sure if matplotlib have a default s binding, but it opens a dialog to save the screenshot
+Commit and push this
