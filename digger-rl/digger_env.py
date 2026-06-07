@@ -233,6 +233,63 @@ class DiggerEnv:
             self._core.set_key(new_key, True)
         self._last_action = action
 
+    # -- save / restore ----------------------------------------------------
+
+    def save_state(self) -> dict:
+        """Snapshot the full env state so a later load_state() resumes here.
+
+        Returned dict has:
+          - "core": opaque bytes from retro_serialize (DOSBox Pure memory,
+            registers, peripherals).
+          - The Python-side tracking that lives in this wrapper: step count,
+            reward-baseline score, life tracking, and the last action key
+            we pressed.
+
+        Pickle the dict (the "core" entry is already plain bytes) to
+        write to disk; nothing here is non-pickleable.
+        """
+        if self._core is None:
+            raise RuntimeError("save_state() called before reset()")
+        return {
+            "core": self._core.serialize(),
+            "held_keys": list(self._core.get_held_keys()),
+            "last_action": int(self._last_action),
+            "last_score": int(self._last_score),
+            "seen_alive": bool(self._seen_alive),
+            "steps": int(self._steps),
+            "prev_lives": int(self._prev_lives),
+            "real_game_over": bool(self._real_game_over),
+        }
+
+    def load_state(self, state: dict) -> np.ndarray:
+        """Restore a snapshot from save_state(). Returns the current frame.
+
+        We release any frontend-held key before unserialize so the C++
+        keyboard mirror doesn't disagree with the core's just-restored
+        internal state. Held-key continuity is sacrificed: at the next
+        step() the agent's chosen action drives the key press fresh.
+        For RL where actions are re-chosen each step that's fine.
+        """
+        if self._core is None:
+            raise RuntimeError("load_state() called before reset()")
+        # Release any keys held in the frontend mirror; events get sent
+        # to the core *before* we unserialize, so the new state isn't
+        # touched.
+        self._core.clear_keys()
+        self._core.unserialize(state["core"])
+        # Restore the held-key mirror to whatever was held at save time,
+        # *without* firing keyboard events (set_held_keys_raw). The core's
+        # internal state was reverted by unserialize, so the polled input
+        # now agrees with what the core remembers.
+        self._core.set_held_keys_raw(state["held_keys"])
+        self._last_action = int(state["last_action"])
+        self._last_score = int(state["last_score"])
+        self._seen_alive = bool(state["seen_alive"])
+        self._steps = int(state["steps"])
+        self._prev_lives = int(state["prev_lives"])
+        self._real_game_over = bool(state["real_game_over"])
+        return self._core.get_frame()
+
     def _read_score(self) -> int:
         m = self._core.read_memory_region(0)
         return struct.unpack_from("<i", m, SCORE_OFFSET)[0]

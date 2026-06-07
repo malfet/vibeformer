@@ -273,3 +273,9 @@ Two questions: why dagger_pixel can't even catch up to a teacher? Should we down
 Can it be that there is a bug in PyTorch itself and if one uses say CPU for training it will work as expected?
 Let's check MPS vs CPU for potential errors
 Sure, but in parallel can you also run some tests to Identify which ops cause divergence
+Can you be a bit more specific about multimodal skew that you've noticed on MPS compared to CPU
+Sure, let's do that
+Please outline the options again? I want dagger / PPO to be able to learn from pixel, but ok with using heuristic as teacher to bootstrap the process
+May be think to do is change the reward function, say penalize for staying idle too much, or severely increase penalty for dying
+Wasn't whole point of attention-gym repo was that one should be able to restart the game from the checkpoint to try different strategy?
+Sure, go for it. And attention gym is an OpenAI's package that implements PPO isn't it? (Read thru download papers it should be mentioned there, if not find the relevant paper and feel free to clone the repo)

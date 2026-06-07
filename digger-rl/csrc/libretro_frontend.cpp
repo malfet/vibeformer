@@ -54,6 +54,9 @@ public:
         RESOLVE(retro_get_system_av_info);
         RESOLVE(retro_get_memory_data);
         RESOLVE(retro_get_memory_size);
+        RESOLVE(retro_serialize_size);
+        RESOLVE(retro_serialize);
+        RESOLVE(retro_unserialize);
         RESOLVE(retro_set_environment);
         RESOLVE(retro_set_video_refresh);
         RESOLVE(retro_set_audio_sample);
@@ -146,11 +149,73 @@ public:
         }
     }
 
+    py::list get_held_keys() {
+        py::list out;
+        for (size_t i = 0; i < keyboard_state_.size(); ++i) {
+            if (keyboard_state_[i]) out.append(static_cast<unsigned>(i));
+        }
+        return out;
+    }
+
+    void set_held_keys_raw(const py::list& keys) {
+        // Replace the polled-input mirror without firing keyboard events.
+        // Intended for use right after unserialize(): the core's *internal*
+        // BIOS/DOS keyboard state is whatever was in the saved blob; this
+        // function only repairs the mirror used by input_state_cb so polled
+        // reads agree with the restored internal state.
+        for (size_t i = 0; i < keyboard_state_.size(); ++i) {
+            keyboard_state_[i] = false;
+        }
+        for (auto h : keys) {
+            unsigned k = h.cast<unsigned>();
+            if (k < keyboard_state_.size()) keyboard_state_[k] = true;
+        }
+    }
+
     py::bytes get_memory(unsigned id) {
         void* data = retro_get_memory_data_(id);
         size_t size = retro_get_memory_size_(id);
         if (!data || size == 0) return py::bytes();
         return py::bytes(static_cast<const char*>(data), size);
+    }
+
+    size_t serialize_size() {
+        return retro_serialize_size_();
+    }
+
+    py::bytes serialize() {
+        size_t sz = retro_serialize_size_();
+        if (sz == 0) {
+            throw std::runtime_error(
+                "core reports serialize_size==0; state save not supported");
+        }
+        std::vector<char> buf(sz);
+        if (!retro_serialize_(buf.data(), sz)) {
+            throw std::runtime_error("retro_serialize() returned false");
+        }
+        return py::bytes(buf.data(), sz);
+    }
+
+    void unserialize(const py::bytes& data) {
+        char* buffer;
+        py::ssize_t length;
+        if (PyBytes_AsStringAndSize(data.ptr(), &buffer, &length) != 0) {
+            throw std::runtime_error("failed to read state bytes");
+        }
+        // libretro's serialize_size() is *not* monotonic-stable: DOSBox
+        // Pure grows the reported state size as more emulator structures
+        // get allocated (e.g. after extra memory regions are touched).
+        // A blob captured earlier is still legitimately replayable as
+        // long as the core accepts it -- the spec promises forward
+        // compatibility within a session. So we just pass the original
+        // byte length through and let retro_unserialize() decide.
+        if (!retro_unserialize_(buffer, static_cast<size_t>(length))) {
+            throw std::runtime_error(
+                "retro_unserialize() returned false (state may be stale or "
+                "corrupted; current serialize_size=" +
+                std::to_string(retro_serialize_size_()) +
+                ", blob length=" + std::to_string(length) + ")");
+        }
     }
 
     py::list get_memory_maps() {
@@ -205,6 +270,9 @@ private:
     void (*retro_get_system_av_info_)(retro_system_av_info*) = nullptr;
     void* (*retro_get_memory_data_)(unsigned) = nullptr;
     size_t (*retro_get_memory_size_)(unsigned) = nullptr;
+    size_t (*retro_serialize_size_)() = nullptr;
+    bool (*retro_serialize_)(void*, size_t) = nullptr;
+    bool (*retro_unserialize_)(const void*, size_t) = nullptr;
     void (*retro_set_environment_)(retro_environment_t) = nullptr;
     void (*retro_set_video_refresh_)(retro_video_refresh_t) = nullptr;
     void (*retro_set_audio_sample_)(retro_audio_sample_t) = nullptr;
@@ -402,12 +470,26 @@ PYBIND11_MODULE(_libretro, m) {
         .def("reset", &LibretroCore::reset)
         .def("get_frame", &LibretroCore::get_frame)
         .def("get_memory", &LibretroCore::get_memory, py::arg("id") = RETRO_MEMORY_SYSTEM_RAM)
+        .def("serialize_size", &LibretroCore::serialize_size,
+             "Bytes needed to snapshot the current core state.")
+        .def("serialize", &LibretroCore::serialize,
+             "Return a bytes snapshot of the core's current state. "
+             "Pass back to unserialize() to restore.")
+        .def("unserialize", &LibretroCore::unserialize, py::arg("data"),
+             "Restore a state previously produced by serialize(). The "
+             "byte length must match the core's current serialize_size().")
         .def("get_memory_maps", &LibretroCore::get_memory_maps,
              "Return the descriptor list set by the core via SET_MEMORY_MAPS.")
         .def("read_memory_region", &LibretroCore::read_memory_region, py::arg("index"),
              "Return the bytes of the registered memory region at the given index.")
         .def("get_system_info", &LibretroCore::get_system_info)
         .def("get_av_info", &LibretroCore::get_av_info)
+        .def("get_held_keys", &LibretroCore::get_held_keys,
+             "List of retro_keys currently registered as held in the "
+             "frontend mirror (used by input_state_cb).")
+        .def("set_held_keys_raw", &LibretroCore::set_held_keys_raw, py::arg("keys"),
+             "Set the frontend's held-key mirror to exactly this list, "
+             "without firing keyboard_event_cb. Use after unserialize().")
         .def("set_key", &LibretroCore::set_key,
              py::arg("retro_key"), py::arg("pressed"))
         .def("clear_keys", &LibretroCore::clear_keys);
