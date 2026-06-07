@@ -280,3 +280,4 @@ May be think to do is change the reward function, say penalize for staying idle 
 Wasn't whole point of attention-gym repo was that one should be able to restart the game from the checkpoint to try different strategy?
 Sure, go for it. And attention gym is an OpenAI's package that implements PPO isn't it? (Read thru download papers it should be mentioned there, if not find the relevant paper and feel free to clone the repo)
 Do you have a save/restore test script connected to say run digger.py?
+Yes, let's save them on disk and add —resume option

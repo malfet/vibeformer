@@ -4,17 +4,20 @@ Default: run N frames headlessly and dump a PPM screenshot.
 --live:  open a matplotlib window, run continuously at ~70 fps emulator time,
          and forward keyboard events from the window into the emulator.
          Keys: arrows + Enter + Space drive the game. R restarts at level 1.
-         S takes an in-memory state snapshot via core.serialize(). L restores
-         the most recent snapshot via core.unserialize() -- handy for
-         interactive sanity-checking the save/restore primitives without
-         spinning up training. NB: DOSBox Pure's save/restore is
+         S takes a state snapshot via core.serialize() (in-memory by default,
+         or to --save-slot PATH if given). L restores the most recent
+         snapshot via core.unserialize(). NB: DOSBox Pure's save/restore is
          gameplay-valid, not byte-exact (see probe_state_save.py).
+--save-slot PATH: pickle file used by S/L. Persists across runs.
+--resume: at startup, load the slot from --save-slot before showing the
+         first frame. Lets you boot directly into a saved scenario.
 --record-playtrace PATH: while in --live, snapshot at frame-skip cadence and
          save (frames, actions, rewards, lives) to PATH.npz for behavioural
          cloning warmup in train_ppo.py.
 """
 
 import argparse
+import pickle
 import struct
 import time
 from pathlib import Path
@@ -154,7 +157,9 @@ def run_headless(core, frames: int) -> None:
 
 def run_live(core, record_path: Path | None = None,
              frame_skip: int = 4, obs_size: int = 84,
-             color: bool = False) -> None:
+             color: bool = False,
+             save_slot_path: Path | None = None,
+             resume_at_start: bool = False) -> None:
     import matplotlib.pyplot as plt
 
     target_fps = core.get_av_info()[4] or 70.0
@@ -211,11 +216,21 @@ def run_live(core, record_path: Path | None = None,
         pending_reset = True
         print("Reset complete.", flush=True)
 
-    # In-memory save slot for the S/L key bindings. Holds (core_blob,
-    # held_keys_snapshot). Stays in process memory; not persisted to disk
-    # by default (this hook is for interactive sanity-checking, not a
-    # save manager). Use load_state in DiggerEnv for the trainer path.
+    # Save slot for the S/L key bindings.
+    #   - If --save-slot is given: S writes and L reads from that path
+    #     (pickle); the in-memory slot mirrors the file so L works even
+    #     without a prior S in this session.
+    #   - If --save-slot is not given: in-memory only.
     save_slot: dict[str, object] | None = None
+    if save_slot_path is not None and save_slot_path.exists():
+        try:
+            with save_slot_path.open("rb") as fh:
+                save_slot = pickle.load(fh)
+            print(f"   (slot {save_slot_path} preloaded, "
+                  f"{len(save_slot['core']):,} bytes)", flush=True)
+        except Exception as e:
+            print(f"   warning: failed to preload {save_slot_path}: {e}",
+                  flush=True)
 
     def save_emulator_state():
         nonlocal save_slot
@@ -224,13 +239,28 @@ def run_live(core, record_path: Path | None = None,
                 "core": core.serialize(),
                 "held_keys": list(core.get_held_keys()),
             }
+            tag = ""
+            if save_slot_path is not None:
+                save_slot_path.parent.mkdir(parents=True, exist_ok=True)
+                with save_slot_path.open("wb") as fh:
+                    pickle.dump(save_slot, fh, protocol=pickle.HIGHEST_PROTOCOL)
+                tag = f" -> {save_slot_path}"
             print(f"S: saved state ({len(save_slot['core']):,} bytes, "
-                  f"held_keys={save_slot['held_keys']})", flush=True)
+                  f"held_keys={save_slot['held_keys']}){tag}", flush=True)
         except Exception as e:
             print(f"S: save failed: {e}", flush=True)
 
     def load_emulator_state():
-        nonlocal prev_score, seen_alive, notified_game_over
+        nonlocal save_slot, prev_score, seen_alive, notified_game_over
+        # If a disk slot is configured, prefer the file's current contents
+        # (it may have been overwritten by another process or run).
+        if save_slot_path is not None and save_slot_path.exists():
+            try:
+                with save_slot_path.open("rb") as fh:
+                    save_slot = pickle.load(fh)
+            except Exception as e:
+                print(f"L: failed to read {save_slot_path}: {e}", flush=True)
+                return
         if save_slot is None:
             print("L: no saved state in slot (press S first)", flush=True)
             return
@@ -284,6 +314,15 @@ def run_live(core, record_path: Path | None = None,
     print("Live mode. Arrows + Enter + Space drive the game. "
           "R restarts at level 1. S saves a state snapshot, L restores "
           "the most recent snapshot. Close the window to quit.")
+
+    if resume_at_start:
+        if save_slot is None:
+            print(f"   warning: --resume given but no usable slot at "
+                  f"{save_slot_path}; starting fresh", flush=True)
+        else:
+            print("   resuming from saved slot before first frame...",
+                  flush=True)
+            load_emulator_state()
     if record_path is not None:
         print(f"Recording trace to {record_path} "
               f"(frame_skip={frame_skip}, obs_size={obs_size}).")
@@ -400,17 +439,32 @@ def main():
                    help="record RGB frames (H,W,3); default on. "
                         "--no-color records grayscale (H,W) to match a "
                         "grayscale-trained agent.")
+    p.add_argument("--save-slot", type=Path, default=None,
+                   help="path to a pickle file used by the S (save) and L "
+                        "(load) keys in --live. If omitted, S/L use an "
+                        "in-process memory slot only.")
+    p.add_argument("--resume", action="store_true",
+                   help="at startup in --live mode, restore the state in "
+                        "--save-slot before showing the first frame. "
+                        "Requires --save-slot to point at an existing file.")
     args = p.parse_args()
 
     if args.record_playtrace is not None and not args.live:
         p.error("--record-playtrace requires --live")
+    if args.resume and args.save_slot is None:
+        p.error("--resume requires --save-slot")
+    if args.resume and not args.save_slot.exists():
+        p.error(f"--resume given but --save-slot {args.save_slot} "
+                f"does not exist")
 
     core = init_core()
     advance_to_gameplay(core)
     if args.live:
         run_live(core, record_path=args.record_playtrace,
                  frame_skip=args.frame_skip, obs_size=args.obs_size,
-                 color=args.color)
+                 color=args.color,
+                 save_slot_path=args.save_slot,
+                 resume_at_start=args.resume)
     else:
         run_headless(core, args.frames)
 
