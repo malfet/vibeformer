@@ -3,6 +3,12 @@
 Default: run N frames headlessly and dump a PPM screenshot.
 --live:  open a matplotlib window, run continuously at ~70 fps emulator time,
          and forward keyboard events from the window into the emulator.
+         Keys: arrows + Enter + Space drive the game. R restarts at level 1.
+         S takes an in-memory state snapshot via core.serialize(). L restores
+         the most recent snapshot via core.unserialize() -- handy for
+         interactive sanity-checking the save/restore primitives without
+         spinning up training. NB: DOSBox Pure's save/restore is
+         gameplay-valid, not byte-exact (see probe_state_save.py).
 --record-playtrace PATH: while in --live, snapshot at frame-skip cadence and
          save (frames, actions, rewards, lives) to PATH.npz for behavioural
          cloning warmup in train_ppo.py.
@@ -205,9 +211,59 @@ def run_live(core, record_path: Path | None = None,
         pending_reset = True
         print("Reset complete.", flush=True)
 
+    # In-memory save slot for the S/L key bindings. Holds (core_blob,
+    # held_keys_snapshot). Stays in process memory; not persisted to disk
+    # by default (this hook is for interactive sanity-checking, not a
+    # save manager). Use load_state in DiggerEnv for the trainer path.
+    save_slot: dict[str, object] | None = None
+
+    def save_emulator_state():
+        nonlocal save_slot
+        try:
+            save_slot = {
+                "core": core.serialize(),
+                "held_keys": list(core.get_held_keys()),
+            }
+            print(f"S: saved state ({len(save_slot['core']):,} bytes, "
+                  f"held_keys={save_slot['held_keys']})", flush=True)
+        except Exception as e:
+            print(f"S: save failed: {e}", flush=True)
+
+    def load_emulator_state():
+        nonlocal prev_score, seen_alive, notified_game_over
+        if save_slot is None:
+            print("L: no saved state in slot (press S first)", flush=True)
+            return
+        try:
+            # Release any keys currently held in the UI before the
+            # restore so the polled-input mirror agrees with the
+            # just-restored core state.
+            for k in list(held_order):
+                core.set_key(k, False)
+            held_order.clear()
+            core.unserialize(save_slot["core"])
+            core.set_held_keys_raw(save_slot["held_keys"])
+            # Rebuild the UI-side held_order list so subsequent
+            # on_release events know what to release.
+            held_order.extend(save_slot["held_keys"])
+            img.set_data(core.get_frame())
+            prev_score = read_score(core)
+            seen_alive = read_lives(core) > 0
+            notified_game_over = False
+            print(f"L: restored state. score={prev_score} "
+                  f"lives={read_lives(core)}", flush=True)
+        except Exception as e:
+            print(f"L: load failed: {e}", flush=True)
+
     def on_press(event):
         if event.key and event.key.lower() == "r":
             reset_emulator()
+            return
+        if event.key and event.key.lower() == "s":
+            save_emulator_state()
+            return
+        if event.key and event.key.lower() == "l":
+            load_emulator_state()
             return
         retro = matplotlib_key_to_retro(event.key)
         if retro is not None and retro not in held_order:
@@ -226,7 +282,8 @@ def run_live(core, record_path: Path | None = None,
     plt.ion()
     plt.show()
     print("Live mode. Arrows + Enter + Space drive the game. "
-          "R restarts at level 1. Close the window to quit.")
+          "R restarts at level 1. S saves a state snapshot, L restores "
+          "the most recent snapshot. Close the window to quit.")
     if record_path is not None:
         print(f"Recording trace to {record_path} "
               f"(frame_skip={frame_skip}, obs_size={obs_size}).")
