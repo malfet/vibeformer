@@ -287,3 +287,7 @@ Save and load works, now lets modify PPO to be able to resume from an interestin
 Ok, can you start the training?
 Can you explain the local minimum theory and what could be the mechanisms for climning out of it
 Sure, let's go with your suggestion
+how's the progress?
+Why training takes so long? Have you switched to CPU?
+Why do you need to record any traces? Why can't one use heuristics directly during train_ppo?
+Yes, do that and kick the training

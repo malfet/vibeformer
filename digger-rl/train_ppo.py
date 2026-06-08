@@ -30,9 +30,30 @@ from torch.distributions import Categorical
 from torch.optim import Adam
 
 from digger_env import DiggerEnv, DiggerVecEnv
+from tools.game_state import extract_state_fast
+from tools.heuristic_agent import DodgeMonsters, GreedyEmerald, SmartHeuristic
 
 REPO = Path(__file__).parent.resolve()
 CKPT_DIR = REPO / "data" / "checkpoints"
+
+
+def _make_teacher(name: str):
+    """Factory: heuristic policy by name. Caller is responsible for
+    calling .reset() between episodes (the rollout loop does this on
+    every done flag).
+    """
+    if not name:
+        return None
+    factories = {
+        "smart":  SmartHeuristic,
+        "greedy": GreedyEmerald,
+        "dodge":  DodgeMonsters,
+    }
+    if name not in factories:
+        raise SystemExit(
+            f"unknown --teacher-policy {name!r}; choose from "
+            f"{sorted(factories)} or leave blank to disable")
+    return factories[name]()
 
 
 @dataclass
@@ -71,9 +92,18 @@ class Config:
     bc_value: bool = False
     # BC anchor: per PPO minibatch, add bc_anchor_coef * CE(pi(s_demo), a_demo)
     # to the loss. Keeps the policy close to demonstrations while PPO ramps up.
-    # Optionally annealed linearly toward bc_anchor_final.
+    # Optionally annealed linearly toward bc_anchor_final. Sources:
+    #   - bc_traces (offline): labels come from a recorded .npz dataset
+    #   - teacher_policy (online/live): every rollout step also queries the
+    #     named heuristic on the current symbolic state and stores its
+    #     action; the anchor minibatch uses these student-visited
+    #     (obs, teacher_action) pairs directly. Avoids the covariate shift
+    #     of pure offline BC: the teacher labels states the student
+    #     actually reaches during training (DAGGER-style).
     bc_anchor_coef: float = 0.0
     bc_anchor_final: float | None = None
+    teacher_policy: str = ""              # "" | "smart" | "greedy" | "dodge"
+    time_penalty: float = 0.0             # subtracted per agent step
     log_every: int = 1                # updates
     save_every: int = 50              # updates
     device: str = "auto"              # resolved by select_device()
@@ -454,6 +484,15 @@ def parse_args() -> Config:
     p.add_argument("--bc-anchor-final", type=float, default=None,
                    help="if set, linearly anneal the BC anchor coef toward "
                         "this value across training")
+    p.add_argument("--teacher-policy", type=str, default="",
+                   choices=["", "smart", "greedy", "dodge"],
+                   help="if set, query this heuristic teacher on every "
+                        "rollout step and use its action as the BC-anchor "
+                        "label for that state (online DAGGER-style). "
+                        "Requires num_envs=1.")
+    p.add_argument("--time-penalty", type=float, default=Config.time_penalty,
+                   help="constant subtracted from reward every agent step; "
+                        "pairs with --death-penalty to discourage stalling.")
     p.add_argument("--encoder-width", type=int, default=Config.encoder_width,
                    help="NatureCNN channel/FC width multiplier (default 1 = "
                         "~1.7M params; 2 = ~6M params for richer encoder)")
@@ -480,6 +519,8 @@ def parse_args() -> Config:
         bc_traces=tuple(a.bc_traces), bc_epochs=a.bc_epochs,
         bc_batch_size=a.bc_batch_size, bc_value=a.bc_value,
         bc_anchor_coef=a.bc_anchor_coef, bc_anchor_final=a.bc_anchor_final,
+        teacher_policy=a.teacher_policy,
+        time_penalty=a.time_penalty,
         color=a.color, encoder_width=a.encoder_width, run_name=a.run_name,
     )
 
@@ -517,8 +558,24 @@ def main() -> None:
         bc_data = _build_bc_index(traces, cfg)
         if cfg.bc_epochs > 0:
             bc_pretrain(agent, optim, bc_data, cfg, device)
-    anchor_active = bc_data is not None and cfg.bc_anchor_coef > 0
     anchor_rng = np.random.default_rng(cfg.seed + 17)
+
+    # Live teacher labeling. Required by --teacher-policy. Only the
+    # in-process (num_envs=1) path exposes the underlying DiggerEnv so
+    # we can call get_frame() + extract_state_fast() on the current
+    # state right before the student picks its action.
+    teacher = None
+    if cfg.teacher_policy:
+        if cfg.num_envs != 1:
+            raise SystemExit(
+                "--teacher-policy requires num_envs=1 (libretro singleton + "
+                "in-process state access)")
+        teacher = _make_teacher(cfg.teacher_policy)
+        print(f"{tag}live teacher: {cfg.teacher_policy} "
+              f"(per-step CV + heuristic; expect ~30-50% slower steps)",
+              flush=True)
+    anchor_active = (cfg.bc_anchor_coef > 0
+                     and (bc_data is not None or teacher is not None))
 
     # Rollout storage: (N, B, ...) so we can stack per-env trajectories,
     # then flatten to (N*B, ...) for minibatch sampling.
@@ -529,6 +586,10 @@ def main() -> None:
     rew_buf = torch.zeros(N, B, device=device)
     done_buf = torch.zeros(N, B, device=device)
     val_buf = torch.zeros(N, B, device=device)
+    # Teacher's chosen action at each rollout state. Sentinel -1 means
+    # "no label" (only happens if teacher is None; never indexed in
+    # that case).
+    teacher_buf = torch.full((N, B), -1, dtype=torch.long, device=device)
 
     obs_np = vec.reset()  # (B, k, H, W) uint8
     obs_t = torch.from_numpy(obs_np).to(device).float().mul_(1.0 / 255.0)
@@ -561,6 +622,17 @@ def main() -> None:
         for step in range(N):
             obs_buf[step] = obs_t
             done_buf[step] = done_t
+
+            # Live teacher labeling: read the current emulator frame
+            # *before* the student acts, extract the tile grid, query
+            # the heuristic, and stash its action as the BC-anchor
+            # label for this rollout state.
+            if teacher is not None:
+                raw_frame = vec._env._core.get_frame()
+                sym_state = extract_state_fast(raw_frame)
+                t_action = int(teacher(sym_state))
+                teacher_buf[step, 0] = t_action
+
             with torch.no_grad():
                 action, logp, _, value = agent.act(obs_t)
             act_buf[step] = action
@@ -570,6 +642,8 @@ def main() -> None:
             actions_np = action.cpu().numpy()
             obs_np, rewards, dones, infos = vec.step(actions_np)
             global_step += cfg.frame_skip * B
+            if cfg.time_penalty > 0:
+                rewards = rewards - cfg.time_penalty
             rew_buf[step] = torch.from_numpy(rewards).to(device)
             ep_returns_per_env += rewards
             ep_lengths_per_env += cfg.frame_skip
@@ -583,6 +657,8 @@ def main() -> None:
                           f"lives={infos[i].get('lives', 0)}", flush=True)
                     ep_returns_per_env[i] = 0.0
                     ep_lengths_per_env[i] = 0
+                    if teacher is not None:
+                        teacher.reset()
 
             done_t = torch.from_numpy(dones.astype(np.float32)).to(device)
             obs_t = torch.from_numpy(obs_np).to(device).float().mul_(1.0 / 255.0)
@@ -669,14 +745,25 @@ def main() -> None:
                 loss = pg_loss - current_ent_coef * ent + cfg.vf_coef * v_loss
 
                 if anchor_active and current_anchor > 0:
-                    bc_M = len(bc_data[3])
-                    bc_idxs = anchor_rng.choice(
-                        bc_M, size=min(cfg.bc_batch_size, bc_M), replace=False)
-                    bc_obs, bc_acts, _ = _bc_minibatch(
-                        bc_data[0], bc_data[1], None, bc_data[3],
-                        bc_idxs, cfg, device)
-                    bc_logits = agent.actor(agent.encode(bc_obs))
-                    anchor_ce = F.cross_entropy(bc_logits, bc_acts)
+                    if teacher is not None:
+                        # Live labels: the rollout already paired each
+                        # state with the teacher's chosen action.
+                        # Anchor on the same minibatch the PG loss uses,
+                        # so we don't bias toward stale teacher states.
+                        flat_teacher = teacher_buf.reshape(-1)
+                        bc_logits = agent.actor(agent.encode(flat_obs[mb]))
+                        anchor_ce = F.cross_entropy(
+                            bc_logits, flat_teacher[mb])
+                    else:
+                        bc_M = len(bc_data[3])
+                        bc_idxs = anchor_rng.choice(
+                            bc_M, size=min(cfg.bc_batch_size, bc_M),
+                            replace=False)
+                        bc_obs, bc_acts, _ = _bc_minibatch(
+                            bc_data[0], bc_data[1], None, bc_data[3],
+                            bc_idxs, cfg, device)
+                        bc_logits = agent.actor(agent.encode(bc_obs))
+                        anchor_ce = F.cross_entropy(bc_logits, bc_acts)
                     loss = loss + current_anchor * anchor_ce
 
                 optim.zero_grad()
