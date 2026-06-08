@@ -72,9 +72,23 @@ class Config:
     frame_skip: int = 4
     frame_stack: int = 4
     shaping_coef: float = 0.5
+    time_penalty: float = 0.0
+    death_penalty: float = 0.0
     episodic_life: bool = True
     force_cpu: bool = False
     resume_from: Path | None = None
+    # Behavioural-cloning warmup + per-PPO-minibatch anchor. If bc_traces
+    # is non-empty, pretrain the actor on (obs, action) pairs from those
+    # .npz files for bc_epochs epochs *before* PPO starts. While PPO is
+    # running, optionally add bc_anchor_coef * CE(pi(s_demo), a_demo)
+    # to every minibatch loss so the policy can't drift far from the
+    # teacher. Annealing bc_anchor_coef -> bc_anchor_final relaxes the
+    # leash as PPO ramps up its own learning signal.
+    bc_traces: tuple[str, ...] = ()
+    bc_epochs: int = 10
+    bc_batch_size: int = 256
+    bc_anchor_coef: float = 0.0
+    bc_anchor_final: float | None = None
     log_every: int = 1
     save_every: int = 100
     seed: int = 1
@@ -134,6 +148,26 @@ def parse_args() -> Config:
                    help="potential-based shaping for emerald-direction. "
                         "Per step, adds shaping_coef * delta_manhattan to "
                         "the reward. 0 disables.")
+    p.add_argument("--time-penalty", type=float, default=Config.time_penalty,
+                   help="constant subtracted from reward every agent step. "
+                        "0 disables. Try 0.01 for ~10 per 1000-step episode.")
+    p.add_argument("--death-penalty", type=float, default=Config.death_penalty,
+                   help="constant subtracted from reward on any life loss. "
+                        "0 disables. Try 100-200.")
+    p.add_argument("--bc-traces", type=str, nargs="*", default=(),
+                   help="one or more .npz files produced by "
+                        "tools/gen_symbolic_trace.py. BC pretrains the actor "
+                        "on these before PPO starts.")
+    p.add_argument("--bc-epochs", type=int, default=Config.bc_epochs)
+    p.add_argument("--bc-batch-size", type=int, default=Config.bc_batch_size)
+    p.add_argument("--bc-anchor-coef", type=float, default=Config.bc_anchor_coef,
+                   help="if >0, add bc_anchor_coef * CE(pi(s_demo), a_demo) "
+                        "to every PPO minibatch loss. Keeps policy near "
+                        "teacher during PPO. Try 0.1-1.0.")
+    p.add_argument("--bc-anchor-final", type=float,
+                   default=Config.bc_anchor_final,
+                   help="if set, linearly anneal the BC anchor coef toward "
+                        "this value across training.")
     p.add_argument("--episodic-life", default=Config.episodic_life,
                    action=argparse.BooleanOptionalAction)
     p.add_argument("--resume-from", type=Path, default=None,
@@ -157,6 +191,13 @@ def parse_args() -> Config:
         clip_coef=a.clip_coef,
         frame_skip=a.frame_skip, frame_stack=a.frame_stack,
         shaping_coef=a.shaping_coef,
+        time_penalty=a.time_penalty,
+        death_penalty=a.death_penalty,
+        bc_traces=tuple(a.bc_traces),
+        bc_epochs=a.bc_epochs,
+        bc_batch_size=a.bc_batch_size,
+        bc_anchor_coef=a.bc_anchor_coef,
+        bc_anchor_final=a.bc_anchor_final,
         episodic_life=a.episodic_life,
         force_cpu=a.force_cpu,
         resume_from=a.resume_from,
@@ -181,7 +222,9 @@ def main() -> None:
     env = SymbolicDiggerEnv(max_steps=10**9,
                              episodic_life=cfg.episodic_life,
                              frame_stack=cfg.frame_stack,
-                             shaping_coef=cfg.shaping_coef)
+                             shaping_coef=cfg.shaping_coef,
+                             time_penalty=cfg.time_penalty,
+                             death_penalty=cfg.death_penalty)
     in_ch = BASE_OBS_CHANNELS * cfg.frame_stack
     num_actions = env.NUM_ACTIONS
 
@@ -213,6 +256,57 @@ def main() -> None:
     print(f"{tag} agent params={n_params:,}  in_ch={in_ch}  "
           f"H={MHEIGHT} W={MWIDTH}", flush=True)
     optim = Adam(agent.parameters(), lr=cfg.learning_rate, eps=1e-5)
+
+    # ---- BC data + pretrain ------------------------------------------------
+    bc_obs: torch.Tensor | None = None
+    bc_acts: torch.Tensor | None = None
+    if cfg.bc_traces:
+        bc_obs_arrs = []
+        bc_act_arrs = []
+        for tp in cfg.bc_traces:
+            d = np.load(tp)
+            obs_arr = d["obs"]
+            act_arr = d["actions"].astype(np.int64)
+            if obs_arr.shape[1] != in_ch:
+                raise SystemExit(
+                    f"trace {tp} has {obs_arr.shape[1]} channels but "
+                    f"trainer expects {in_ch} "
+                    f"(frame_stack mismatch?). Re-record with "
+                    f"--frame-stack {cfg.frame_stack}.")
+            bc_obs_arrs.append(obs_arr)
+            bc_act_arrs.append(act_arr)
+            print(f"{tag} loaded BC trace {tp}: {len(act_arr):,} samples",
+                  flush=True)
+        bc_obs = torch.from_numpy(np.concatenate(bc_obs_arrs, axis=0)).to(device)
+        bc_acts = torch.from_numpy(np.concatenate(bc_act_arrs, axis=0)).to(device)
+        M = bc_acts.numel()
+        print(f"{tag} BC dataset: {M:,} (obs, action) pairs", flush=True)
+
+        if cfg.bc_epochs > 0:
+            rng_bc = np.random.default_rng(cfg.seed)
+            for epoch in range(cfg.bc_epochs):
+                perm = rng_bc.permutation(M)
+                ce_sum = 0.0
+                acc_sum = 0.0
+                nb = 0
+                for start in range(0, M, cfg.bc_batch_size):
+                    mb = perm[start:start + cfg.bc_batch_size]
+                    mb_t = torch.from_numpy(mb).to(device)
+                    logits = agent.actor(agent.encode(bc_obs[mb_t]))
+                    ce = F.cross_entropy(logits, bc_acts[mb_t])
+                    optim.zero_grad()
+                    ce.backward()
+                    nn.utils.clip_grad_norm_(agent.parameters(),
+                                             cfg.max_grad_norm)
+                    optim.step()
+                    ce_sum += ce.item()
+                    with torch.no_grad():
+                        acc_sum += (logits.argmax(-1) == bc_acts[mb_t]
+                                    ).float().mean().item()
+                    nb += 1
+                print(f"{tag}   bc epoch {epoch + 1}/{cfg.bc_epochs}  "
+                      f"ce {ce_sum / nb:.3f}  acc {acc_sum / nb:.3f}",
+                      flush=True)
 
     N = cfg.num_steps
     obs_buf = torch.zeros(N, in_ch, MHEIGHT, MWIDTH, device=device)
@@ -247,6 +341,12 @@ def main() -> None:
                                 + frac_remaining * (cfg.ent_coef - cfg.ent_coef_final))
         else:
             current_ent_coef = cfg.ent_coef
+        if cfg.bc_anchor_final is not None:
+            current_anchor = (cfg.bc_anchor_final
+                              + frac_remaining * (cfg.bc_anchor_coef - cfg.bc_anchor_final))
+        else:
+            current_anchor = cfg.bc_anchor_coef
+        anchor_active = bc_obs is not None and current_anchor > 0
 
         # ---- Rollout ----
         for step in range(N):
@@ -347,6 +447,13 @@ def main() -> None:
                     v_loss = 0.5 * ((new_val - flat_ret[mb]) ** 2).mean()
                 ent = entropy.mean()
                 loss = pg_loss - current_ent_coef * ent + cfg.vf_coef * v_loss
+                if anchor_active:
+                    bc_M = bc_acts.numel()
+                    bc_idx = torch.randint(
+                        bc_M, (min(cfg.bc_batch_size, bc_M),), device=device)
+                    bc_logits = agent.actor(agent.encode(bc_obs[bc_idx]))
+                    anchor_ce = F.cross_entropy(bc_logits, bc_acts[bc_idx])
+                    loss = loss + current_anchor * anchor_ce
                 optim.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(agent.parameters(), cfg.max_grad_norm)
@@ -370,7 +477,8 @@ def main() -> None:
                   f"kl {np.mean(approx_kls):+.4f}  "
                   f"avg_ret {avg_ret:.1f}  score {avg_score:.0f}  "
                   f"lr {lr_now:.2e}  entc {current_ent_coef:.3f}  "
-                  f"sps {sps:.0f}", flush=True)
+                  + (f"anc {current_anchor:.2f}  " if anchor_active else "")
+                  + f"sps {sps:.0f}", flush=True)
             print(f"      buf: ent_mean {ent_buf_mean:.2f}  "
                   f"ent_p10 {ent_buf_p10:.2f}  spread {spread_mean:5.2f}  "
                   f"top_a {top_act_idx}@{top_act_frac:.0%}", flush=True)

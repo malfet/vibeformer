@@ -284,3 +284,6 @@ Yes, let's save them on disk and add —resume option
 Hmm, not sure if matplotlib have a default s binding, but it opens a dialog to save the screenshot
 Commit and push this
 Save and load works, now lets modify PPO to be able to resume from an interesting state rather than from a start of the game
+Ok, can you start the training?
+Can you explain the local minimum theory and what could be the mechanisms for climning out of it
+Sure, let's go with your suggestion

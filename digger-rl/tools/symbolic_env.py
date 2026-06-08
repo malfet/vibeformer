@@ -103,13 +103,19 @@ class SymbolicDiggerEnv:
 
     NUM_ACTIONS = DiggerEnv.NUM_ACTIONS
 
-    def __init__(self, shaping_coef: float = 0.0, frame_stack: int = 1,
-                 **digger_kwargs):
+    def __init__(self, shaping_coef: float = 0.0,
+                 time_penalty: float = 0.0,
+                 frame_stack: int = 1, **digger_kwargs):
         if frame_stack < 1:
             raise ValueError(f"frame_stack must be >=1, got {frame_stack}")
         self._env = DiggerEnv(**digger_kwargs)
         self._last_state = None
         self.shaping_coef = shaping_coef
+        # Per-agent-step reward subtracted regardless of action. Pairs
+        # naturally with death_penalty to push the policy out of the
+        # "wander forever without scoring" basin: every step has a
+        # small opportunity cost, so hiding is no longer a free lunch.
+        self.time_penalty = time_penalty
         self.frame_stack = frame_stack
         self._stack: collections.deque[np.ndarray] = collections.deque(
             maxlen=frame_stack)
@@ -164,6 +170,8 @@ class SymbolicDiggerEnv:
                 # Positive when distance decreased (we got closer).
                 reward += self.shaping_coef * (self._prev_dist - cur_dist)
             self._prev_dist = cur_dist
+        if self.time_penalty > 0:
+            reward -= self.time_penalty
         info = dict(s.info)
         info["score_reward"] = float(s.reward)  # original raw signal
         return self._push_frame(state), reward, s.done, info
