@@ -292,3 +292,6 @@ Why training takes so long? Have you switched to CPU?
 Why do you need to record any traces? Why can't one use heuristics directly during train_ppo?
 Yes, do that and kick the training
 Sure, let's try (1)
+Are you training now on CPU or MPS?
+But regardless, can you just try training the PPO like pixel model but purely by following teachers commands from the heuristic?
+And yes, drop force-cpu

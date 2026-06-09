@@ -683,6 +683,42 @@ def main() -> None:
     if cfg.warmup_steps > 0:
         bc_warmup(agent, optim, vec, teacher, cfg, device, tag=tag)
 
+    # BC-only mode: --total-timesteps 0 (or negative) means "skip PPO
+    # entirely, the warmup is the whole training." Quick-eval the
+    # resulting policy under the same stochastic sampling PPO would
+    # use, then save and exit.
+    if cfg.total_timesteps <= 0:
+        if cfg.warmup_steps <= 0:
+            raise SystemExit("--total-timesteps 0 requires --warmup-steps > 0 "
+                             "(otherwise the agent is untrained)")
+        n_eval = 10
+        print(f"{tag}bc-only: --total-timesteps={cfg.total_timesteps}; "
+              f"evaluating {n_eval} episodes after warmup", flush=True)
+        eval_scores: list[int] = []
+        obs_np = vec.reset()
+        obs_t = torch.from_numpy(obs_np).to(device).float().mul_(1.0 / 255.0)
+        while len(eval_scores) < n_eval:
+            with torch.no_grad():
+                action, _, _, _ = agent.act(obs_t)
+            obs_np, _, dones, infos = vec.step(action.cpu().numpy())
+            obs_t = torch.from_numpy(obs_np).to(device).float().mul_(1.0 / 255.0)
+            if dones[0]:
+                score = int(infos[0].get("score", 0))
+                eval_scores.append(score)
+                print(f"{tag}  eval ep {len(eval_scores)}/{n_eval}: "
+                      f"score {score}", flush=True)
+        arr = np.array(eval_scores, dtype=np.int32)
+        print(f"{tag}bc-only eval: mean {arr.mean():.0f}  "
+              f"median {int(np.median(arr))}  min/max {arr.min()}/{arr.max()}",
+              flush=True)
+        vec.close()
+        final = ckpt_dir / "ppo_digger_bc_only.pt"
+        torch.save({"agent": agent.state_dict(), "step": 0,
+                    "config": cfg.__dict__,
+                    "eval_scores": eval_scores}, final)
+        print(f"{tag}bc-only done. saved {final}", flush=True)
+        return
+
     # Rollout storage: (N, B, ...) so we can stack per-env trajectories,
     # then flatten to (N*B, ...) for minibatch sampling.
     N, B = cfg.num_steps, cfg.num_envs
