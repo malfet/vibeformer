@@ -291,3 +291,4 @@ how's the progress?
 Why training takes so long? Have you switched to CPU?
 Why do you need to record any traces? Why can't one use heuristics directly during train_ppo?
 Yes, do that and kick the training
+Sure, let's try (1)

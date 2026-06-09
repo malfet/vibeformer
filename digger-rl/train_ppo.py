@@ -37,6 +37,87 @@ REPO = Path(__file__).parent.resolve()
 CKPT_DIR = REPO / "data" / "checkpoints"
 
 
+def bc_warmup(agent: "Agent", optim: Adam, vec: DiggerVecEnv,
+               teacher, cfg: Config, device: torch.device,
+               tag: str = "") -> None:
+    """Teacher-driven BC warmup: collect (pixel_obs, teacher_action)
+    pairs by letting the teacher control the env, then run pure CE
+    epochs on the actor. Returns nothing -- agent and optim are
+    mutated in place.
+
+    Why: starting PPO + anchor jointly from a random encoder pits the
+    BC signal against PG / value / entropy noise from update 1 and the
+    encoder ends up half-trained. A clean pretrain phase lets the
+    encoder converge on the teacher's decision rule first; PPO then
+    has a competent starting point to refine.
+    """
+    K = cfg.warmup_steps
+    if K <= 0 or teacher is None:
+        return
+    print(f"{tag}warmup: collecting {K} teacher-driven steps...",
+          flush=True)
+
+    # Pre-allocate the observation buffer on CPU (uint8) so 25k * 12 *
+    # 84 * 84 uint8 == 84 MB stays modest; we cast a minibatch to
+    # float on device inside the CE loop.
+    in_ch = cfg.frame_stack * (3 if cfg.color else 1)
+    obs_store = np.zeros((K, in_ch, cfg.obs_size, cfg.obs_size),
+                          dtype=np.uint8)
+    act_store = np.zeros((K,), dtype=np.int64)
+
+    obs_np = vec.reset()
+    teacher.reset()
+    t0 = time.monotonic()
+    for k in range(K):
+        raw = vec._env._core.get_frame()
+        sym_state = extract_state_fast(raw)
+        t_action = int(teacher(sym_state))
+        obs_store[k] = obs_np[0]
+        act_store[k] = t_action
+        obs_np, _, dones, _ = vec.step(np.array([t_action]))
+        if dones[0]:
+            teacher.reset()
+        if (k + 1) % 2000 == 0:
+            sps = (k + 1) / (time.monotonic() - t0)
+            print(f"{tag}  warmup collect {k+1}/{K}  sps {sps:.0f}",
+                  flush=True)
+
+    print(f"{tag}  collected; teacher action histogram: "
+          + str(np.bincount(act_store, minlength=DiggerEnv.NUM_ACTIONS)
+                .tolist()), flush=True)
+
+    # CE on the buffer. We pin the full obs tensor on the training
+    # device so each minibatch is just an index-gather rather than a
+    # uint8->float32 conversion per step.
+    full_obs = (torch.from_numpy(obs_store).to(device)
+                .float().mul_(1.0 / 255.0))
+    full_act = torch.from_numpy(act_store).to(device)
+    rng = np.random.default_rng(cfg.seed)
+    for epoch in range(cfg.warmup_epochs):
+        perm = rng.permutation(K)
+        ce_sum = 0.0
+        acc_sum = 0.0
+        nb = 0
+        for start in range(0, K, cfg.bc_batch_size):
+            mb_np = perm[start:start + cfg.bc_batch_size]
+            mb_t = torch.from_numpy(mb_np).to(device)
+            mb_obs = full_obs[mb_t]
+            mb_act = full_act[mb_t]
+            logits = agent.actor(agent.encode(mb_obs))
+            ce = F.cross_entropy(logits, mb_act)
+            optim.zero_grad()
+            ce.backward()
+            nn.utils.clip_grad_norm_(agent.parameters(), cfg.max_grad_norm)
+            optim.step()
+            ce_sum += ce.item()
+            with torch.no_grad():
+                acc_sum += (logits.argmax(-1) == mb_act).float().mean().item()
+            nb += 1
+        print(f"{tag}  warmup epoch {epoch + 1}/{cfg.warmup_epochs}  "
+              f"ce {ce_sum / nb:.3f}  acc {acc_sum / nb:.3f}",
+              flush=True)
+
+
 def _make_teacher(name: str):
     """Factory: heuristic policy by name. Caller is responsible for
     calling .reset() between episodes (the rollout loop does this on
@@ -104,6 +185,15 @@ class Config:
     bc_anchor_final: float | None = None
     teacher_policy: str = ""              # "" | "smart" | "greedy" | "dodge"
     time_penalty: float = 0.0             # subtracted per agent step
+    # BC warmup: before any PPO update, drive the env with the live
+    # teacher's action for `warmup_steps` policy steps, recording
+    # (pixel_obs, teacher_action) pairs. Then do `warmup_epochs` of
+    # pure CE on that buffer. Lets the encoder converge on teacher's
+    # decision rule without interference from random PG / value / entropy
+    # gradients, which is what makes BC+PPO joint-from-scratch
+    # underperform pure-BC on pixels. 0 disables.
+    warmup_steps: int = 0
+    warmup_epochs: int = 5
     log_every: int = 1                # updates
     save_every: int = 50              # updates
     device: str = "auto"              # resolved by select_device()
@@ -493,6 +583,14 @@ def parse_args() -> Config:
     p.add_argument("--time-penalty", type=float, default=Config.time_penalty,
                    help="constant subtracted from reward every agent step; "
                         "pairs with --death-penalty to discourage stalling.")
+    p.add_argument("--warmup-steps", type=int, default=Config.warmup_steps,
+                   help="if --teacher-policy is set and this is >0, "
+                        "drive the env with the teacher for this many "
+                        "policy steps before PPO starts; the buffered "
+                        "(obs, teacher_action) pairs are then used for "
+                        "--warmup-epochs of pure CE on the actor.")
+    p.add_argument("--warmup-epochs", type=int, default=Config.warmup_epochs,
+                   help="number of CE passes over the warmup buffer.")
     p.add_argument("--encoder-width", type=int, default=Config.encoder_width,
                    help="NatureCNN channel/FC width multiplier (default 1 = "
                         "~1.7M params; 2 = ~6M params for richer encoder)")
@@ -521,6 +619,8 @@ def parse_args() -> Config:
         bc_anchor_coef=a.bc_anchor_coef, bc_anchor_final=a.bc_anchor_final,
         teacher_policy=a.teacher_policy,
         time_penalty=a.time_penalty,
+        warmup_steps=a.warmup_steps,
+        warmup_epochs=a.warmup_epochs,
         color=a.color, encoder_width=a.encoder_width, run_name=a.run_name,
     )
 
@@ -576,6 +676,12 @@ def main() -> None:
               flush=True)
     anchor_active = (cfg.bc_anchor_coef > 0
                      and (bc_data is not None or teacher is not None))
+
+    # Pure-CE warmup on teacher-driven rollouts. Must run *after*
+    # agent + optim are constructed and *before* the PPO rollout
+    # buffers / state are set up, because it advances the env.
+    if cfg.warmup_steps > 0:
+        bc_warmup(agent, optim, vec, teacher, cfg, device, tag=tag)
 
     # Rollout storage: (N, B, ...) so we can stack per-env trajectories,
     # then flatten to (N*B, ...) for minibatch sampling.
