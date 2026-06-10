@@ -295,3 +295,5 @@ Sure, let's try (1)
 Are you training now on CPU or MPS?
 But regardless, can you just try training the PPO like pixel model but purely by following teachers commands from the heuristic?
 And yes, drop force-cpu
+Let's do 1
+And summarize what you've learned so far about attempts to train the PPO/DAGGER into README.md
