@@ -12,3 +12,8 @@
 === Session 2 — 2026-06-11 ===
 
 > Can you commit the changes?
+
+> And may be give one an abbility to play nibbles_sim using either matplotlib or ncurses (as nibbles is a text game)
+  (answered: ncurses)
+
+> Commit this, it's usable (by the way, which venv are you using?)

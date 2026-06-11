@@ -24,6 +24,7 @@ digger-rl. Until then, the Python sim lets us iterate fast.
 | `nibbles_sim.py` | Pure game logic. 50x80 arena, 9 level wall layouts, snake mechanics. Faithful to BAS semantics (direction codes, no-reverse rule, length growth on eat, death penalty -10, lives=5). |
 | `nibbles_env.py` | `NibblesEnv` (single env, RGB framebuffer, score/lives in info dict) and `NibblesVecEnv` (in-proc for `num_envs=1`, subprocess workers for >1). Same API shape as `digger_env.py`. |
 | `tools/heuristic_agent.py` | BFS-to-number teacher with self / wall avoidance. The teacher policy for BC pretrain + DAGGER. |
+| `tools/play_human.py` | ncurses front-end — play the sim with arrow keys (Unicode half-blocks render the 50-row arena into 25 terminal rows). |
 | `interaction-log.txt` | Full chronological log of every prompt; the journey. |
 | `nibbles/` | (gitignored) QBASIC.EXE + NIBBLES.BAS for the eventual DOSBox-hosted env. |
 
@@ -45,8 +46,11 @@ need numpy + matplotlib.
 # Smoke test the sim
 python -c "from nibbles_sim import NibblesGame; g = NibblesGame(rng_seed=0); print(g.head, g.length, g.level)"
 
-# Watch the heuristic play (TODO)
+# Watch the heuristic play (matplotlib)
 python -m tools.heuristic_agent --live
+
+# Play it yourself in the terminal (ncurses, arrow keys, q to quit)
+python -m tools.play_human
 ```
 
 ## Open paths
