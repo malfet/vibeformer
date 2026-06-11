@@ -297,3 +297,4 @@ But regardless, can you just try training the PPO like pixel model but purely by
 And yes, drop force-cpu
 Let's do 1
 And summarize what you've learned so far about attempts to train the PPO/DAGGER into README.md
+Sure, let's do (a) + (d)

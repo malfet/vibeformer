@@ -7,18 +7,27 @@ ultimately with a *pixel-only* deployable agent.
 
 ## TL;DR — current scoreboard
 
-| Approach | Mean ep score | Max ep | Notes |
-|---|---:|---:|---|
-| **SmartHeuristic v5 (teacher)** | **1475** | — | hand-coded BFS + LoS-fire + dir-aware + falling-bag avoidance |
-| Symbolic PPO + BC pretrain + per-step BC anchor + penalties | 891 | 1475 | **best ML so far**; beats teacher max on some episodes |
-| **Pixel BC-only (pure imitation, 100k labels, 20 epochs)** | **812** | **1175** | best pixel; 92.1% teacher-action accuracy |
-| Audit's pixel DAGGER (multi-iter, GreedyEmerald teacher) | 783 | — | the prior pixel SOTA |
-| Pixel PPO + warmup + live teacher anchor + penalties | 364 | 750 | PPO **degrades** the BC policy |
-| Pixel PPO + live teacher anchor (no warmup) | 324 | 825 | live anchor only |
-| Symbolic PPO + shaping only (vanilla, seed=1) | 290 | 1050 | local-optimum basin at ~250 |
-| Symbolic PPO + shaping only (vanilla, seed=2) | 235 | 500 | same basin |
-| Symbolic Dreamer V3 (500k frames) | 250 | — | actor entropy collapse |
-| Pixel PPO from scratch (exp4_long_500k) | 75 | — | classic NatureCNN, no teacher |
+| Approach | n | Mean (sem) | Max ep | Notes |
+|---|---:|---:|---:|---|
+| **SmartHeuristic v5 (teacher)** | — | **1475** | — | hand-coded BFS + LoS-fire + dir-aware + falling-bag avoidance |
+| Symbolic PPO + BC pretrain + per-step BC anchor + penalties | 20 | 891 | 1475 | **best ML so far**; beats teacher max on some episodes |
+| **Pixel BC-only (100k labels, 20 epochs), 50-ep eval** | 50 | **629.5 ±32** | **1175** | true pixel ceiling at 92.1% teacher acc |
+| Pixel DAGGER (50k warmup + 3×25k student-collected), 50-ep eval | 50 | 625.0 ±34 | 1275 | within noise of pure BC; DAGGER iters did not help |
+| Audit's pixel DAGGER (multi-iter, GreedyEmerald teacher) | — | 783 | — | the older audit number; not 50-ep checked |
+| Pixel PPO + warmup + live teacher anchor + penalties | 20 | 364 | 750 | PPO **degrades** the BC policy |
+| Pixel PPO + live teacher anchor (no warmup) | 20 | 324 | 825 | live anchor only |
+| Symbolic PPO + shaping only (vanilla, seed=1) | 20 | 290 | 1050 | local-optimum basin at ~250 |
+| Symbolic PPO + shaping only (vanilla, seed=2) | 20 | 235 | 500 | same basin |
+| Symbolic Dreamer V3 (500k frames) | 20 | 250 | — | actor entropy collapse |
+| Pixel PPO from scratch (exp4_long_500k) | 20 | 75 | — | classic NatureCNN, no teacher |
+
+**Caveat on evaluation noise.** Most numbers above are 10–20 episode
+in-trainer ep_end averages, which have ±~100 standard error around the
+true mean (we measured this: single-episode std is ~230). The pixel BC
+result was reported as "812" from a 10-episode eval; a proper 50-ep
+re-eval brought it to **629.5 ±32**. Treat 10-ep numbers as ±100;
+prefer the `eval_checkpoint.py` 50-ep numbers for any comparison
+worth acting on.
 
 Conclusion: the symbolic GameState extracted from the framebuffer is
 **fully sufficient** to play Digger level 1 well, but training-time
@@ -122,17 +131,36 @@ and overfits to states the student won't revisit. Wider would help
 *if* we had 10× more samples or proper regularization (dropout, weight
 decay, augmentation) — none of which the pixel trainer has.
 
-### 8. The pixel BC ceiling is closer to symbolic than expected
+### 8. The pixel BC ceiling is well below the symbolic one
 
-Audit said pixel DAGGER topped out at 783. We hit 812 with a single
-BC pass (no DAGGER iterations) using SmartHeuristic v5 as teacher. The
-teacher swap (1342 → 1475 ground truth) and a more thorough pretrain
-(100k samples, 20 epochs) closed most of the gap to the symbolic BC
-ceiling (891). The "pixel perception is the bottleneck" framing turns
-out to be partly stylized; with enough data and the right teacher the
-84×84 RGB encoder gets to ~92% teacher accuracy.
+Updated after a proper 50-episode re-eval. Pixel BC at 100k labels +
+20 epochs reaches 92.1% teacher-action accuracy → **mean 629.5 score
+(±32 sem)** across 50 episodes. The original 812 figure was a
+10-episode artifact at the upper end of the ±100 SEM range.
 
-### 9. MPS-vs-CPU is a non-issue
+Pure BC and DAGGER iterations on top (50k warmup + 3×25k
+student-collected) land at indistinguishable means (629 vs 625, both
+±~33 sem). The 8% per-step error rate from a 92% accurate policy
+compounds badly over ~1000-step episodes; the teacher needs to be
+~98% imitable for the agent to come close to teacher score.
+
+The "pixel perception is the bottleneck" framing holds. The symbolic
+BC ceiling (95.8% acc → mean ~890 score from symbolic + PPO) is real
+representation headroom, not a fluke.
+
+### 9. DAGGER iterations don't beat pure BC when the teacher is fallible
+
+Standard DAGGER theory predicts iteration helps under covariate
+shift. In our setting, with a *greedy* teacher (SmartHeuristic v5),
+the teacher's labels on student-visited states are not reliably
+better than its labels on its own trajectories — when the student
+ends up in a corner the teacher would have avoided, the teacher's
+greedy rule still picks reasonable but not necessarily recovery-
+optimal actions. Result: 50k warmup + 3×25k DAGGER iters lands within
+noise of plain 100k warmup + 20 epochs. Different mixing strategies
+(e.g. disagreement-only sampling) could help; we haven't tried them.
+
+### 10. MPS-vs-CPU is a non-issue
 
 A single-seed PPO run on MPS underperformed CPU by 3×, suggesting a
 framework bug. A 3-seed sweep showed MPS *winning* on the same
@@ -147,7 +175,7 @@ shaves ~40% off the warmup phase. For symbolic training (where DOSBox
 is the bottleneck), MPS is a wash. **No reason to use `--force-cpu`
 anymore unless reproducibility against a CPU baseline matters.**
 
-### 10. DOSBox save-state is gameplay-valid but not byte-exact
+### 11. DOSBox save-state is gameplay-valid but not byte-exact
 
 Added libretro `retro_serialize` / `retro_unserialize` to the pybind
 binding plus `DiggerEnv.save_state` / `load_state` on top. The visible
@@ -175,6 +203,21 @@ python train_ppo.py \
   --warmup-steps 100000 --warmup-epochs 20 \
   --teacher-policy smart --bc-batch-size 256 \
   --episodic-life --run-name pixel_bc_only
+
+# Then run a tighter eval (the in-trainer 10-ep number is too noisy):
+python eval_checkpoint.py \
+  data/checkpoints/pixel_bc_only/ppo_digger_bc_only.pt --episodes 50
+```
+
+### DAGGER on top of BC warmup (within-noise of pure BC; see Lesson 9)
+
+```bash
+python train_ppo.py \
+  --total-timesteps 0 \
+  --warmup-steps 50000 --warmup-epochs 15 \
+  --dagger-iters 3 --dagger-collect-steps 25000 --dagger-epochs 5 \
+  --teacher-policy smart --bc-batch-size 256 \
+  --episodic-life --run-name pixel_dagger
 ```
 
 ### Symbolic PPO with BC pretrain + anchor (the best symbolic recipe)
@@ -255,6 +298,7 @@ crushes digger). Falling-bag detection (`BagPos.moving`) lands but the
 
 ## Recent significant commits
 
+- `743ce33` — DAGGER iterations (`--dagger-iters`) for BC-only mode
 - `f01ff07` — BC-only mode (`--total-timesteps 0` skips PPO)
 - `0d3ee6d` — BC warmup phase before PPO (`--warmup-steps`, `--warmup-epochs`)
 - `75f84f5` — live teacher labeling (`--teacher-policy`) for pixel DAGGER
