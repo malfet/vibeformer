@@ -1,0 +1,17 @@
+# QBasic + nibbles.bas assets — user-supplied, not redistributable
+nibbles/
+
+# Training artifacts
+runs/
+checkpoints/
+*.npz
+*.safetensors
+data/traces/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+build/
+dist/

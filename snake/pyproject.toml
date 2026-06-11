@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "snake-rl"
+version = "0.0.1"
+description = "Pixel-based RL on a Python port of QBasic NIBBLES.BAS"
+requires-python = ">=3.10"
+dependencies = ["numpy>=2.0"]
+
+[tool.setuptools]
+py-modules = ["nibbles_sim", "nibbles_env"]

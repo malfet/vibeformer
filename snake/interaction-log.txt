@@ -1,0 +1,14 @@
+=== Session 1 — 2026-06-10 ===
+
+> Let's try learning RL again, are there any papers that talks about teaching AI to play the snake game?
+
+> Look at ../digger folder, I want to copy some of that, but probably learn from pixels, using QBasic nibbles.bas
+
+> See data/nibbles folder, but don't commit it
+  (clarification: nibbles/ folder, containing QBASIC.EXE + NIBBLES.BAS)
+
+> And again, same as digger-rl, create .venv mention in in README.md and may be keep the interation log (can steal CLAUDE.md from digger-rl)
+
+=== Session 2 — 2026-06-11 ===
+
+> Can you commit the changes?
