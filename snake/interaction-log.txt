@@ -17,3 +17,5 @@
   (answered: ncurses)
 
 > Commit this, it's usable (by the way, which venv are you using?)
+
+> Yes, bootstrap one and use it to start first iteration of training

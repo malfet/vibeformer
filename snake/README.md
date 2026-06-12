@@ -15,7 +15,8 @@ digger-rl. Until then, the Python sim lets us iterate fast.
 
 | Approach | Mean ep score | Notes |
 |---|---:|---|
-| (none yet) | — | scaffold only |
+| BFS heuristic teacher | **2100** | 5 eps, level 40+, never game-overs in 20k steps |
+| Pixel BC + 1 DAGGER iter (run01) | **-47** | 15k warmup + 15k DAGGER on 84×84 RGB; dies in ~450 steps. Acc on labels 80%+ but stochastic sample at eval can't survive. Suspect snake at 2×2 native cells gets blurred to sub-pixel by the 100→84 area downscale. |
 
 ## Layout
 
@@ -25,6 +26,7 @@ digger-rl. Until then, the Python sim lets us iterate fast.
 | `nibbles_env.py` | `NibblesEnv` (single env, RGB framebuffer, score/lives in info dict) and `NibblesVecEnv` (in-proc for `num_envs=1`, subprocess workers for >1). Same API shape as `digger_env.py`. |
 | `tools/heuristic_agent.py` | BFS-to-number teacher with self / wall avoidance. The teacher policy for BC pretrain + DAGGER. |
 | `tools/play_human.py` | ncurses front-end — play the sim with arrow keys (Unicode half-blocks render the 50-row arena into 25 terminal rows). |
+| `train_bc.py` | First-iteration pixel BC trainer. Warmup with BFS-teacher labels → optional DAGGER iterations → stochastic eval. NatureCNN trunk, shared actor/critic heads (PPO not yet ported). |
 | `interaction-log.txt` | Full chronological log of every prompt; the journey. |
 | `nibbles/` | (gitignored) QBASIC.EXE + NIBBLES.BAS for the eventual DOSBox-hosted env. |
 
@@ -51,6 +53,11 @@ python -m tools.heuristic_agent --live
 
 # Play it yourself in the terminal (ncurses, arrow keys, q to quit)
 python -m tools.play_human
+
+# First iteration: BC warmup + 1 DAGGER iter, eval 5 episodes
+python train_bc.py --warmup-steps 15000 --warmup-epochs 5 \
+    --dagger-iters 1 --dagger-collect-steps 15000 --dagger-epochs 5 \
+    --eval-eps 5 --env-max-steps 8000 --run-name run01
 ```
 
 ## Open paths
