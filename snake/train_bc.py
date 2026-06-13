@@ -187,6 +187,12 @@ def _to_obs_symbolic(obs_np: np.ndarray, device: torch.device) -> torch.Tensor:
     return F.one_hot(t, num_classes=SYM_NUM_TYPES).permute(0, 3, 1, 2).float()
 
 
+def _to_obs_dist(obs_np: np.ndarray, device: torch.device) -> torch.Tensor:
+    """(N, 6, H, W) float32 obs (already one-hot + distance channel) ->
+    just shipped to device as float. No transform needed."""
+    return torch.from_numpy(obs_np).to(device).float()
+
+
 def collect_with_teacher(vec, K: int,
                          obs_shape: tuple, heuristic_fn,
                          num_actions: int,
@@ -400,6 +406,10 @@ def main() -> None:
     p.add_argument("--micro-cnn", action="store_true",
                    help="Use the minimal ~15k-param CNN (5->8->16->32 ch, "
                         "FC 32). Ignores --encoder-width.")
+    p.add_argument("--dist-feature", action="store_true",
+                   help="Augment tiny-snake obs with a BFS-distance-to-food "
+                        "channel. Hands the teacher's intermediate "
+                        "computation directly to the encoder.")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--force-cpu", action="store_true")
     p.add_argument("--run-name", type=str, default="")
@@ -445,11 +455,18 @@ def main() -> None:
         if args.obs_mode != "symbolic":
             print(f"{tag}NOTE: --env-kind tiny forces --obs-mode symbolic",
                   flush=True)
-        vec = tiny_snake.TinySnakeVecEnv(env_kwargs=env_kwargs)
-        obs_shape = tiny_snake.TinySnakeVecEnv.OBS_SHAPE
-        in_ch = tiny_snake.SYM_NUM_TYPES
-        agent_obs_size = obs_shape
-        to_obs_fn = _to_obs_symbolic
+        vec = tiny_snake.TinySnakeVecEnv(
+            env_kwargs=env_kwargs, add_distance=args.dist_feature)
+        obs_shape_grid = tiny_snake.TinySnakeVecEnv.OBS_SHAPE
+        if args.dist_feature:
+            in_ch = tiny_snake.SYM_NUM_TYPES + 1  # 5 one-hot + 1 distance
+            obs_shape = (in_ch, *obs_shape_grid)
+            to_obs_fn = _to_obs_dist
+        else:
+            in_ch = tiny_snake.SYM_NUM_TYPES
+            obs_shape = obs_shape_grid
+            to_obs_fn = _to_obs_symbolic
+        agent_obs_size = obs_shape_grid
         heuristic_fn = tiny_snake.heuristic_action
         num_actions = tiny_snake.NUM_ACTIONS
     elif args.obs_mode == "symbolic":

@@ -283,24 +283,90 @@ def heuristic_action(snake: TinySnake) -> int:
 
 # -- VecEnv wrapper (single env, mirrors SymbolicVecEnv API) ------------------
 
+def compute_distance_map(snake: TinySnake) -> np.ndarray:
+    """BFS distance from each cell to the food, treating walls + body as
+    blocked. Unreachable cells get GRID_ROWS*GRID_COLS as a sentinel.
+
+    Returns (GRID_ROWS, GRID_COLS) float32. The teacher essentially picks
+    the action whose next-head-cell has the smallest value in this map.
+    """
+    INF = float(GRID_ROWS * GRID_COLS)
+    dist = np.full((GRID_ROWS, GRID_COLS), INF, dtype=np.float32)
+    fr, fc = snake.food
+    walls = {(0, c) for c in range(GRID_COLS)}
+    walls |= {(GRID_ROWS - 1, c) for c in range(GRID_COLS)}
+    walls |= {(r, 0) for r in range(GRID_ROWS)}
+    walls |= {(r, GRID_COLS - 1) for r in range(GRID_ROWS)}
+    blocked = walls | set(snake.body)
+    if (fr, fc) in blocked:
+        return dist
+    dist[fr, fc] = 0.0
+    from collections import deque as _dq
+    q = _dq([(fr, fc)])
+    while q:
+        r, c = q.popleft()
+        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            nr, nc = r + dr, c + dc
+            if not (0 <= nr < GRID_ROWS and 0 <= nc < GRID_COLS):
+                continue
+            if (nr, nc) in blocked:
+                continue
+            if dist[nr, nc] != INF:
+                continue
+            dist[nr, nc] = dist[r, c] + 1.0
+            q.append((nr, nc))
+    return dist
+
+
+def extract_obs_with_dist(snake: TinySnake) -> np.ndarray:
+    """Return a (6, GRID_ROWS, GRID_COLS) float32 obs:
+
+        channels 0-4: one-hot of cell types (matches `snake.obs()` codes)
+        channel 5:    BFS distance to food (normalized to [0, 1],
+                      1.0 == blocked or unreachable)
+
+    The distance channel hands the teacher's intermediate BFS computation
+    directly to the network so the policy reduces to "follow the gradient
+    at the head's position" instead of having to learn shortest-path
+    reasoning from raw cell types.
+    """
+    sym = snake.obs()
+    onehot = np.eye(SYM_NUM_TYPES, dtype=np.float32)[sym]  # (H, W, 5)
+    onehot = onehot.transpose(2, 0, 1)                     # (5, H, W)
+    INF = float(GRID_ROWS * GRID_COLS)
+    dist = compute_distance_map(snake)
+    dist_norm = np.where(dist < INF, dist / INF, 1.0).astype(np.float32)
+    return np.concatenate([onehot, dist_norm[None]], axis=0)
+
+
 class TinySnakeVecEnv:
+    """1-env wrapper. `add_distance` switches the obs from the bare 1-channel
+    int grid (5-class one-hot built at the model boundary) to the 6-channel
+    float tensor with the distance map already pre-computed.
+    """
     OBS_SHAPE = (GRID_ROWS, GRID_COLS)
     NUM_ACTIONS = NUM_ACTIONS
 
-    def __init__(self, env_kwargs: dict | None = None):
+    def __init__(self, env_kwargs: dict | None = None,
+                 add_distance: bool = False):
         self._snake = TinySnake(**(env_kwargs or {}))
         self._snake.reset()
+        self.add_distance = add_distance
+
+    def _obs(self) -> np.ndarray:
+        if self.add_distance:
+            return extract_obs_with_dist(self._snake)
+        return self._snake.obs()
 
     def reset(self) -> np.ndarray:
-        return self._snake.reset()[None]
+        self._snake.reset()
+        return self._obs()[None]
 
     def step(self, actions):
         s = self._snake.step(int(actions[0]))
         if s.done:
             self._snake.reset()
-            obs = self._snake.obs()
-        else:
-            obs = s.obs
+        obs = self._obs()
         return (obs[None],
                 np.array([s.reward], dtype=np.float32),
                 np.array([s.done], dtype=bool),

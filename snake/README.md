@@ -28,6 +28,25 @@ digger-rl. Until then, the Python sim lets us iterate fast.
 | **Tiny-snake + PPO, anneal anchor 0.5→0 (ppo02)** | **10.6** | Same as ppo01 but `--bc-anchor-final 0.0`: BC weight decays linearly to zero by training end. Best final result — the policy starts anchored to teacher behavior, then PPO is free to push past it. Peak mean 11.0 at update 700. |
 | Tiny-snake + PPO, ent_coef=0.05 (ppo03) | 10.0 | Same as ppo01 but 5× the entropy bonus. **Highest peak** (mean 11.9 at update 675) but noisier — extra exploration finds better basins but doesn't stay there. Would pair well with a `--save-best` checkpoint sweep. |
 | Tiny-snake + PPO from scratch, width=0.25 (ppo04) | 1.4 | 78k-param agent, no BC init, ent_coef=0.05, 300k steps. Final eval 1.4 (max 3). Cannot learn navigation from cold PPO at this capacity — but one episode survived 409 steps with 0 food, so it *did* find a "don't die" local optimum. Confirms the small-network finding from runs 07-09 holds even with reward signal: the BC checkpoint is doing the heavy lifting in ppo01-03. |
+| Tiny-snake + micro CNN (15k) plain BC (run11) | **+4** | Hand-picked minimal CNN: 5→8→16→32 conv with stride 1/2/2 + 32-d FC = ~15.5k params. Plain CE (no MC weighting) + 100k teacher samples + 30 epochs + 1 DAGGER iter. **Matches the 4.78M-param baseline at 310× fewer parameters.** Lesson: under plain CE the model size doesn't matter much; under MC-weighted CE small nets collapse to modal class. |
+
+## Findings so far
+
+The story arc, condensed:
+
+1. **Full Nibbles (50×80, 5 absolute actions) + BC was a dead end** — runs 01-04 plateau at eval ≈ -50 regardless of obs format (pixel area-down, pixel nearest-down, symbolic) or network size (1.7M to 9.5M). Two distinct bugs masked it for a while: (a) area-interp downscale erased the 2-px snake to a sub-pixel smear; (b) `NibblesEnv.reset()` was passing the same `rng_seed` every time, so every "episode" had an identical number-spawn sequence and the model just memorized one trajectory.
+
+2. **Diversity fix made things look worse, which was actually progress** — once spawns were varied, train-acc dropped from 90→87 and eval dropped from -46→-50. The drop revealed that the previous runs were memorizing the deterministic trajectory; diversity was the honest baseline. Probing the trained policy showed it predicted the wrong action even when the number was one cell to the right of the head.
+
+3. **The big lever was env + action-space simplification, not encoder capacity** — moving to a 12×12 textbook snake with a 3-action relative space (STRAIGHT/LEFT/RIGHT) made plain BC immediately produce something that plays (eval 3-4). Same model architecture as the failing Nibbles runs.
+
+4. **MC-weighted credit and smaller-net interact badly** — `--mc-credit uniform-pos` (zero-credit on death) gave a small bump on the 4.78M model (eval 3→4), but the same weighting collapsed the 1.2M / 311k / 78k variants to modal-class predictions because the credit was sparse enough that the small heads couldn't push through. `discounted` mode was strictly worse: negative weights on death-leading samples anti-imitated the teacher.
+
+5. **PPO above BC was the second big lever** — 200k steps of PPO on top of the run06 BC checkpoint, with a BC-anchor CE in every minibatch, climbed eval 4 → 8.2. Annealing the anchor toward zero (ppo02) gave the best final result (10.6); high entropy (ppo03) hit the highest peak (11.9) but settled noisier. From scratch with no BC init (ppo04), the same small network couldn't crack navigation — the BC checkpoint was doing the heavy lifting.
+
+6. **Network size was almost irrelevant under plain BC** — once weighted CE was off, a 15.5k-parameter micro CNN matched the 4.78M baseline (run11 vs run06, both eval mean 4). The BC ceiling is set by data and training procedure, not parameter count.
+
+Open question: how to climb above the BC ceiling without RL. Current attempt is a distance-map feature (see [#feature-engineering](#feature-engineering)).
 
 ## Layout
 

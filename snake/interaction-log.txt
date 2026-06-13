@@ -60,3 +60,12 @@
   (proposed ~15k-param "micro CNN": 5->8->16->32 conv with strides 1/2/2 + fc 32 + 3)
 
 > Yes, let's do it
+  (run11 = micro 15k CNN, plain BC + 1 DAGGER: eval 4 same as run06 at
+   310x fewer params)
+
+> Let's summarize the findings and yes, try different approach to match
+  teacher at 100%
+> Or like about 95%
+  (different approach = give the model BFS distance-to-food map as an
+   extra input channel — encodes the teacher's intermediate computation
+   as a feature so the network only has to learn "follow the gradient")
