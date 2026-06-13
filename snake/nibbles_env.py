@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import collections
 import multiprocessing as mp
+import random
 from dataclasses import dataclass
 from typing import Optional
 
@@ -106,7 +107,11 @@ class NibblesEnv:
         self.max_steps = max_steps
         self.episodic_life = episodic_life
         self.death_penalty_extra = float(death_penalty_extra)
-        self.rng_seed = rng_seed
+        # `rng_seed` seeds an *episode-seed sampler* — each call to reset()
+        # draws a fresh per-game seed from this generator. Without this, every
+        # NibblesGame would share the same number-spawn sequence and the
+        # whole training set would collapse onto one trajectory.
+        self._seeder = random.Random(rng_seed)
 
         self._game: Optional[NibblesGame] = None
         self._last_score = 0
@@ -127,7 +132,7 @@ class NibblesEnv:
             self._game = NibblesGame(
                 start_level=self.start_level,
                 max_steps=self.max_steps,
-                rng_seed=self.rng_seed,
+                rng_seed=self._seeder.randrange(2 ** 31),
             )
             self._real_game_over = False
 

@@ -21,3 +21,8 @@
 > Yes, bootstrap one and use it to start first iteration of training
 
 > Sure, let's do that  (greedy eval, then RENDER_SCALE bump)
+
+> Sure, you can try symbolic obs, but I think problem lies somewhere else.
+  (investigating: NibblesEnv was passing the same rng_seed on every reset,
+   so every episode had an identical number-spawn sequence — training
+   data was ~1 unique episode of data repeated)
