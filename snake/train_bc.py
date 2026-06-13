@@ -68,9 +68,12 @@ def layer_init(layer: nn.Module, std: float = np.sqrt(2),
 
 def _small_cnn(in_channels: int, obs_h: int, obs_w: int,
                c1: int, c2: int, c3: int, fc: int) -> nn.Sequential:
-    """3x3 stride-1 conv stack for small grids (e.g. 12x12 tiny snake).
+    """Compact 3x3 stride-1 conv stack for small grids (e.g. 12x12 tiny snake).
 
     NatureCNN's 8x8/4x4 strides can't fit boards under ~30 px on a side.
+    Kept stride 1 throughout: a stride-2 layer dropped 12x12 -> 6x6 lost
+    enough spatial detail on the 12x12 board that eval-mean fell from
+    4 to 1 (see runs/run08.log).
     """
     convs = nn.Sequential(
         layer_init(nn.Conv2d(in_channels, c1, 3, stride=1, padding=1)), nn.ReLU(),
@@ -116,13 +119,17 @@ class Agent(nn.Module):
     """NatureCNN trunk + actor / critic linear heads (shared encoder).
 
     Square obs by default (pixel mode). Pass (h, w) tuple for rectangular
-    inputs (symbolic mode).
+    inputs (symbolic mode). `width` scales conv channels + FC width and
+    accepts fractional values (0.25, 0.5, ...) for the tiny env.
     """
 
     def __init__(self, num_actions: int, in_channels: int = 12,
-                 obs_size: int | tuple[int, int] = 84, width: int = 1):
+                 obs_size: int | tuple[int, int] = 84, width: float = 1.0):
         super().__init__()
-        c1, c2, c3, fc = 32 * width, 64 * width, 64 * width, 512 * width
+        c1, c2, c3, fc = (max(1, int(32 * width)),
+                          max(1, int(64 * width)),
+                          max(1, int(64 * width)),
+                          max(8, int(512 * width)))
         h, w = (obs_size, obs_size) if isinstance(obs_size, int) else obs_size
         self.encoder = _nature_cnn(in_channels, h, w, c1, c2, c3, fc)
         self.actor = layer_init(nn.Linear(fc, num_actions), std=0.01)
@@ -354,7 +361,11 @@ def main() -> None:
     p.add_argument("--max-grad-norm", type=float, default=0.5)
     p.add_argument("--frame-stack", type=int, default=4)
     p.add_argument("--obs-size", type=int, default=84)
-    p.add_argument("--encoder-width", type=int, default=1)
+    p.add_argument("--encoder-width", type=float, default=1.0,
+                   help="Scale on conv channels (32/64/64) and FC width "
+                        "(512). 1.0 = NatureCNN baseline; 0.5 quarters the "
+                        "FC matrix, etc. Default 1 for nibbles, "
+                        "recommend 0.25 - 0.5 for tiny.")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--force-cpu", action="store_true")
     p.add_argument("--run-name", type=str, default="")
