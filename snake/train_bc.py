@@ -38,7 +38,11 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 from torch.optim import Adam
 
-from nibbles_env import NibblesEnv, NibblesVecEnv
+from nibbles_env import (
+    NibblesEnv, NibblesVecEnv,
+    SymbolicVecEnv, SYM_NUM_TYPES,
+    ARENA_ROWS, ARENA_COLS,
+)
 from tools.heuristic_agent import heuristic_action
 
 
@@ -61,12 +65,12 @@ def layer_init(layer: nn.Module, std: float = np.sqrt(2),
     return layer
 
 
-def _nature_cnn(in_channels: int, obs_size: int,
+def _nature_cnn(in_channels: int, obs_h: int, obs_w: int,
                 c1: int, c2: int, c3: int, fc: int) -> nn.Sequential:
-    """NatureCNN with conv-output shape computed from obs_size.
+    """NatureCNN with conv-output shape computed at construction time.
 
-    The classic 84x84 setting gives 7x7; with obs_size=168 we get 17x17,
-    which inflates the fc layer accordingly.
+    Handles rectangular inputs (e.g. the 50x80 symbolic grid) as well as
+    the classic 84x84 / 168x168 pixel setups.
     """
     convs = nn.Sequential(
         layer_init(nn.Conv2d(in_channels, c1, 8, stride=4)), nn.ReLU(),
@@ -74,7 +78,7 @@ def _nature_cnn(in_channels: int, obs_size: int,
         layer_init(nn.Conv2d(c2, c3, 3, stride=1)), nn.ReLU(),
     )
     with torch.no_grad():
-        dummy = torch.zeros(1, in_channels, obs_size, obs_size)
+        dummy = torch.zeros(1, in_channels, obs_h, obs_w)
         flat = convs(dummy).flatten(1).shape[1]
     return nn.Sequential(
         convs,
@@ -84,13 +88,18 @@ def _nature_cnn(in_channels: int, obs_size: int,
 
 
 class Agent(nn.Module):
-    """NatureCNN trunk + actor / critic linear heads (shared encoder)."""
+    """NatureCNN trunk + actor / critic linear heads (shared encoder).
+
+    Square obs by default (pixel mode). Pass (h, w) tuple for rectangular
+    inputs (symbolic mode).
+    """
 
     def __init__(self, num_actions: int, in_channels: int = 12,
-                 obs_size: int = 84, width: int = 1):
+                 obs_size: int | tuple[int, int] = 84, width: int = 1):
         super().__init__()
         c1, c2, c3, fc = 32 * width, 64 * width, 64 * width, 512 * width
-        self.encoder = _nature_cnn(in_channels, obs_size, c1, c2, c3, fc)
+        h, w = (obs_size, obs_size) if isinstance(obs_size, int) else obs_size
+        self.encoder = _nature_cnn(in_channels, h, w, c1, c2, c3, fc)
         self.actor = layer_init(nn.Linear(fc, num_actions), std=0.01)
         self.critic = layer_init(nn.Linear(fc, 1), std=1.0)
 
@@ -111,11 +120,17 @@ def _to_obs(obs_np: np.ndarray, device: torch.device) -> torch.Tensor:
     return torch.from_numpy(obs_np).to(device).float().mul_(1.0 / 255.0)
 
 
-def collect_with_teacher(vec: NibblesVecEnv, K: int,
-                         in_ch: int, obs_size: int,
+def _to_obs_symbolic(obs_np: np.ndarray, device: torch.device) -> torch.Tensor:
+    """(N, 50, 80) uint8 int codes -> (N, 5, 50, 80) float one-hot."""
+    t = torch.from_numpy(obs_np).to(device).long()
+    return F.one_hot(t, num_classes=SYM_NUM_TYPES).permute(0, 3, 1, 2).float()
+
+
+def collect_with_teacher(vec, K: int,
+                         obs_shape: tuple,
                          tag: str = "") -> tuple[np.ndarray, np.ndarray]:
     """Teacher drives; record (obs, teacher_action) per step."""
-    obs_store = np.zeros((K, in_ch, obs_size, obs_size), dtype=np.uint8)
+    obs_store = np.zeros((K, *obs_shape), dtype=np.uint8)
     act_store = np.zeros((K,), dtype=np.int64)
     obs_np = vec.reset()
     t0 = time.monotonic()
@@ -134,15 +149,16 @@ def collect_with_teacher(vec: NibblesVecEnv, K: int,
     return obs_store, act_store
 
 
-def collect_with_student(agent: Agent, vec: NibblesVecEnv,
-                         device: torch.device, K: int, in_ch: int,
-                         obs_size: int, tag: str = ""
+def collect_with_student(agent: Agent, vec,
+                         device: torch.device, K: int,
+                         obs_shape: tuple, to_obs_fn,
+                         tag: str = ""
                          ) -> tuple[np.ndarray, np.ndarray]:
     """Student drives; teacher labels every state. DAGGER's covariate-shift fix."""
-    obs_store = np.zeros((K, in_ch, obs_size, obs_size), dtype=np.uint8)
+    obs_store = np.zeros((K, *obs_shape), dtype=np.uint8)
     act_store = np.zeros((K,), dtype=np.int64)
     obs_np = vec.reset()
-    obs_t = _to_obs(obs_np, device)
+    obs_t = to_obs_fn(obs_np, device)
     agree = 0
     t0 = time.monotonic()
     for k in range(K):
@@ -155,7 +171,7 @@ def collect_with_student(agent: Agent, vec: NibblesVecEnv,
         if s_a == teacher_a:
             agree += 1
         obs_np, _, _, _ = vec.step(np.array([s_a]))
-        obs_t = _to_obs(obs_np, device)
+        obs_t = to_obs_fn(obs_np, device)
         if (k + 1) % 2000 == 0:
             sps = (k + 1) / (time.monotonic() - t0)
             print(f"{tag}student-collect {k+1}/{K}  sps {sps:.0f}  "
@@ -167,7 +183,8 @@ def collect_with_student(agent: Agent, vec: NibblesVecEnv,
 def train_epochs(agent: Agent, optim: Adam,
                  obs_store: np.ndarray, act_store: np.ndarray,
                  epochs: int, bs: int, max_grad_norm: float,
-                 device: torch.device, seed: int, tag: str = "") -> None:
+                 device: torch.device, seed: int, to_obs_fn,
+                 tag: str = "") -> None:
     K = len(act_store)
     if K == 0:
         return
@@ -177,7 +194,7 @@ def train_epochs(agent: Agent, optim: Adam,
         ce_sum, acc_sum, nb = 0.0, 0.0, 0
         for start in range(0, K, bs):
             mb = perm[start:start + bs]
-            mb_obs = _to_obs(obs_store[mb], device)
+            mb_obs = to_obs_fn(obs_store[mb], device)
             mb_act = torch.from_numpy(act_store[mb]).to(device)
             logits = agent.actor(agent.encode(mb_obs))
             ce = F.cross_entropy(logits, mb_act)
@@ -193,8 +210,9 @@ def train_epochs(agent: Agent, optim: Adam,
               f"ce {ce_sum / nb:.3f}  acc {acc_sum / nb:.3f}", flush=True)
 
 
-def evaluate(agent: Agent, vec: NibblesVecEnv, n_eps: int,
-             device: torch.device, greedy: bool = False,
+def evaluate(agent: Agent, vec, n_eps: int,
+             device: torch.device, to_obs_fn,
+             greedy: bool = False,
              tag: str = "") -> list[int]:
     """Roll out `n_eps` episodes; return per-episode final scores.
 
@@ -204,7 +222,7 @@ def evaluate(agent: Agent, vec: NibblesVecEnv, n_eps: int,
     """
     scores: list[int] = []
     obs_np = vec.reset()
-    obs_t = _to_obs(obs_np, device)
+    obs_t = to_obs_fn(obs_np, device)
     ep_steps = 0
     while len(scores) < n_eps:
         with torch.no_grad():
@@ -214,7 +232,7 @@ def evaluate(agent: Agent, vec: NibblesVecEnv, n_eps: int,
             else:
                 action, _, _, _ = agent.act(obs_t)
         obs_np, _, dones, infos = vec.step(action.cpu().numpy())
-        obs_t = _to_obs(obs_np, device)
+        obs_t = to_obs_fn(obs_np, device)
         ep_steps += 1
         if dones[0]:
             score = int(infos[0].get("score", 0))
@@ -246,6 +264,11 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--force-cpu", action="store_true")
     p.add_argument("--run-name", type=str, default="")
+    p.add_argument("--obs-mode", choices=["pixel", "symbolic"],
+                   default="pixel",
+                   help="`pixel` (default) feeds 84/168-px RGB through a "
+                        "NatureCNN; `symbolic` feeds a (5, 50, 80) one-hot "
+                        "of cell types and skips frame-stack/preprocess.")
     p.add_argument("--greedy-eval", action="store_true",
                    help="argmax instead of Categorical sampling during eval")
     p.add_argument("--eval-only", type=str, default="",
@@ -265,17 +288,28 @@ def main() -> None:
     print(f"{tag}args={vars(args)}", flush=True)
 
     env_kwargs = dict(max_steps=args.env_max_steps, rng_seed=args.seed)
-    vec = NibblesVecEnv(num_envs=1, frame_skip=1,
-                       frame_stack=args.frame_stack,
-                       obs_size=args.obs_size, color=True,
-                       env_kwargs=env_kwargs)
-    in_ch = args.frame_stack * 3
+    if args.obs_mode == "symbolic":
+        vec = SymbolicVecEnv(env_kwargs=env_kwargs)
+        obs_shape = (ARENA_ROWS, ARENA_COLS)
+        in_ch = SYM_NUM_TYPES
+        agent_obs_size = (ARENA_ROWS, ARENA_COLS)
+        to_obs_fn = _to_obs_symbolic
+    else:
+        vec = NibblesVecEnv(num_envs=1, frame_skip=1,
+                           frame_stack=args.frame_stack,
+                           obs_size=args.obs_size, color=True,
+                           env_kwargs=env_kwargs)
+        in_ch = args.frame_stack * 3
+        obs_shape = (in_ch, args.obs_size, args.obs_size)
+        agent_obs_size = args.obs_size
+        to_obs_fn = _to_obs
 
     agent = Agent(NibblesEnv.NUM_ACTIONS, in_channels=in_ch,
-                  obs_size=args.obs_size,
+                  obs_size=agent_obs_size,
                   width=args.encoder_width).to(device)
     n_params = sum(p.numel() for p in agent.parameters())
-    print(f"{tag}agent: in_ch={in_ch}  width={args.encoder_width}  "
+    print(f"{tag}agent: mode={args.obs_mode}  in_ch={in_ch}  "
+          f"obs_shape={obs_shape}  width={args.encoder_width}  "
           f"params={n_params:,}", flush=True)
 
     if args.eval_only:
@@ -285,7 +319,7 @@ def main() -> None:
         mode = "greedy" if args.greedy_eval else "stochastic"
         print(f"{tag}eval-only: loaded {args.eval_only}  mode={mode}",
               flush=True)
-        scores = evaluate(agent, vec, args.eval_eps, device,
+        scores = evaluate(agent, vec, args.eval_eps, device, to_obs_fn,
                           greedy=args.greedy_eval, tag=tag)
         arr = np.array(scores, dtype=np.int32)
         print(f"{tag}eval: mean {arr.mean():.0f}  "
@@ -299,18 +333,18 @@ def main() -> None:
     print(f"{tag}warmup: teacher-driven collect of {args.warmup_steps}",
           flush=True)
     obs_store, act_store = collect_with_teacher(
-        vec, args.warmup_steps, in_ch, args.obs_size, tag=tag)
+        vec, args.warmup_steps, obs_shape, tag=tag)
     print(f"{tag}warmup: training {args.warmup_epochs} epochs", flush=True)
     train_epochs(agent, optim, obs_store, act_store,
                  args.warmup_epochs, args.bc_batch_size,
-                 args.max_grad_norm, device, args.seed, tag=tag)
+                 args.max_grad_norm, device, args.seed, to_obs_fn, tag=tag)
 
     for it in range(args.dagger_iters):
         K = args.dagger_collect_steps
         print(f"{tag}DAGGER iter {it+1}/{args.dagger_iters}: "
               f"student-collect of {K}", flush=True)
         new_obs, new_act = collect_with_student(
-            agent, vec, device, K, in_ch, args.obs_size, tag=tag)
+            agent, vec, device, K, obs_shape, to_obs_fn, tag=tag)
         obs_store = np.concatenate([obs_store, new_obs], axis=0)
         act_store = np.concatenate([act_store, new_act], axis=0)
         del new_obs, new_act
@@ -319,8 +353,8 @@ def main() -> None:
         train_epochs(agent, optim, obs_store, act_store,
                      args.dagger_epochs, args.bc_batch_size,
                      args.max_grad_norm, device, args.seed + it + 1,
-                     tag=tag)
-        mid = evaluate(agent, vec, 3, device,
+                     to_obs_fn, tag=tag)
+        mid = evaluate(agent, vec, 3, device, to_obs_fn,
                        greedy=args.greedy_eval, tag=tag + "mid-")
         arr_mid = np.array(mid, dtype=np.int32)
         print(f"{tag}DAGGER iter {it+1} mid-eval: mean {arr_mid.mean():.0f}  "
@@ -328,7 +362,7 @@ def main() -> None:
 
     mode = "greedy" if args.greedy_eval else "stochastic"
     print(f"{tag}final eval ({args.eval_eps} episodes, {mode})", flush=True)
-    scores = evaluate(agent, vec, args.eval_eps, device,
+    scores = evaluate(agent, vec, args.eval_eps, device, to_obs_fn,
                       greedy=args.greedy_eval, tag=tag)
     arr = np.array(scores, dtype=np.int32)
     print(f"{tag}eval: mean {arr.mean():.0f}  "

@@ -408,6 +408,73 @@ class NibblesVecEnv:
             except Exception: pass
 
 
+# -- symbolic obs (alternative to RGB pixels) ---------------------------------
+
+SYM_EMPTY = 0
+SYM_WALL = 1
+SYM_BODY = 2
+SYM_HEAD = 3
+SYM_NUMBER = 4
+SYM_NUM_TYPES = 5
+
+
+def extract_symbolic_obs(game: NibblesGame) -> np.ndarray:
+    """Return a (50, 80) uint8 grid encoding the arena's cell types.
+
+    Codes: 0=empty 1=wall 2=snake body 3=snake head 4=number cell.
+    The head is distinguished from the body so a small CNN can immediately
+    locate the agent without inferring it from frame-stack motion.
+    """
+    arr = np.empty((ARENA_ROWS, ARENA_COLS), dtype=np.uint8)
+    for r in range(1, ARENA_ROWS + 1):
+        row = game.arena[r]
+        for c in range(1, ARENA_COLS + 1):
+            arr[r - 1, c - 1] = row[c]  # 0=EMPTY 1=WALL 2=SNAKE
+    head_r, head_c = game.head
+    arr[head_r - 1, head_c - 1] = SYM_HEAD
+    if game.number_row != 0:
+        r1 = 2 * game.number_row - 1
+        r2 = 2 * game.number_row
+        c = game.number_col
+        arr[r1 - 1, c - 1] = SYM_NUMBER
+        arr[r2 - 1, c - 1] = SYM_NUMBER
+    return arr
+
+
+class SymbolicVecEnv:
+    """1-env wrapper that yields symbolic obs (no pixel pipeline).
+
+    Same API surface as the parts of NibblesVecEnv that train_bc.py touches
+    (reset → obs[None], step → (obs[None], reward, done, info), `_env` attr
+    so the heuristic can read `vec._env._game`). Frame-stacking is skipped
+    because symbolic obs is already fully observable.
+    """
+
+    OBS_SHAPE = (ARENA_ROWS, ARENA_COLS)
+    NUM_ACTIONS = NUM_ACTIONS
+
+    def __init__(self, env_kwargs: dict | None = None):
+        env_kwargs = dict(env_kwargs or {})
+        self._env = NibblesEnv(**env_kwargs)
+
+    def reset(self) -> np.ndarray:
+        self._env.reset()
+        return extract_symbolic_obs(self._env._game)[None]
+
+    def step(self, actions):
+        s = self._env.step(int(actions[0]))
+        if s.done:
+            self._env.reset()
+        obs = extract_symbolic_obs(self._env._game)
+        return (obs[None],
+                np.array([s.reward], dtype=np.float32),
+                np.array([s.done], dtype=bool),
+                [s.info])
+
+    def close(self) -> None:
+        self._env.close()
+
+
 def _smoke_test() -> None:
     """Random-action sanity check."""
     import random
