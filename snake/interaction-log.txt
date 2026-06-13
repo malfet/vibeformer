@@ -53,3 +53,10 @@
   bc-anchor, ppo03 ent=0.05, ppo04 width=0.25)
 
 > And can I just see how teacher will play?  (added --teacher to play_agent)
+
+> Cool, now let's forget about RL for now - I just want to train the network
+  that plays as good as teacher. Propose smallest network that should try
+  to do something of the nature
+  (proposed ~15k-param "micro CNN": 5->8->16->32 conv with strides 1/2/2 + fc 32 + 3)
+
+> Yes, let's do it

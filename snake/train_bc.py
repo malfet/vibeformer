@@ -66,6 +66,31 @@ def layer_init(layer: nn.Module, std: float = np.sqrt(2),
     return layer
 
 
+def _micro_cnn(in_channels: int, obs_h: int, obs_w: int
+               ) -> tuple[nn.Sequential, int]:
+    """~15k-param minimal CNN for the 12x12 tiny snake.
+
+    Hardcoded arch: 5->8->16->32 ch with stride 1/2/2, then a 32-d FC
+    bottleneck. Receptive field after the two stride-2 layers is roughly
+    15 px — enough to cover the whole 12x12 board from each output
+    position. Returns (module, fc_out_dim).
+    """
+    convs = nn.Sequential(
+        layer_init(nn.Conv2d(in_channels, 8, 3, stride=1, padding=1)), nn.ReLU(),
+        layer_init(nn.Conv2d(8, 16, 3, stride=2, padding=1)), nn.ReLU(),
+        layer_init(nn.Conv2d(16, 32, 3, stride=2, padding=1)), nn.ReLU(),
+    )
+    with torch.no_grad():
+        dummy = torch.zeros(1, in_channels, obs_h, obs_w)
+        flat = convs(dummy).flatten(1).shape[1]
+    fc_out = 32
+    return nn.Sequential(
+        convs,
+        nn.Flatten(),
+        layer_init(nn.Linear(flat, fc_out)), nn.ReLU(),
+    ), fc_out
+
+
 def _small_cnn(in_channels: int, obs_h: int, obs_w: int,
                c1: int, c2: int, c3: int, fc: int) -> nn.Sequential:
     """Compact 3x3 stride-1 conv stack for small grids (e.g. 12x12 tiny snake).
@@ -124,14 +149,18 @@ class Agent(nn.Module):
     """
 
     def __init__(self, num_actions: int, in_channels: int = 12,
-                 obs_size: int | tuple[int, int] = 84, width: float = 1.0):
+                 obs_size: int | tuple[int, int] = 84, width: float = 1.0,
+                 micro: bool = False):
         super().__init__()
-        c1, c2, c3, fc = (max(1, int(32 * width)),
-                          max(1, int(64 * width)),
-                          max(1, int(64 * width)),
-                          max(8, int(512 * width)))
         h, w = (obs_size, obs_size) if isinstance(obs_size, int) else obs_size
-        self.encoder = _nature_cnn(in_channels, h, w, c1, c2, c3, fc)
+        if micro:
+            self.encoder, fc = _micro_cnn(in_channels, h, w)
+        else:
+            c1, c2, c3, fc = (max(1, int(32 * width)),
+                              max(1, int(64 * width)),
+                              max(1, int(64 * width)),
+                              max(8, int(512 * width)))
+            self.encoder = _nature_cnn(in_channels, h, w, c1, c2, c3, fc)
         self.actor = layer_init(nn.Linear(fc, num_actions), std=0.01)
         self.critic = layer_init(nn.Linear(fc, 1), std=1.0)
 
@@ -368,6 +397,9 @@ def main() -> None:
                         "(512). 1.0 = NatureCNN baseline; 0.5 quarters the "
                         "FC matrix, etc. Default 1 for nibbles, "
                         "recommend 0.25 - 0.5 for tiny.")
+    p.add_argument("--micro-cnn", action="store_true",
+                   help="Use the minimal ~15k-param CNN (5->8->16->32 ch, "
+                        "FC 32). Ignores --encoder-width.")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--force-cpu", action="store_true")
     p.add_argument("--run-name", type=str, default="")
@@ -442,7 +474,8 @@ def main() -> None:
 
     agent = Agent(num_actions, in_channels=in_ch,
                   obs_size=agent_obs_size,
-                  width=args.encoder_width).to(device)
+                  width=args.encoder_width,
+                  micro=args.micro_cnn).to(device)
     n_params = sum(p.numel() for p in agent.parameters())
     effective_obs_mode = "symbolic" if args.env_kind == "tiny" else args.obs_mode
     print(f"{tag}agent: env={args.env_kind}  obs={effective_obs_mode}  "

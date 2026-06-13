@@ -147,25 +147,32 @@ def _loop(stdscr, ckpt_path: Path | None, total_eps: int,
     device = select_device(False)
     agent = None
     if not teacher_mode:
-        agent = Agent(tiny_snake.NUM_ACTIONS,
-                      in_channels=tiny_snake.SYM_NUM_TYPES,
-                      obs_size=tiny_snake.TinySnakeVecEnv.OBS_SHAPE,
-                      width=1.0).to(device)
         ckpt = torch.load(str(ckpt_path), map_location=device,
                           weights_only=False)
-        # The ckpt may have been saved at a different width. Re-build if mismatch.
         state = ckpt["agent"]
+        cfg = ckpt.get("config", {})
+
+        def _build(micro: bool, width: float):
+            return Agent(tiny_snake.NUM_ACTIONS,
+                         in_channels=tiny_snake.SYM_NUM_TYPES,
+                         obs_size=tiny_snake.TinySnakeVecEnv.OBS_SHAPE,
+                         width=width, micro=micro).to(device)
+
+        # Prefer the saved config's flags when present.
+        agent = _build(micro=bool(cfg.get("micro_cnn", False)),
+                       width=float(cfg.get("encoder_width", 1.0)))
         try:
             agent.load_state_dict(state)
         except RuntimeError:
-            # Probe the saved actor's input dim to derive the width.
+            # Fall back to inferring the encoder type from the saved actor's
+            # input dim. fc_dim == 32 -> micro CNN; otherwise scale width.
             w_actor = state["actor.weight"]
             fc_dim = w_actor.shape[1]
-            guess_width = max(0.0625, fc_dim / 512.0)
-            agent = Agent(tiny_snake.NUM_ACTIONS,
-                          in_channels=tiny_snake.SYM_NUM_TYPES,
-                          obs_size=tiny_snake.TinySnakeVecEnv.OBS_SHAPE,
-                          width=guess_width).to(device)
+            if fc_dim == 32:
+                agent = _build(micro=True, width=1.0)
+            else:
+                agent = _build(micro=False,
+                               width=max(0.0625, fc_dim / 512.0))
             agent.load_state_dict(state)
         agent.eval()
 
