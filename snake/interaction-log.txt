@@ -26,3 +26,14 @@
   (investigating: NibblesEnv was passing the same rng_seed on every reset,
    so every episode had an identical number-spawn sequence — training
    data was ~1 unique episode of data repeated)
+
+> Hmm, can we perhaps simplify the game by making field smaller and
+  increasing the probability of rewards appearing. And would it be out
+  of order to do something like the following: record all actions the
+  lead to eating the reward and then divide the reward by number of
+  steps it took to get from place a to place b and retroactively
+  assign the reward divided by number of steps to every action?
+
+> And considering that snake can not move backwards, how about we
+  simplify our actions to just 3 states - continue straight, turn left
+  or turn right?
