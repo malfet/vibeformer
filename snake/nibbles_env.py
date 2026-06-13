@@ -209,23 +209,28 @@ class NibblesEnv:
 # -- preprocess + FrameStack (copy of digger-rl shapes) -----------------------
 
 def preprocess_uint8(rgb: np.ndarray, size: int = 84,
-                     color: bool = False) -> np.ndarray:
+                     color: bool = False,
+                     mode: str = "nearest") -> np.ndarray:
     """Raw (H, W, 3) RGB uint8 -> downscaled uint8.
 
     Grayscale: (size, size) via ITU-R 601 luma.
     Color:     (size, size, 3).
+
+    `mode` controls F.interpolate behavior. The default "nearest" preserves
+    cell colors — important when a sprite (e.g. the snake at 2 native pixels
+    per cell) would get blended to a sub-pixel smear under "area".
     """
     import torch
     import torch.nn.functional as F
     rgb_f = rgb.astype(np.float32) * (1.0 / 255.0)
     if color:
         t = torch.from_numpy(rgb_f).permute(2, 0, 1)[None]
-        t = F.interpolate(t, size=(size, size), mode="area")
+        t = F.interpolate(t, size=(size, size), mode=mode)
         arr = t[0].permute(1, 2, 0).numpy()
     else:
         gray = 0.299 * rgb_f[..., 0] + 0.587 * rgb_f[..., 1] + 0.114 * rgb_f[..., 2]
         t = torch.from_numpy(gray)[None, None]
-        t = F.interpolate(t, size=(size, size), mode="area")
+        t = F.interpolate(t, size=(size, size), mode=mode)
         arr = t[0, 0].numpy()
     return (arr * 255.0).clip(0, 255).astype(np.uint8)
 

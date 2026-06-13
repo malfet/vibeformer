@@ -61,14 +61,25 @@ def layer_init(layer: nn.Module, std: float = np.sqrt(2),
     return layer
 
 
-def _nature_cnn(in_channels: int, c1: int, c2: int, c3: int,
-                fc: int) -> nn.Sequential:
-    return nn.Sequential(
+def _nature_cnn(in_channels: int, obs_size: int,
+                c1: int, c2: int, c3: int, fc: int) -> nn.Sequential:
+    """NatureCNN with conv-output shape computed from obs_size.
+
+    The classic 84x84 setting gives 7x7; with obs_size=168 we get 17x17,
+    which inflates the fc layer accordingly.
+    """
+    convs = nn.Sequential(
         layer_init(nn.Conv2d(in_channels, c1, 8, stride=4)), nn.ReLU(),
         layer_init(nn.Conv2d(c1, c2, 4, stride=2)), nn.ReLU(),
         layer_init(nn.Conv2d(c2, c3, 3, stride=1)), nn.ReLU(),
+    )
+    with torch.no_grad():
+        dummy = torch.zeros(1, in_channels, obs_size, obs_size)
+        flat = convs(dummy).flatten(1).shape[1]
+    return nn.Sequential(
+        convs,
         nn.Flatten(),
-        layer_init(nn.Linear(c3 * 7 * 7, fc)), nn.ReLU(),
+        layer_init(nn.Linear(flat, fc)), nn.ReLU(),
     )
 
 
@@ -76,10 +87,10 @@ class Agent(nn.Module):
     """NatureCNN trunk + actor / critic linear heads (shared encoder)."""
 
     def __init__(self, num_actions: int, in_channels: int = 12,
-                 width: int = 1):
+                 obs_size: int = 84, width: int = 1):
         super().__init__()
         c1, c2, c3, fc = 32 * width, 64 * width, 64 * width, 512 * width
-        self.encoder = _nature_cnn(in_channels, c1, c2, c3, fc)
+        self.encoder = _nature_cnn(in_channels, obs_size, c1, c2, c3, fc)
         self.actor = layer_init(nn.Linear(fc, num_actions), std=0.01)
         self.critic = layer_init(nn.Linear(fc, 1), std=1.0)
 
@@ -183,15 +194,25 @@ def train_epochs(agent: Agent, optim: Adam,
 
 
 def evaluate(agent: Agent, vec: NibblesVecEnv, n_eps: int,
-             device: torch.device, tag: str = "") -> list[int]:
-    """Stochastic Categorical sampling (matches PPO rollout sampling)."""
+             device: torch.device, greedy: bool = False,
+             tag: str = "") -> list[int]:
+    """Roll out `n_eps` episodes; return per-episode final scores.
+
+    `greedy=False` (default) samples from Categorical(logits) — what PPO
+    would do during rollouts. `greedy=True` takes argmax, which is the
+    fair test of what the BC encoder actually learned.
+    """
     scores: list[int] = []
     obs_np = vec.reset()
     obs_t = _to_obs(obs_np, device)
     ep_steps = 0
     while len(scores) < n_eps:
         with torch.no_grad():
-            action, _, _, _ = agent.act(obs_t)
+            if greedy:
+                logits = agent.actor(agent.encode(obs_t))
+                action = logits.argmax(-1)
+            else:
+                action, _, _, _ = agent.act(obs_t)
         obs_np, _, dones, infos = vec.step(action.cpu().numpy())
         obs_t = _to_obs(obs_np, device)
         ep_steps += 1
@@ -225,6 +246,12 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--force-cpu", action="store_true")
     p.add_argument("--run-name", type=str, default="")
+    p.add_argument("--greedy-eval", action="store_true",
+                   help="argmax instead of Categorical sampling during eval")
+    p.add_argument("--eval-only", type=str, default="",
+                   metavar="CKPT_PATH",
+                   help="load an existing checkpoint, run only the eval, "
+                        "and exit (skip warmup, DAGGER, save)")
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
@@ -245,10 +272,28 @@ def main() -> None:
     in_ch = args.frame_stack * 3
 
     agent = Agent(NibblesEnv.NUM_ACTIONS, in_channels=in_ch,
+                  obs_size=args.obs_size,
                   width=args.encoder_width).to(device)
     n_params = sum(p.numel() for p in agent.parameters())
     print(f"{tag}agent: in_ch={in_ch}  width={args.encoder_width}  "
           f"params={n_params:,}", flush=True)
+
+    if args.eval_only:
+        ckpt = torch.load(args.eval_only, map_location=device, weights_only=False)
+        agent.load_state_dict(ckpt["agent"])
+        agent.eval()
+        mode = "greedy" if args.greedy_eval else "stochastic"
+        print(f"{tag}eval-only: loaded {args.eval_only}  mode={mode}",
+              flush=True)
+        scores = evaluate(agent, vec, args.eval_eps, device,
+                          greedy=args.greedy_eval, tag=tag)
+        arr = np.array(scores, dtype=np.int32)
+        print(f"{tag}eval: mean {arr.mean():.0f}  "
+              f"median {int(np.median(arr))}  "
+              f"min/max {arr.min()}/{arr.max()}", flush=True)
+        vec.close()
+        return
+
     optim = Adam(agent.parameters(), lr=args.lr, eps=1e-5)
 
     print(f"{tag}warmup: teacher-driven collect of {args.warmup_steps}",
@@ -275,13 +320,16 @@ def main() -> None:
                      args.dagger_epochs, args.bc_batch_size,
                      args.max_grad_norm, device, args.seed + it + 1,
                      tag=tag)
-        mid = evaluate(agent, vec, 3, device, tag=tag + "mid-")
+        mid = evaluate(agent, vec, 3, device,
+                       greedy=args.greedy_eval, tag=tag + "mid-")
         arr_mid = np.array(mid, dtype=np.int32)
         print(f"{tag}DAGGER iter {it+1} mid-eval: mean {arr_mid.mean():.0f}  "
               f"max {arr_mid.max()}", flush=True)
 
-    print(f"{tag}final eval ({args.eval_eps} episodes)", flush=True)
-    scores = evaluate(agent, vec, args.eval_eps, device, tag=tag)
+    mode = "greedy" if args.greedy_eval else "stochastic"
+    print(f"{tag}final eval ({args.eval_eps} episodes, {mode})", flush=True)
+    scores = evaluate(agent, vec, args.eval_eps, device,
+                      greedy=args.greedy_eval, tag=tag)
     arr = np.array(scores, dtype=np.int32)
     print(f"{tag}eval: mean {arr.mean():.0f}  "
           f"median {int(np.median(arr))}  "

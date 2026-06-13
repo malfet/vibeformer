@@ -19,3 +19,5 @@
 > Commit this, it's usable (by the way, which venv are you using?)
 
 > Yes, bootstrap one and use it to start first iteration of training
+
+> Sure, let's do that  (greedy eval, then RENDER_SCALE bump)

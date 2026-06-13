@@ -16,7 +16,8 @@ digger-rl. Until then, the Python sim lets us iterate fast.
 | Approach | Mean ep score | Notes |
 |---|---:|---|
 | BFS heuristic teacher | **2100** | 5 eps, level 40+, never game-overs in 20k steps |
-| Pixel BC + 1 DAGGER iter (run01) | **-47** | 15k warmup + 15k DAGGER on 84×84 RGB; dies in ~450 steps. Acc on labels 80%+ but stochastic sample at eval can't survive. Suspect snake at 2×2 native cells gets blurred to sub-pixel by the 100→84 area downscale. |
+| Pixel BC + 1 DAGGER iter (run01) | **-47** | 15k warmup + 15k DAGGER on 84×84 RGB (area downscale). Train acc 81% but eval mean -47; snake invisible after area-interp blurs 2×2 cells to sub-pixel. |
+| Pixel BC + 1 DAGGER iter (run02) | **-46** | Same as run01 but obs_size=168 + nearest downscale. Train acc 88%, much sharper probabilities. Snake plays first 15-20 steps perfectly with >0.95 confidence, then degrades after body grows long. Late-game routing is the open problem. |
 
 ## Layout
 
