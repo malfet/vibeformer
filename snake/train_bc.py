@@ -237,9 +237,11 @@ def compute_mc_credits(rew_store: np.ndarray, done_store: np.ndarray,
                      steps_to_that_reward; 0 if the next event is a death.
                      Equal credit spread across every contributing action.
       "discounted":  G_t = sum_{k>=t} gamma^{k-t} * r_k until next done.
-                     Allows negative weights from deaths (which down-weight
-                     the death-leading actions instead of pushing the
-                     policy *away* from them — see clipping below).
+                     ** Caveat: produces negative weights for death-leading
+                     trajectories, which makes weighted CE *anti-imitate*
+                     the teacher's chosen action there. run10 used this and
+                     blew up (CE -> -7.4, eval mean 0 — see runs/run10.log).
+                     Either clip to nonneg or use exp(beta*G) before using.
 
     Returns a (K,) float32 array; the trainer can clip / normalise downstream.
     """
