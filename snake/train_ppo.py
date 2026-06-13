@@ -53,6 +53,9 @@ def main() -> None:
     p.add_argument("--gae-lambda", type=float, default=0.95)
     p.add_argument("--clip-coef", type=float, default=0.1)
     p.add_argument("--ent-coef", type=float, default=0.01)
+    p.add_argument("--ent-coef-final", type=float, default=None,
+                   help="if set, linearly anneal ent-coef from --ent-coef to "
+                        "this value over total_timesteps.")
     p.add_argument("--vf-coef", type=float, default=0.5)
     p.add_argument("--update-epochs", type=int, default=4)
     p.add_argument("--num-minibatches", type=int, default=4)
@@ -61,6 +64,11 @@ def main() -> None:
     p.add_argument("--bc-anchor-coef", type=float, default=0.0,
                    help="weight on CE(actor(obs), teacher_action) added to "
                         "every PPO minibatch. Zero = pure PPO.")
+    p.add_argument("--bc-anchor-final", type=float, default=None,
+                   help="if set, linearly anneal --bc-anchor-coef toward "
+                        "this value across training. Setting to 0 lets PPO "
+                        "explore past the teacher's distribution once the "
+                        "encoder has converged on it.")
     p.add_argument("--encoder-width", type=float, default=1.0)
     p.add_argument("--env-max-steps", type=int, default=500)
     p.add_argument("--eval-eps", type=int, default=10)
@@ -111,7 +119,8 @@ def main() -> None:
     val_buf = torch.zeros(N, device=device)
     teacher_buf = torch.full((N,), -1, dtype=torch.long, device=device)
 
-    use_anchor = args.bc_anchor_coef > 0
+    use_anchor = args.bc_anchor_coef > 0 or (
+        args.bc_anchor_final is not None and args.bc_anchor_final > 0)
 
     obs_np = vec.reset()
     obs_t = _to_obs_symbolic(obs_np, device)
@@ -128,6 +137,16 @@ def main() -> None:
         frac_remaining = max(0.0, 1.0 - global_step / args.total_timesteps)
         if args.anneal_lr:
             optim.param_groups[0]["lr"] = frac_remaining * args.lr
+        if args.ent_coef_final is not None:
+            current_ent_coef = (args.ent_coef_final
+                + frac_remaining * (args.ent_coef - args.ent_coef_final))
+        else:
+            current_ent_coef = args.ent_coef
+        if args.bc_anchor_final is not None:
+            current_anchor = (args.bc_anchor_final
+                + frac_remaining * (args.bc_anchor_coef - args.bc_anchor_final))
+        else:
+            current_anchor = args.bc_anchor_coef
 
         # ---- rollout --------------------------------------------------------
         for step in range(N):
@@ -207,14 +226,14 @@ def main() -> None:
                 pg_loss = torch.max(pg1, pg2).mean()
                 v_loss = 0.5 * (new_val - flat_ret[mb]).pow(2).mean()
                 ent = entropy.mean()
-                loss = pg_loss - args.ent_coef * ent + args.vf_coef * v_loss
+                loss = pg_loss - current_ent_coef * ent + args.vf_coef * v_loss
 
                 anchor_val = 0.0
-                if use_anchor:
+                if use_anchor and current_anchor > 0:
                     bc_logits = agent.actor(agent.encode(flat_obs_t[mb]))
                     anchor_ce = F.cross_entropy(bc_logits,
                                                  flat_teacher[mb])
-                    loss = loss + args.bc_anchor_coef * anchor_ce
+                    loss = loss + current_anchor * anchor_ce
                     anchor_val = float(anchor_ce.item())
 
                 optim.zero_grad()

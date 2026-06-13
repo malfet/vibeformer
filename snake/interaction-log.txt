@@ -44,3 +44,10 @@
 
 > Can you launch 2 in the background, and start working on 3
   (run10 = discounted MC; train_ppo.py = PPO on tiny snake)
+
+> Is there a tool I can use to observe how it plays? And annealing
+  sounds like an interesting idea. Bigger ent as well. Can you run those
+  two experiments in parallel? And perhaps 3rd one with an even smaller
+  network
+  (play_agent.py for ncurses-watching the trained policy; ppo02 anneal
+  bc-anchor, ppo03 ent=0.05, ppo04 width=0.25)
