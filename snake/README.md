@@ -18,6 +18,7 @@ digger-rl. Until then, the Python sim lets us iterate fast.
 | BFS heuristic teacher | **2100** | 5 eps, level 40+, never game-overs in 20k steps |
 | Pixel BC + 1 DAGGER iter (run01) | **-47** | 15k warmup + 15k DAGGER on 84×84 RGB (area downscale). Train acc 81% but eval mean -47; snake invisible after area-interp blurs 2×2 cells to sub-pixel. |
 | Pixel BC + 1 DAGGER iter (run02) | **-46** | Same as run01 but obs_size=168 + nearest downscale. Train acc 88%, much sharper probabilities. Snake plays first 15-20 steps perfectly with >0.95 confidence, then degrades after body grows long. Late-game routing is the open problem. |
+| Pixel BC + 1 DAGGER iter (run03) | **-50** | Same as run02 but with the `NibblesEnv` seed-diversity bug fixed (every reset now draws a fresh game seed). Train acc 87% (down from 90% — fitting more diverse data is harder). Eval went WORSE: never ate, all 5 lives lost from random navigation. The previous runs were memorizing one specific trajectory; diversity exposed lack of generalization. |
 
 ## Layout
 
