@@ -51,3 +51,5 @@
   network
   (play_agent.py for ncurses-watching the trained policy; ppo02 anneal
   bc-anchor, ppo03 ent=0.05, ppo04 width=0.25)
+
+> And can I just see how teacher will play?  (added --teacher to play_agent)

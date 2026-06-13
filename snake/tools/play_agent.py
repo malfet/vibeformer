@@ -137,34 +137,37 @@ def _query_agent(agent, obs, device, greedy: bool):
     return a, probs
 
 
-def _loop(stdscr, ckpt_path: Path, total_eps: int,
-          delay_ms: int, greedy: bool, seed: int) -> None:
+def _loop(stdscr, ckpt_path: Path | None, total_eps: int,
+          delay_ms: int, greedy: bool, seed: int,
+          teacher_mode: bool = False) -> None:
     curses.curs_set(0)
     _init_colors()
     stdscr.nodelay(True)
 
     device = select_device(False)
-    agent = Agent(tiny_snake.NUM_ACTIONS,
-                  in_channels=tiny_snake.SYM_NUM_TYPES,
-                  obs_size=tiny_snake.TinySnakeVecEnv.OBS_SHAPE,
-                  width=1.0).to(device)
-    ckpt = torch.load(str(ckpt_path), map_location=device,
-                      weights_only=False)
-    # The ckpt may have been saved at a different width. Re-build if mismatch.
-    state = ckpt["agent"]
-    try:
-        agent.load_state_dict(state)
-    except RuntimeError:
-        # Probe the saved actor's input dim to derive the width.
-        w_actor = state["actor.weight"]
-        fc_dim = w_actor.shape[1]
-        guess_width = max(0.0625, fc_dim / 512.0)
+    agent = None
+    if not teacher_mode:
         agent = Agent(tiny_snake.NUM_ACTIONS,
                       in_channels=tiny_snake.SYM_NUM_TYPES,
                       obs_size=tiny_snake.TinySnakeVecEnv.OBS_SHAPE,
-                      width=guess_width).to(device)
-        agent.load_state_dict(state)
-    agent.eval()
+                      width=1.0).to(device)
+        ckpt = torch.load(str(ckpt_path), map_location=device,
+                          weights_only=False)
+        # The ckpt may have been saved at a different width. Re-build if mismatch.
+        state = ckpt["agent"]
+        try:
+            agent.load_state_dict(state)
+        except RuntimeError:
+            # Probe the saved actor's input dim to derive the width.
+            w_actor = state["actor.weight"]
+            fc_dim = w_actor.shape[1]
+            guess_width = max(0.0625, fc_dim / 512.0)
+            agent = Agent(tiny_snake.NUM_ACTIONS,
+                          in_channels=tiny_snake.SYM_NUM_TYPES,
+                          obs_size=tiny_snake.TinySnakeVecEnv.OBS_SHAPE,
+                          width=guess_width).to(device)
+            agent.load_state_dict(state)
+        agent.eval()
 
     for ep_idx in range(1, total_eps + 1):
         snake = tiny_snake.TinySnake(max_steps=1000, rng_seed=seed + ep_idx)
@@ -173,7 +176,10 @@ def _loop(stdscr, ckpt_path: Path, total_eps: int,
         last_teacher = tiny_snake.STRAIGHT
         probs = np.array([0.0, 0.0, 0.0])
         paused = False
-        mode = "greedy" if greedy else "stoch"
+        if teacher_mode:
+            mode = "TEACH"
+        else:
+            mode = "greedy" if greedy else "stoch"
 
         _draw(stdscr, snake, last_student, last_teacher, mode,
               paused, delay_ms, ep_idx, total_eps, probs)
@@ -205,8 +211,13 @@ def _loop(stdscr, ckpt_path: Path, total_eps: int,
                 continue
 
             last_teacher = tiny_snake.heuristic_action(snake)
-            last_student, probs = _query_agent(agent, snake.obs(),
-                                               device, greedy)
+            if teacher_mode:
+                last_student = last_teacher
+                probs = np.zeros(3, dtype=np.float32)
+                probs[last_teacher] = 1.0
+            else:
+                last_student, probs = _query_agent(agent, snake.obs(),
+                                                   device, greedy)
             r = snake.step(last_student)
             _draw(stdscr, snake, last_student, last_teacher, mode,
                   paused, delay_ms, ep_idx, total_eps, probs)
@@ -231,8 +242,11 @@ def main() -> None:
     p = argparse.ArgumentParser(
         description="Watch a trained tiny-snake policy play in your terminal."
     )
-    p.add_argument("--ckpt", type=Path, required=True,
-                   help="path to a BC or PPO checkpoint")
+    p.add_argument("--ckpt", type=Path, default=None,
+                   help="path to a BC or PPO checkpoint (omit when --teacher)")
+    p.add_argument("--teacher", action="store_true",
+                   help="play the BFS heuristic teacher (no model needed). "
+                        "Useful for sanity-checking the teacher's ceiling.")
     p.add_argument("--episodes", type=int, default=3)
     p.add_argument("--delay-ms", type=int, default=200,
                    help="step interval; smaller = faster")
@@ -241,10 +255,13 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=42)
     args = p.parse_args()
 
-    if not args.ckpt.exists():
-        raise SystemExit(f"no such checkpoint: {args.ckpt}")
+    if not args.teacher:
+        if args.ckpt is None or not args.ckpt.exists():
+            raise SystemExit(
+                "need either --teacher or --ckpt <existing-path>")
     curses.wrapper(_loop, args.ckpt, args.episodes,
-                   args.delay_ms, args.greedy, args.seed)
+                   args.delay_ms, args.greedy, args.seed,
+                   teacher_mode=args.teacher)
 
 
 if __name__ == "__main__":
