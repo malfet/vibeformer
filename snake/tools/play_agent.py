@@ -28,7 +28,7 @@ import numpy as np
 import torch
 
 import tiny_snake
-from train_bc import Agent, select_device, _to_obs_symbolic
+from train_bc import Agent, select_device, _to_obs_symbolic, _to_obs_dist
 
 
 _PAIR_WALL = 1
@@ -124,8 +124,8 @@ def _draw(stdscr, snake, last_student, last_teacher, mode: str,
     return True
 
 
-def _query_agent(agent, obs, device, greedy: bool):
-    obs_t = _to_obs_symbolic(obs[None], device)
+def _query_agent(agent, obs, device, greedy: bool, to_obs_fn):
+    obs_t = to_obs_fn(obs[None], device)
     with torch.no_grad():
         logits = agent.actor(agent.encode(obs_t))
         probs = logits.softmax(-1)[0].cpu().numpy()
@@ -146,15 +146,29 @@ def _loop(stdscr, ckpt_path: Path | None, total_eps: int,
 
     device = select_device(False)
     agent = None
+    # Default obs path: bare (H, W) int grid -> 5-channel one-hot.
+    obs_fn = lambda snake: snake.obs()
+    to_obs_fn = _to_obs_symbolic
+    in_ch = tiny_snake.SYM_NUM_TYPES
     if not teacher_mode:
         ckpt = torch.load(str(ckpt_path), map_location=device,
                           weights_only=False)
         state = ckpt["agent"]
         cfg = ckpt.get("config", {})
 
+        # Detect dist-feature mode from saved config; if missing, infer from
+        # the encoder's first-conv input channels (6 -> dist; 5 -> bare sym).
+        dist_feature = bool(cfg.get("dist_feature", False))
+        if not dist_feature and "encoder.0.0.weight" in state:
+            dist_feature = state["encoder.0.0.weight"].shape[1] == 6
+        if dist_feature:
+            obs_fn = tiny_snake.extract_obs_with_dist
+            to_obs_fn = _to_obs_dist
+            in_ch = tiny_snake.SYM_NUM_TYPES + 1
+
         def _build(micro: bool, width: float):
             return Agent(tiny_snake.NUM_ACTIONS,
-                         in_channels=tiny_snake.SYM_NUM_TYPES,
+                         in_channels=in_ch,
                          obs_size=tiny_snake.TinySnakeVecEnv.OBS_SHAPE,
                          width=width, micro=micro).to(device)
 
@@ -223,8 +237,8 @@ def _loop(stdscr, ckpt_path: Path | None, total_eps: int,
                 probs = np.zeros(3, dtype=np.float32)
                 probs[last_teacher] = 1.0
             else:
-                last_student, probs = _query_agent(agent, snake.obs(),
-                                                   device, greedy)
+                last_student, probs = _query_agent(
+                    agent, obs_fn(snake), device, greedy, to_obs_fn)
             r = snake.step(last_student)
             _draw(stdscr, snake, last_student, last_teacher, mode,
                   paused, delay_ms, ep_idx, total_eps, probs)
