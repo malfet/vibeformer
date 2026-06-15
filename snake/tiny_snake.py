@@ -318,25 +318,34 @@ def compute_distance_map(snake: TinySnake) -> np.ndarray:
     return dist
 
 
+_DIST_SCALE = 4.0  # potential-field bandwidth; tuned so neighbor distances
+                   # 3 vs 5 land 0.18 apart instead of 0.01.
+
+
 def extract_obs_with_dist(snake: TinySnake) -> np.ndarray:
     """Return a (6, GRID_ROWS, GRID_COLS) float32 obs:
 
         channels 0-4: one-hot of cell types (matches `snake.obs()` codes)
-        channel 5:    BFS distance to food (normalized to [0, 1],
-                      1.0 == blocked or unreachable)
+        channel 5:    Potential field exp(-d / _DIST_SCALE), where d is the
+                      BFS distance from each cell to the food. Blocked /
+                      unreachable cells get 0.0. High values pull the snake
+                      toward food; the encoder picks the neighbor cell with
+                      the largest value to match teacher behavior.
 
-    The distance channel hands the teacher's intermediate BFS computation
-    directly to the network so the policy reduces to "follow the gradient
-    at the head's position" instead of having to learn shortest-path
-    reasoning from raw cell types.
+    Choosing exp(-d/k) over plain d/INF: at the head's neighbors, distances
+    differ by O(1) but a divide-by-INF normalisation compresses each unit
+    step to 1/144 ~= 0.007 (vs 0.18 here), which is hard for the encoder
+    to discriminate. Inspired by potential-field path planning.
     """
     sym = snake.obs()
     onehot = np.eye(SYM_NUM_TYPES, dtype=np.float32)[sym]  # (H, W, 5)
     onehot = onehot.transpose(2, 0, 1)                     # (5, H, W)
     INF = float(GRID_ROWS * GRID_COLS)
     dist = compute_distance_map(snake)
-    dist_norm = np.where(dist < INF, dist / INF, 1.0).astype(np.float32)
-    return np.concatenate([onehot, dist_norm[None]], axis=0)
+    potential = np.where(dist < INF,
+                         np.exp(-dist / _DIST_SCALE), 0.0
+                         ).astype(np.float32)
+    return np.concatenate([onehot, potential[None]], axis=0)
 
 
 class TinySnakeVecEnv:
