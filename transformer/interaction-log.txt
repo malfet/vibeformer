@@ -51,3 +51,6 @@ Commit one change for new generate and another for training script changes
 Look at the current model architecture and input and output dtypes/shapes and write me a per-operator benchmark for forward and backward ops
 Run it
 Commit this
+I want to try a slightly different approach to training tiny_balmont - Fine Tuning. I.e. can you may be extend a dataset with more russian poetry of the same period (Block, Brusov, etc) and train the network and then fine tune it with just the Balmont's potery. Before making any changes please propose a plan
+Use lib.ru as an example, but let me know if you are blocked for some reason, I can fetch on your behalf if you give me a list of URL
+Ok, go for it and start building the corpus (you can call it russian_silver_age for example)
