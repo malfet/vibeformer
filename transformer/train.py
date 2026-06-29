@@ -200,15 +200,24 @@ def get_device() -> torch.device:
     return torch.device("cpu")
 
 
-def get_lr(step: int) -> float:
+def get_lr(step: int, peak_lr: float, warmup: int, decay_iters: int,
+           min_lr: float = MIN_LR) -> float:
     """Learning rate schedule with warmup and cosine decay (per the paper)."""
-    if step < WARMUP_ITERS:
-        return LEARNING_RATE * step / WARMUP_ITERS
-    if step > LR_DECAY_ITERS:
-        return MIN_LR
-    decay_ratio = (step - WARMUP_ITERS) / (LR_DECAY_ITERS - WARMUP_ITERS)
+    if step < warmup:
+        return peak_lr * step / warmup
+    if step > decay_iters:
+        return min_lr
+    decay_ratio = (step - warmup) / (decay_iters - warmup)
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
-    return MIN_LR + coeff * (LEARNING_RATE - MIN_LR)
+    return min_lr + coeff * (peak_lr - min_lr)
+
+
+def load_model_weights(path, model, device):
+    """Load only model.* tensors from a checkpoint (for fine-tune init)."""
+    tensors = load_file(path, device=str(device))
+    model_state = {k[len("model."):]: v for k, v in tensors.items()
+                   if k.startswith("model.")}
+    model.load_state_dict(model_state, strict=False)
 
 
 @torch.no_grad()
@@ -236,18 +245,34 @@ def estimate_loss(model, train_loader, val_loader, device, autocast_ctx):
 def main():
     parser = argparse.ArgumentParser(description="Train decoder-only transformer")
     parser.add_argument("--data", default=DATA_PATH, help="Path to training text file")
+    parser.add_argument("--vocab", default=None,
+                        help="Path to a shared vocab JSON (else derive from --data)")
+    parser.add_argument("--init-from", default=None,
+                        help="Checkpoint to initialise weights from (fine-tuning). "
+                             "Loads model weights only; resets step/optimizer.")
+    parser.add_argument("--name", default=None,
+                        help="Checkpoint prefix (default: dataset filename)")
+    parser.add_argument("--lr", type=float, default=LEARNING_RATE, help="Peak learning rate")
+    parser.add_argument("--max-iters", type=int, default=MAX_ITERS, help="Total training steps")
+    parser.add_argument("--warmup", type=int, default=WARMUP_ITERS, help="Warmup steps")
     args = parser.parse_args()
 
-    # Derive checkpoint prefix from dataset filename (e.g. "tiny_shakespeare")
-    data_name = os.path.splitext(os.path.basename(args.data))[0]
+    max_iters = args.max_iters
+    decay_iters = args.max_iters  # cosine-decay across the whole run
+
+    # Derive checkpoint prefix from --name or the dataset filename.
+    data_name = args.name or os.path.splitext(os.path.basename(args.data))[0]
     checkpoint_path = f"{data_name}_best.safetensors"
     checkpoint_dir = f"checkpoints/{data_name}"
 
     device = get_device()
     print(f"Using device: {device}")
     print(f"Dataset: {args.data} (prefix: {data_name})")
+    if args.init_from:
+        print(f"Fine-tuning from: {args.init_from} | peak lr {args.lr:.1e} | {max_iters} iters")
 
-    train_dataset, val_dataset, tokenizer = get_datasets(BLOCK_SIZE, data_path=args.data)
+    train_dataset, val_dataset, tokenizer = get_datasets(
+        BLOCK_SIZE, data_path=args.data, vocab_path=args.vocab)
     print(f"Vocab size: {tokenizer.vocab_size}")
     print(f"Train size: {len(train_dataset):,} | Val size: {len(val_dataset):,}")
 
@@ -277,12 +302,17 @@ def main():
     best_val_loss = float("inf")
     step = 0
 
-    # Resume from checkpoint if available
+    # Resume an in-progress run if its checkpoint exists; otherwise, when
+    # --init-from is given, warm-start the weights from a (pretrained)
+    # checkpoint but start fresh (step 0, fresh optimizer, fine-tune LR).
     if os.path.exists(checkpoint_path):
         loaded_step, best_val_loss = load_checkpoint(checkpoint_path, model, optimizer, device)
         if loaded_step >= 0:
             step = loaded_step + 1
         print(f"Resumed from step {step} (best val loss {best_val_loss:.4f})")
+    elif args.init_from:
+        load_model_weights(args.init_from, model, device)
+        print(f"Initialised weights from {args.init_from}; training from step 0")
     os.makedirs(checkpoint_dir, exist_ok=True)
     loss_csv_path = os.path.join(checkpoint_dir, "losses.csv")
     loss_png_path = os.path.join(checkpoint_dir, "loss.png")
@@ -295,7 +325,7 @@ def main():
     train_iter = iter(train_loader)
     step_times = []
 
-    while step < MAX_ITERS:
+    while step < max_iters:
         # Get batch
         try:
             xb, yb = next(train_iter)
@@ -306,7 +336,7 @@ def main():
         xb, yb = xb.to(device), yb.to(device)
 
         # Update learning rate
-        lr = get_lr(step)
+        lr = get_lr(step, args.lr, args.warmup, decay_iters)
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
 
@@ -326,7 +356,7 @@ def main():
         step_times.append(dt)
 
         # Evaluate
-        if step % EVAL_INTERVAL == 0 or step == MAX_ITERS - 1:
+        if step % EVAL_INTERVAL == 0 or step == max_iters - 1:
             avg_dt = sum(step_times) / len(step_times)
             tok_per_sec = tokens_per_step / avg_dt
             gflops = flops_per_step / avg_dt / 1e9
