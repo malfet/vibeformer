@@ -55,6 +55,17 @@ EDITORIAL_LINE_EXTRA = (
 # Junk codepoints from OCR: C0/C1 controls, NBSP, box-drawing.
 JUNK_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\xa0│─]")
 
+# Pre-1918 orthography -> modern, so archaic glyphs don't bloat the vocab.
+ARCHAIC = str.maketrans({"ѣ": "е", "Ѣ": "Е", "і": "и", "І": "И", "ѳ": "ф",
+                         "Ѳ": "Ф", "є": "е", "Є": "Е", "ѵ": "и", "Ѵ": "И"})
+GREEK = re.compile(r"[Ͱ-Ͽἀ-῿]")
+ROMAN = re.compile(r"[IVXLCDM]+\.?")          # keep these structural markers
+NUMBER_LINE = re.compile(r"\d+[А-Яа-яA-Za-z]?\.?")  # bare poem numbers / years
+
+
+def _is_cyrillic(c: str) -> bool:
+    return "а" <= c.lower() <= "я" or c in "ёЁ"
+
 # Genre tokens az.lib.ru prints in each index entry's trailing <small>.
 GENRES = [
     "Поэзия", "Проза", "Драматургия", "Переводы", "Критика", "Публицистика",
@@ -135,12 +146,29 @@ def extract_poems(work_html):
     for chunk in chunks:
         lines = []
         for l in chunk.splitlines():
-            l = JUNK_CHARS.sub("", l)
+            l = JUNK_CHARS.sub("", l).translate(ARCHAIC)
             l = re.sub(r"[ \t]+", " ", l).rstrip()
-            # Drop separator rules (----, ====, ****) and editorial one-liners.
-            if re.fullmatch(r"[\s\-=*_~.]{4,}", l):
+            s = l.strip()  # drop-rules test the stripped line; we keep indent
+            # Drop table-of-contents entries like "#01 Вступление (...)": the
+            # opening <a href=#NN> tag sits on a different line than its text,
+            # so the line-level href filter misses them, but a leading "#<num>"
+            # marks a TOC link number that never starts a line of verse.
+            if s.startswith("#") and re.match(r"#\d+(\s|$)", s):
                 continue
-            if any(m in l for m in EDITORIAL_LINE + EDITORIAL_LINE_EXTRA):
+            # Drop separator rules (----, ====, ****) and editorial one-liners.
+            if re.fullmatch(r"[\s\-=*_~.]{4,}", s):
+                continue
+            if any(m in s for m in EDITORIAL_LINE + EDITORIAL_LINE_EXTRA):
+                continue
+            # Drop scholarly-edition scaffolding: bare poem numbers and year
+            # dividers ("1", "1А", "1898"), and Greek/foreign-language epigraph
+            # lines -- but keep Roman-numeral part markers (I, II, XIV).
+            if NUMBER_LINE.fullmatch(s):
+                continue
+            if GREEK.search(s):
+                continue
+            if s and not any(_is_cyrillic(c) for c in s) \
+                    and any(c.isalpha() for c in s) and not ROMAN.fullmatch(s):
                 continue
             lines.append(l)
         # Collapse 3+ blank lines to 2; trim leading/trailing blanks.
