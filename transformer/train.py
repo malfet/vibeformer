@@ -15,7 +15,9 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from dataset import get_datasets
+import random
+
+from dataset import get_datasets, build_dataset
 from model import Transformer
 
 # Hyperparameters
@@ -255,6 +257,10 @@ def main():
     parser.add_argument("--lr", type=float, default=LEARNING_RATE, help="Peak learning rate")
     parser.add_argument("--max-iters", type=int, default=MAX_ITERS, help="Total training steps")
     parser.add_argument("--warmup", type=int, default=WARMUP_ITERS, help="Warmup steps")
+    parser.add_argument("--mix", default=None,
+                        help="Replay corpus mixed into fine-tuning to fight forgetting")
+    parser.add_argument("--mix-frac", type=float, default=0.15,
+                        help="Fraction of training batches drawn from --mix corpus")
     args = parser.parse_args()
 
     max_iters = args.max_iters
@@ -277,6 +283,15 @@ def main():
     print(f"Train size: {len(train_dataset):,} | Val size: {len(val_dataset):,}")
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
+
+    # Optional replay: interleave batches from a second corpus so fine-tuning
+    # keeps the wider vocabulary instead of forgetting it back to the target's.
+    mix_loader = mix_iter = None
+    if args.mix:
+        mix_dataset = build_dataset(args.mix, BLOCK_SIZE, tokenizer)
+        mix_loader = DataLoader(mix_dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
+        mix_iter = iter(mix_loader)
+        print(f"Replay: {args.mix} ({len(mix_dataset):,} windows) at {args.mix_frac:.0%} of batches")
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, drop_last=True)
 
     # Master weights stay in fp32; forward/backward run in bf16 via autocast.
@@ -326,12 +341,20 @@ def main():
     step_times = []
 
     while step < max_iters:
-        # Get batch
-        try:
-            xb, yb = next(train_iter)
-        except StopIteration:
-            train_iter = iter(train_loader)
-            xb, yb = next(train_iter)
+        # Get batch -- from the replay corpus with probability mix_frac, else
+        # from the fine-tune target.
+        if mix_iter is not None and random.random() < args.mix_frac:
+            try:
+                xb, yb = next(mix_iter)
+            except StopIteration:
+                mix_iter = iter(mix_loader)
+                xb, yb = next(mix_iter)
+        else:
+            try:
+                xb, yb = next(train_iter)
+            except StopIteration:
+                train_iter = iter(train_loader)
+                xb, yb = next(train_iter)
 
         xb, yb = xb.to(device), yb.to(device)
 

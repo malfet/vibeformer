@@ -75,3 +75,9 @@ def get_datasets(block_size: int = 128, data_path: str = "data/tiny_shakespeare.
     train_dataset = ShakespeareDataset(train_data, block_size)
     val_dataset = ShakespeareDataset(val_data, block_size)
     return train_dataset, val_dataset, tokenizer
+
+
+def build_dataset(data_path: str, block_size: int, tokenizer: "CharTokenizer"):
+    """Encode a whole file with an existing tokenizer (for replay/mix data)."""
+    data = torch.tensor(tokenizer.encode(load_text(data_path)), dtype=torch.long)
+    return ShakespeareDataset(data, block_size)
