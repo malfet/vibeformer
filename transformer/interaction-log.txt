@@ -54,3 +54,9 @@ Commit this
 I want to try a slightly different approach to training tiny_balmont - Fine Tuning. I.e. can you may be extend a dataset with more russian poetry of the same period (Block, Brusov, etc) and train the network and then fine tune it with just the Balmont's potery. Before making any changes please propose a plan
 Use lib.ru as an example, but let me know if you are blocked for some reason, I can fetch on your behalf if you give me a list of URL
 Ok, go for it and start building the corpus (you can call it russian_silver_age for example)
+Also, can you explain to me why you have 140+ characters in the silver age dataset? I suspect it should be 70 or so (32 letters of the alphabet plus uppercase 10 digits and 10 punctuations)
+Also, I've checked the dataset, and there are clearly some issues, for example it contains some numbered lists of poem titles
+My goal with larger corpus was to understand fine-tuning a bit better, but also give tiny-balmont bit more expressivity by learning more words/rhymes from other poets. Did it achieve that goal?
+I'm not curious about era only words, but in general, I suspect Balmont only corpus has say 50k words, while bigger corpus probably has 150k words or so, isn't it?
+Sure, but can you check if model learned from those new words? Or may be how you can better fine-tune to Balmont corpus, but still retain bigger expressivity?
+Go for it and commit pending changes
