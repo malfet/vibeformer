@@ -63,9 +63,18 @@ class TinySnake:
 
     def __init__(self, max_steps: int = 1000,
                  start_length: int = 3,
-                 rng_seed: Optional[int] = None):
+                 rng_seed: Optional[int] = None,
+                 reward_eat: float = 1.0,
+                 reward_die: float = -1.0,
+                 reward_step: float = 0.0):
         self.max_steps = max_steps
         self.start_length = start_length
+        self.reward_eat = reward_eat
+        self.reward_die = reward_die
+        # Applied on every step, additive with eat/die. Positive -> survivor
+        # incentive (long games score better); negative -> efficiency penalty
+        # (bee-line to food). Set to 0 for the classic sparse reward.
+        self.reward_step = reward_step
         self._seeder = random.Random(rng_seed)
         self._game_rng = random.Random()
         self.body: deque = deque()
@@ -116,20 +125,20 @@ class TinySnake:
         if not died and (nr, nc) in body_check:
             died = True
 
-        reward = 0.0
+        reward = self.reward_step
         info = {"ate": False, "died": False, "truncated": False,
                 "score": self.score, "length": len(self.body)}
 
         if died:
             self.alive = False
-            reward = -1.0
+            reward = self.reward_die + self.reward_step
             info["died"] = True
             return StepResult(self.obs(), reward, True, info)
 
         self.body.append((nr, nc))
         if will_grow:
             self.score += 1
-            reward = 1.0
+            reward = self.reward_eat + self.reward_step
             info["ate"] = True
             self._spawn_food()
         else:
@@ -373,13 +382,20 @@ class TinySnakeVecEnv:
 
     def step(self, actions):
         s = self._snake.step(int(actions[0]))
+        info = dict(s.info)
         if s.done:
+            # On truncation the snake is still alive — capture the obs at the
+            # truncation point so the trainer can bootstrap V(s_terminal) instead
+            # of zeroing the bootstrap. Real deaths leave the snake in a pre-move
+            # state and bootstrap stays 0.
+            if info.get("truncated", False):
+                info["terminal_obs"] = self._obs()
             self._snake.reset()
         obs = self._obs()
         return (obs[None],
                 np.array([s.reward], dtype=np.float32),
                 np.array([s.done], dtype=bool),
-                [s.info])
+                [info])
 
     @property
     def _env(self):
