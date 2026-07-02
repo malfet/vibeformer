@@ -31,6 +31,12 @@ digger-rl. Until then, the Python sim lets us iterate fast.
 | Tiny-snake + micro CNN (15k) plain BC (run11) | **+4** | Hand-picked minimal CNN: 5→8→16→32 conv with stride 1/2/2 + 32-d FC = ~15.5k params. Plain CE (no MC weighting) + 100k teacher samples + 30 epochs + 1 DAGGER iter. **Matches the 4.78M-param baseline at 310× fewer parameters.** Lesson: under plain CE the model size doesn't matter much; under MC-weighted CE small nets collapse to modal class. |
 | Tiny-snake + micro CNN + dist-feature (run12) | **+5** | Same recipe but the obs is augmented with a 6th channel: BFS distance from each cell to the food, normalized `d / 144`. Train acc up 88.5%→89.9%, eval mean 4→5. The distance channel helps but barely — at the head's neighbors distances differ by ~1, so normalization to `[0,1]` makes them only ~0.007 apart, which the encoder struggles to discriminate. |
 | Tiny-snake + micro CNN + potential field (run13) | **0** | Distance encoding swapped to `exp(-d/4)` potential field — much more spread (neighbor potentials differ by ~0.18 instead of ~0.007). Train acc climbed to 94.5% but **eval crashed to mean 0** with many 500-step truncations. The model learned to wander without dying. Probing the initial state shows it picks TURN_RIGHT with logit 13.35 (very confident) when the food is up-right — confidently wrong in the direction *opposite* the gradient. Hypothesis: the potential field is mostly 0 across the board, so the model latches onto a 0-background-→-safe-action heuristic and ignores the gradient near food. |
+| **Tiny-snake + PPO on top of run12 dist-BC (ppo05)** | **6.1** | BC-init PPO with the 6-channel dist-feature obs, micro CNN, 300k steps, BC anchor annealed 0.5→0.05, entropy 0.02→0.005. Fixes: truncation-aware GAE (bootstrap V(terminal_obs) instead of zeroing on `--env-max-steps` cutoff); dist-feature threaded end-to-end so PPO doesn't re-derive credit assignment. Eval 50 eps mean 6.14 median 6 max 14, vs teacher run12 5.3. Training-time peak eval was 7.7 (upd 1000). The base for the specialist runs below. |
+| Tiny-snake + greedy specialist (ppo06_greedy) | **8.0** | Init from ppo05, 200k steps, `--reward-eat 5 --reward-die -1 --vf-coef 0.02`: bigger food payout, small vf coef to keep value loss stable under scaled returns. BC anchor 0.05→0. Eval 50 eps mean 8.04 median 8 max 17. |
+| Tiny-snake + survivor specialist (ppo06_survivor) | **8.6** | Init from ppo05, `--reward-eat 1 --reward-die -5 --reward-step 0.005`: living pays; dying is expensive. Eval 50 eps mean 8.58 median 8 max 18. Highest median-episode-length of the three specialists. |
+| Tiny-snake + efficient specialist (ppo06_efficient) | **8.3** | Init from ppo05, `--reward-eat 1 --reward-die -1 --reward-step -0.02`: penalty per step encourages bee-line paths to food. Eval 50 eps mean 8.30 median 8 max 14. |
+| Tiny-snake + uniform soup (soup_uniform) | **8.9** | Uniform average of the three ppo06 specialist state_dicts via `tools/soup_checkpoints.py`. No further training. Eval 50 eps mean 8.90 median 9 — beats every individual specialist. The specialists share BC-init + ppo05 as their common basin, so weight averaging composes cleanly. |
+| **Tiny-snake + task-arithmetic soup (soup_taskarith)** | **9.2** | Ilharco-style `θ_base + Σ αᵢ(θᵢ − θ_base)` with ppo05 as base, α=0.5 per specialist. Eval 50 eps mean 9.24 median 8 **max 20** — best result to date. **+75% over the BC teacher (5.3) and 6.6× the from-scratch PPO baseline (ppo04, 1.4).** |
 
 ## Findings so far
 
@@ -48,7 +54,7 @@ The story arc, condensed:
 
 6. **Network size was almost irrelevant under plain BC** — once weighted CE was off, a 15.5k-parameter micro CNN matched the 4.78M baseline (run11 vs run06, both eval mean 4). The BC ceiling is set by data and training procedure, not parameter count.
 
-Open question: how to climb above the BC ceiling without RL. Current attempt is a distance-map feature (see [#feature-engineering](#feature-engineering)).
+7. **BC-init + specialists + weight soup climbed above the BC ceiling** — from the run12 dist-BC teacher (5.3), BC-init PPO with a truncation-aware GAE fix and the dist channel wired through (ppo05, 6.1) was the load-bearing step. Warm-starting three reward-shaped specialists from ppo05 (greedy / survivor / efficient, 200k steps each) each cleared 8. Uniformly averaging their weights beat every individual specialist (8.9); Ilharco-style task arithmetic against ppo05 as the base was the best (9.24, max 20 apples — a length-23 snake on the 12×12 board). The trick isn't scale, it's a small basin (BC-init) + orthogonal reward shaping + cheap merge.
 
 ## Layout
 
@@ -59,6 +65,8 @@ Open question: how to climb above the BC ceiling without RL. Current attempt is 
 | `tools/heuristic_agent.py` | BFS-to-number teacher with self / wall avoidance. The teacher policy for BC pretrain + DAGGER. |
 | `tools/play_human.py` | ncurses front-end — play the sim with arrow keys (Unicode half-blocks render the 50-row arena into 25 terminal rows). |
 | `train_bc.py` | First-iteration pixel BC trainer. Warmup with BFS-teacher labels → optional DAGGER iterations → stochastic eval. NatureCNN trunk, shared actor/critic heads (PPO not yet ported). |
+| `train_ppo.py` | PPO trainer with BC-init (`--load-bc`), dist-feature channel wiring, truncation-aware GAE (V(terminal_obs) bootstrap), and `--reward-eat/die/step` for specialist shaping. |
+| `tools/soup_checkpoints.py` | Merge N `Agent` checkpoints into one. Uniform / weighted soup, or Ilharco task arithmetic against a `--base`. Output loads through `--load-bc` and `tools/play_agent.py`. |
 | `interaction-log.txt` | Full chronological log of every prompt; the journey. |
 | `nibbles/` | (gitignored) QBASIC.EXE + NIBBLES.BAS for the eventual DOSBox-hosted env. |
 

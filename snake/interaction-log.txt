@@ -69,3 +69,16 @@
   (different approach = give the model BFS distance-to-food map as an
    extra input channel — encodes the teacher's intermediate computation
    as a feature so the network only has to learn "follow the gradient")
+
+
+> Look at the codebase and hypothesize why RL method fails to build the teacher even at the small scale. Are there any logical bugs in the code?
+
+> Go for it
+  (wire --reward-eat / --reward-die flags through tiny_snake env + train_ppo / train_bc)
+I want you to reread the conversation summary and propose different training strategies. I.e. you have teacher and perhaps different modalities/local minima. Can you train the model with the teacher initially and then come up with different reward functions, fine tune the model based on the various reward functions (say max score/max gameplay time) and then somehow merge those modalities into the base model (but if I'm not mistaken we are talking about a small snake heare, don't we?)
+Go for it
+So what's the status now?
+Yes, let's kick the run
+Sure
+Have they finished by now?
+Please commit changes (may be breaj them down into a few individual commits and update README
