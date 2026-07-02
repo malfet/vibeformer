@@ -34,7 +34,7 @@ from torch.optim import Adam
 
 import tiny_snake
 from train_bc import (
-    Agent, select_device, _to_obs_symbolic, evaluate,
+    Agent, select_device, _to_obs_symbolic, _to_obs_dist, evaluate,
     CKPT_DIR,
 )
 
@@ -70,7 +70,34 @@ def main() -> None:
                         "explore past the teacher's distribution once the "
                         "encoder has converged on it.")
     p.add_argument("--encoder-width", type=float, default=1.0)
+    p.add_argument("--micro-cnn", action="store_true",
+                   help="Use the micro CNN (from train_bc) instead of "
+                        "NatureCNN. Required when --load-bc points at a "
+                        "checkpoint trained with train_bc.py --micro-cnn "
+                        "(e.g. run12).")
+    p.add_argument("--dist-feature", action="store_true",
+                   help="Augment obs with a BFS-distance potential-field "
+                        "channel (matches train_bc's --dist-feature). Hands "
+                        "the teacher's intermediate computation to PPO so it "
+                        "doesn't have to derive long-horizon credit on its own.")
     p.add_argument("--env-max-steps", type=int, default=500)
+    p.add_argument("--reward-eat", type=float, default=1.0,
+                   help="Reward per food eaten. Scaling up (e.g. 10) gives a "
+                        "much stronger signal for the from-scratch case; "
+                        "remember to scale --vf-coef DOWN inversely (value "
+                        "loss grows quadratically with return magnitude).")
+    p.add_argument("--reward-die", type=float, default=-1.0,
+                   help="Reward on death. Default -1 balances against the "
+                        "default +1 food. Drop toward 0 if you're scaling "
+                        "--reward-eat up and don't want death to dominate.")
+    p.add_argument("--reward-step", type=float, default=0.0,
+                   help="Reward added on EVERY step (including eat/die). "
+                        "Positive -> survivor specialist (living pays); "
+                        "negative -> efficiency specialist (short paths pay). "
+                        "Typical values: +0.001 or -0.01. Change one and "
+                        "expect the policy to converge on a qualitatively "
+                        "different behavior — souping across signs is the "
+                        "interesting experiment.")
     p.add_argument("--eval-eps", type=int, default=10)
     p.add_argument("--eval-every", type=int, default=25,
                    help="run eval every N updates (also at the end)")
@@ -89,15 +116,30 @@ def main() -> None:
     print(f"{tag}device={device}", flush=True)
     print(f"{tag}args={vars(args)}", flush=True)
 
-    env_kwargs = dict(max_steps=args.env_max_steps, rng_seed=args.seed)
-    vec = tiny_snake.TinySnakeVecEnv(env_kwargs=env_kwargs)
-    obs_shape = tiny_snake.TinySnakeVecEnv.OBS_SHAPE  # (12, 12)
-    in_ch = tiny_snake.SYM_NUM_TYPES
+    env_kwargs = dict(max_steps=args.env_max_steps, rng_seed=args.seed,
+                      reward_eat=args.reward_eat,
+                      reward_die=args.reward_die,
+                      reward_step=args.reward_step)
+    vec = tiny_snake.TinySnakeVecEnv(
+        env_kwargs=env_kwargs, add_distance=args.dist_feature)
+    obs_grid = tiny_snake.TinySnakeVecEnv.OBS_SHAPE  # (12, 12)
+    if args.dist_feature:
+        in_ch = tiny_snake.SYM_NUM_TYPES + 1
+        obs_buf_shape = (in_ch, *obs_grid)
+        obs_buf_dtype = np.float32
+        to_obs_fn = _to_obs_dist
+    else:
+        in_ch = tiny_snake.SYM_NUM_TYPES
+        obs_buf_shape = obs_grid
+        obs_buf_dtype = np.uint8
+        to_obs_fn = _to_obs_symbolic
+    obs_shape = obs_grid
     num_actions = tiny_snake.NUM_ACTIONS
 
     agent = Agent(num_actions, in_channels=in_ch,
                   obs_size=obs_shape,
-                  width=args.encoder_width).to(device)
+                  width=args.encoder_width,
+                  micro=args.micro_cnn).to(device)
     n_params = sum(p.numel() for p in agent.parameters())
     print(f"{tag}agent: in_ch={in_ch}  obs_shape={obs_shape}  "
           f"width={args.encoder_width}  params={n_params:,}", flush=True)
@@ -110,12 +152,16 @@ def main() -> None:
 
     # Rollout storage (num_envs=1, N policy steps per update).
     N = args.num_steps
-    # Keep obs as uint8 on CPU to save device memory; we one-hot per-batch.
-    obs_buf_np = np.zeros((N, *obs_shape), dtype=np.uint8)
+    # Symbolic mode: uint8 cell-type codes (one-hot at boundary). Dist mode:
+    # already-stacked float32 (6, H, W) tensors.
+    obs_buf_np = np.zeros((N, *obs_buf_shape), dtype=obs_buf_dtype)
     act_buf = torch.zeros(N, dtype=torch.long, device=device)
     logp_buf = torch.zeros(N, device=device)
     rew_buf = torch.zeros(N, device=device)
     done_buf = torch.zeros(N, device=device)
+    # truncated_buf[t] = 1 iff step t-1 finished by --env-max-steps rather than
+    # death — used to bootstrap V(terminal) instead of zeroing it.
+    truncated_buf = torch.zeros(N, device=device)
     val_buf = torch.zeros(N, device=device)
     teacher_buf = torch.full((N,), -1, dtype=torch.long, device=device)
 
@@ -123,8 +169,10 @@ def main() -> None:
         args.bc_anchor_final is not None and args.bc_anchor_final > 0)
 
     obs_np = vec.reset()
-    obs_t = _to_obs_symbolic(obs_np, device)
+    obs_t = to_obs_fn(obs_np, device)
     done_t = torch.zeros(1, device=device)
+    truncated_t = torch.zeros(1, device=device)
+    last_terminal_obs: np.ndarray | None = None  # set when last step truncated
 
     global_step = 0
     update = 0
@@ -149,9 +197,13 @@ def main() -> None:
             current_anchor = args.bc_anchor_coef
 
         # ---- rollout --------------------------------------------------------
+        # Map step index -> terminal obs whenever that step truncated. Used
+        # after the rollout to compute V(terminal_obs) for bootstrap.
+        trunc_terminal_obs: dict[int, np.ndarray] = {}
         for step in range(N):
             obs_buf_np[step] = obs_np[0]
             done_buf[step] = done_t.squeeze()
+            truncated_buf[step] = truncated_t.squeeze()
             if use_anchor:
                 teacher_buf[step] = tiny_snake.heuristic_action(
                     vec._env._game)
@@ -164,33 +216,68 @@ def main() -> None:
             global_step += 1
             rew_buf[step] = float(rewards[0])
             ep_return_running += float(rewards[0])
+            is_trunc = bool(dones[0]) and bool(infos[0].get("truncated", False))
             if dones[0]:
                 ep_returns.append(ep_return_running)
                 ep_return_running = 0.0
+            if is_trunc:
+                trunc_terminal_obs[step] = infos[0]["terminal_obs"]
+                last_terminal_obs = infos[0]["terminal_obs"]
             done_t = torch.tensor([float(dones[0])], device=device)
-            obs_t = _to_obs_symbolic(obs_np, device)
+            truncated_t = torch.tensor([float(is_trunc)], device=device)
+            obs_t = to_obs_fn(obs_np, device)
 
         # ---- GAE ------------------------------------------------------------
         with torch.no_grad():
-            _, _, _, next_value = agent.act(obs_t)
+            # Precompute V(terminal_obs) for every truncated step in this
+            # rollout, batched for one forward pass.
+            trunc_v_buf = torch.zeros(N, device=device)
+            if trunc_terminal_obs:
+                keys = sorted(trunc_terminal_obs.keys())
+                obs_batch = np.stack([trunc_terminal_obs[k] for k in keys])
+                _, _, _, vs = agent.act(to_obs_fn(obs_batch, device))
+                for k, v in zip(keys, vs):
+                    trunc_v_buf[k] = v
+
+            # Bootstrap value at end of rollout: if the last step truncated,
+            # V(terminal_obs) is the right estimate; otherwise V(next obs) (which
+            # is either mid-episode or a fresh reset, both fine since the death
+            # mask zeros the reset case).
+            if bool(truncated_t.squeeze().item() > 0.5) \
+                    and last_terminal_obs is not None:
+                _, _, _, next_value = agent.act(
+                    to_obs_fn(last_terminal_obs[None], device))
+            else:
+                _, _, _, next_value = agent.act(obs_t)
+
             advantages = torch.zeros_like(rew_buf)
             lastgae = torch.zeros(1, device=device)
             for t in reversed(range(N)):
                 if t == N - 1:
-                    next_nonterm = 1.0 - done_t.squeeze()
-                    next_v = next_value.squeeze()
+                    d_next = done_t.squeeze()
+                    tr_next = truncated_t.squeeze()
+                    v_next = next_value.squeeze()
                 else:
-                    next_nonterm = 1.0 - done_buf[t + 1]
-                    next_v = val_buf[t + 1]
-                delta = rew_buf[t] + args.gamma * next_v * next_nonterm \
-                        - val_buf[t]
-                lastgae = delta + args.gamma * args.gae_lambda * \
-                          next_nonterm * lastgae
+                    d_next = done_buf[t + 1]
+                    tr_next = truncated_buf[t + 1]
+                    # If step t was truncated, override bootstrap source with
+                    # V(terminal_obs) rather than V(reset obs).
+                    if tr_next.item() > 0.5:
+                        v_next = trunc_v_buf[t]
+                    else:
+                        v_next = val_buf[t + 1]
+                # bootstrap_mask is 0 only on real death (done & not truncated);
+                # truncation keeps the bootstrap so long horizons aren't punished.
+                real_term = d_next * (1.0 - tr_next)
+                boot = 1.0 - real_term
+                cont = 1.0 - d_next  # GAE λ-decay still stops at any episode end
+                delta = rew_buf[t] + args.gamma * v_next * boot - val_buf[t]
+                lastgae = delta + args.gamma * args.gae_lambda * cont * lastgae
                 advantages[t] = lastgae
             returns = advantages + val_buf
 
         # ---- PPO update over flattened batch -------------------------------
-        flat_obs_t = _to_obs_symbolic(obs_buf_np, device)  # (N, 5, H, W)
+        flat_obs_t = to_obs_fn(obs_buf_np, device)  # (N, C, H, W)
         flat_act = act_buf
         flat_logp = logp_buf
         flat_val = val_buf
@@ -272,7 +359,7 @@ def main() -> None:
 
         if update % args.eval_every == 0:
             scores = evaluate(agent, vec, args.eval_eps, device,
-                              _to_obs_symbolic, greedy=False, tag=tag)
+                              to_obs_fn, greedy=False, tag=tag)
             arr = np.array(scores, dtype=np.int32)
             print(f"{tag}EVAL @ upd {update}: mean {arr.mean():.1f}  "
                   f"max {arr.max()}  min {arr.min()}  "
@@ -281,7 +368,7 @@ def main() -> None:
     # ---- final eval + save -------------------------------------------------
     print(f"{tag}final eval ({args.eval_eps} episodes)", flush=True)
     scores = evaluate(agent, vec, args.eval_eps, device,
-                      _to_obs_symbolic, greedy=False, tag=tag)
+                      to_obs_fn, greedy=False, tag=tag)
     arr = np.array(scores, dtype=np.int32)
     print(f"{tag}FINAL: mean {arr.mean():.1f}  "
           f"median {int(np.median(arr))}  "
