@@ -95,9 +95,7 @@ def save_checkpoint(path, model, optimizer, step, best_val_loss, tokenizer):
     metadata = {
         "step": str(step),
         "best_val_loss": str(best_val_loss),
-        "vocab_size": str(tokenizer.vocab_size),
-        "stoi": json.dumps(tokenizer.stoi),
-        "itos": json.dumps({str(k): v for k, v in tokenizer.itos.items()}),
+        **tokenizer.metadata(),
         **optim_meta,
     }
     save_file(tensors, path, metadata=metadata)
@@ -249,6 +247,8 @@ def main():
     parser.add_argument("--data", default=DATA_PATH, help="Path to training text file")
     parser.add_argument("--vocab", default=None,
                         help="Path to a shared vocab JSON (else derive from --data)")
+    parser.add_argument("--bpe", default=None,
+                        help="Path to a SentencePiece .model (subword tokenizer)")
     parser.add_argument("--init-from", default=None,
                         help="Checkpoint to initialise weights from (fine-tuning). "
                              "Loads model weights only; resets step/optimizer.")
@@ -278,7 +278,7 @@ def main():
         print(f"Fine-tuning from: {args.init_from} | peak lr {args.lr:.1e} | {max_iters} iters")
 
     train_dataset, val_dataset, tokenizer = get_datasets(
-        BLOCK_SIZE, data_path=args.data, vocab_path=args.vocab)
+        BLOCK_SIZE, data_path=args.data, vocab_path=args.vocab, bpe_path=args.bpe)
     print(f"Vocab size: {tokenizer.vocab_size}")
     print(f"Train size: {len(train_dataset):,} | Val size: {len(val_dataset):,}")
 

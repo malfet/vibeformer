@@ -44,6 +44,49 @@ class CharTokenizer:
     def decode(self, ids: list[int]) -> str:
         return "".join(self.itos[i] for i in ids)
 
+    def metadata(self) -> dict:
+        return {
+            "tokenizer": "char",
+            "vocab_size": str(self.vocab_size),
+            "stoi": json.dumps(self.stoi),
+            "itos": json.dumps({str(k): v for k, v in self.itos.items()}),
+        }
+
+
+class BPETokenizer:
+    """SentencePiece subword tokenizer (see data/build_bpe.py).
+
+    Newlines are meaningful in verse, so we swap \\n <-> the atomic <nl> token
+    around SentencePiece, which otherwise treats input line-by-line.
+    """
+
+    NL = "<nl>"
+
+    def __init__(self, model_path: str):
+        import sentencepiece as spm
+        self.model_path = model_path
+        self.sp = spm.SentencePieceProcessor(model_file=model_path)
+        self.vocab_size = self.sp.get_piece_size()
+
+    def encode(self, s: str) -> list[int]:
+        return self.sp.encode(s.replace("\n", self.NL))
+
+    def decode(self, ids: list[int]) -> str:
+        return self.sp.decode(ids).replace(self.NL, "\n")
+
+    def metadata(self) -> dict:
+        return {"tokenizer": "bpe", "vocab_size": str(self.vocab_size),
+                "bpe_model": self.model_path}
+
+
+def load_tokenizer(meta: dict):
+    """Rebuild a tokenizer from checkpoint metadata (used by generate/eval)."""
+    if meta.get("tokenizer") == "bpe":
+        return BPETokenizer(meta["bpe_model"])
+    stoi = json.loads(meta["stoi"])
+    tok = CharTokenizer(vocab=list(stoi.keys()))
+    return tok
+
 
 class ShakespeareDataset(Dataset):
     def __init__(self, data: torch.Tensor, block_size: int):
@@ -60,9 +103,11 @@ class ShakespeareDataset(Dataset):
 
 
 def get_datasets(block_size: int = 128, data_path: str = "data/tiny_shakespeare.txt",
-                 vocab_path: str | None = None):
+                 vocab_path: str | None = None, bpe_path: str | None = None):
     text = load_text(data_path)
-    if vocab_path is not None:
+    if bpe_path is not None:
+        tokenizer = BPETokenizer(bpe_path)
+    elif vocab_path is not None:
         tokenizer = CharTokenizer.from_vocab_file(vocab_path)
     else:
         tokenizer = CharTokenizer(text)

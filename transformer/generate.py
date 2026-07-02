@@ -7,6 +7,7 @@ import torch
 from safetensors.torch import load_file
 from safetensors import safe_open
 
+from dataset import load_tokenizer
 from model import Transformer
 
 
@@ -48,28 +49,25 @@ def main():
         meta = f.metadata()
     tensors = load_file(args.checkpoint, device="cpu")
 
-    stoi = json.loads(meta["stoi"])
-    itos = {int(k): v for k, v in json.loads(meta["itos"]).items()}
+    tokenizer = load_tokenizer(meta)
     vocab_size = int(meta["vocab_size"])
 
     model = Transformer(vocab_size=vocab_size).bfloat16()
     model_state = {k[len("model."):]: v for k, v in tensors.items() if k.startswith("model.")}
     model.load_state_dict(model_state, strict=False)
 
-    # If the model was trained with poem markers, always start at a poem boundary
+    # Models trained with poem markers should start at a poem boundary.
     POEM_START = "✦"
     prompt = args.prompt
-    if POEM_START in stoi and not prompt.startswith(POEM_START):
+    if not prompt.startswith(POEM_START):
         prompt = POEM_START + "\n" + prompt.lstrip("\n")
 
-    # Encode prompt
-    idx = torch.tensor([[stoi[c] for c in prompt]], dtype=torch.long)
+    idx = torch.tensor([tokenizer.encode(prompt)], dtype=torch.long)
 
     with torch.no_grad():
         out = generate(model, idx, args.max_tokens, args.temperature)
 
-    text = "".join(itos[i] for i in out[0].tolist())
-    print(text)
+    print(tokenizer.decode(out[0].tolist()))
 
 
 if __name__ == "__main__":

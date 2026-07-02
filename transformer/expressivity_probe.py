@@ -23,6 +23,7 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import load_file
 
+from dataset import load_tokenizer
 from model import Transformer
 from generate import generate
 
@@ -30,13 +31,12 @@ from generate import generate
 def load(checkpoint, dev):
     with safe_open(checkpoint, framework="pt") as f:
         meta = f.metadata()
-    stoi = json.loads(meta["stoi"])
-    itos = {int(k): v for k, v in json.loads(meta["itos"]).items()}
+    tokenizer = load_tokenizer(meta)
     model = Transformer(vocab_size=int(meta["vocab_size"])).to(dev).bfloat16().eval()
     t = load_file(checkpoint, device=str(dev))
     model.load_state_dict({k[6:]: v for k, v in t.items() if k.startswith("model.")},
                           strict=False)
-    return model, stoi, itos
+    return model, tokenizer
 
 
 def word_set(path):
@@ -58,19 +58,22 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("checkpoint")
     ap.add_argument("--batch", type=int, default=24)
-    ap.add_argument("--tokens", type=int, default=1500)
+    ap.add_argument("--tokens", type=int, default=1500, help="generation budget in tokens")
+    ap.add_argument("--chars", type=int, default=1500, help="chars kept per sample (fairness)")
     ap.add_argument("--temperature", type=float, default=0.9)
     args = ap.parse_args()
 
     dev = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     torch.manual_seed(0)
-    model, stoi, itos = load(args.checkpoint, dev)
+    model, tokenizer = load(args.checkpoint, dev)
 
     prompt = "✦\n"
-    idx = torch.tensor([[stoi[c] for c in prompt]] * args.batch, dtype=torch.long, device=dev)
+    idx = torch.tensor([tokenizer.encode(prompt)] * args.batch, dtype=torch.long, device=dev)
     with torch.no_grad():
         out = generate(model, idx, args.tokens, args.temperature)
-    text = "\n".join("".join(itos[i] for i in row) for row in out.tolist())
+    # Truncate each sample to a fixed CHARACTER budget so char and subword
+    # models are compared on equal text volume (BPE emits ~2x chars/token).
+    text = "\n".join(tokenizer.decode(row)[:args.chars] for row in out.tolist())
 
     BAL, SIL = word_set("data/tiny_balmont.txt"), word_set("data/russian_silver_age.txt")
     gen = [w for w in re.findall(r"[а-яё]+", text.lower()) if len(w) >= 3]
@@ -79,7 +82,7 @@ def main():
     era_only = (uniq & SIL) - BAL
     pure_oov = uniq - BAL - SIL
 
-    print(f"{args.checkpoint}  (vocab {len(itos)})")
+    print(f"{args.checkpoint}  (vocab {tokenizer.vocab_size})")
     print(f"  generated words: {len(gen):,} total, {len(uniq):,} distinct")
     print(f"  real-word rate : {len(uniq & (BAL|SIL))/len(uniq):.1%} "
           f"(distinct real {len(real):,}, invented {len(pure_oov):,})")
