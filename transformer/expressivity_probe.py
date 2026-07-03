@@ -24,7 +24,7 @@ from safetensors import safe_open
 from safetensors.torch import load_file
 
 from dataset import load_tokenizer
-from model import Transformer
+from model import build_transformer
 from generate import generate
 
 
@@ -32,7 +32,7 @@ def load(checkpoint, dev):
     with safe_open(checkpoint, framework="pt") as f:
         meta = f.metadata()
     tokenizer = load_tokenizer(meta)
-    model = Transformer(vocab_size=int(meta["vocab_size"])).to(dev).bfloat16().eval()
+    model = build_transformer(meta).to(dev).bfloat16().eval()
     t = load_file(checkpoint, device=str(dev))
     model.load_state_dict({k[6:]: v for k, v in t.items() if k.startswith("model.")},
                           strict=False)

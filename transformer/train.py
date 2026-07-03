@@ -95,6 +95,7 @@ def save_checkpoint(path, model, optimizer, step, best_val_loss, tokenizer):
     metadata = {
         "step": str(step),
         "best_val_loss": str(best_val_loss),
+        "arch": json.dumps(model.config),
         **tokenizer.metadata(),
         **optim_meta,
     }
@@ -261,6 +262,10 @@ def main():
                         help="Replay corpus mixed into fine-tuning to fight forgetting")
     parser.add_argument("--mix-frac", type=float, default=0.15,
                         help="Fraction of training batches drawn from --mix corpus")
+    parser.add_argument("--d-model", type=int, default=D_MODEL)
+    parser.add_argument("--n-heads", type=int, default=N_HEADS)
+    parser.add_argument("--n-layers", type=int, default=N_LAYERS)
+    parser.add_argument("--d-ff", type=int, default=D_FF)
     args = parser.parse_args()
 
     max_iters = args.max_iters
@@ -297,10 +302,10 @@ def main():
     # Master weights stay in fp32; forward/backward run in bf16 via autocast.
     model = Transformer(
         vocab_size=tokenizer.vocab_size,
-        d_model=D_MODEL,
-        n_heads=N_HEADS,
-        n_layers=N_LAYERS,
-        d_ff=D_FF,
+        d_model=args.d_model,
+        n_heads=args.n_heads,
+        n_layers=args.n_layers,
+        d_ff=args.d_ff,
         block_size=BLOCK_SIZE,
         dropout=DROPOUT,
     ).to(device=device)

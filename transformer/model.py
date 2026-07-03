@@ -1,5 +1,6 @@
 """Decoder-only Transformer for character-level language modeling."""
 
+import json
 import math
 import torch
 import torch.nn as nn
@@ -87,6 +88,9 @@ class Transformer(nn.Module):
     ):
         super().__init__()
         self.block_size = block_size
+        # Architecture, echoed into checkpoints so eval/generate can rebuild it.
+        self.config = dict(vocab_size=vocab_size, d_model=d_model, n_heads=n_heads,
+                           n_layers=n_layers, d_ff=d_ff, block_size=block_size)
 
         self.token_emb = nn.Embedding(vocab_size, d_model)
         # Sinusoidal positional encoding (fixed, not learned)
@@ -135,3 +139,13 @@ class Transformer(nn.Module):
         if targets is not None:
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
         return logits, loss
+
+
+def build_transformer(meta: dict) -> "Transformer":
+    """Reconstruct a model from checkpoint metadata (architecture-aware).
+
+    Older checkpoints predate the stored `arch`; they use the default sizes.
+    """
+    if "arch" in meta:
+        return Transformer(**json.loads(meta["arch"]))
+    return Transformer(vocab_size=int(meta["vocab_size"]))

@@ -14,7 +14,7 @@ from safetensors import safe_open
 from safetensors.torch import load_file
 
 from dataset import load_text, load_tokenizer
-from model import Transformer
+from model import build_transformer
 
 BLOCK_SIZE = 128
 
@@ -35,7 +35,7 @@ def main():
     val_text = text[int(0.9 * len(text)):]  # matches get_datasets' 90/10 split
     data = torch.tensor(tokenizer.encode(val_text), dtype=torch.long)
 
-    model = Transformer(vocab_size=vocab_size).to(dev).bfloat16().eval()
+    model = build_transformer(meta).to(dev).bfloat16().eval()
     tensors = load_file(args.checkpoint, device=str(dev))
     model.load_state_dict({k[6:]: v for k, v in tensors.items()
                            if k.startswith("model.")}, strict=False)

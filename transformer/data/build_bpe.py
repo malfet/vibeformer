@@ -36,6 +36,7 @@ def from_sp(text: str) -> str:
 
 def main():
     vocab_size = int(sys.argv[1]) if len(sys.argv) > 1 else 4000
+    prefix = sys.argv[2] if len(sys.argv) > 2 else PREFIX
 
     # One sentence per line, internal newlines -> <nl>, so SP sees reasonable
     # length sentences while <nl> becomes a normal (atomic) token in-stream.
@@ -50,7 +51,7 @@ def main():
 
     spm.SentencePieceTrainer.train(
         input=train_path,
-        model_prefix=PREFIX,
+        model_prefix=prefix,
         vocab_size=vocab_size,
         model_type="unigram",
         character_coverage=1.0,
@@ -64,7 +65,7 @@ def main():
     os.remove(train_path)
 
     # Validate a lossless round-trip on a real sample (the acid test).
-    sp = spm.SentencePieceProcessor(model_file=PREFIX + ".model")
+    sp = spm.SentencePieceProcessor(model_file=prefix + ".model")
     sample = open(FINETUNE, encoding="utf-8").read()[2000:2600]
     ids = sp.encode(to_sp(sample))
     back = from_sp(sp.decode(ids))
