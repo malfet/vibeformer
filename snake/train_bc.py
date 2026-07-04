@@ -348,6 +348,112 @@ def train_epochs(agent: Agent, optim: Adam,
               f"ce {ce_sum / nb:.3f}  acc {acc_sum / nb:.3f}", flush=True)
 
 
+def eval_ce_batched(agent: Agent,
+                    obs_np: np.ndarray, act_np: np.ndarray,
+                    to_obs_fn, device: torch.device,
+                    bs: int = 512) -> tuple[float, float]:
+    """Mean CE + accuracy on a fixed (obs, action) buffer. No grads.
+
+    Used for both train-side and held-out CE. Returns (mean_ce, accuracy).
+    """
+    K = len(act_np)
+    if K == 0:
+        return 0.0, 0.0
+    was_training = agent.training
+    agent.eval()
+    total_ce = 0.0
+    total_correct = 0
+    with torch.no_grad():
+        for start in range(0, K, bs):
+            mb_obs = to_obs_fn(obs_np[start:start + bs], device)
+            mb_act = torch.from_numpy(act_np[start:start + bs]).to(device)
+            logits = agent.actor(agent.encode(mb_obs))
+            total_ce += F.cross_entropy(logits, mb_act,
+                                        reduction="sum").item()
+            total_correct += (logits.argmax(-1) == mb_act).sum().item()
+    if was_training:
+        agent.train()
+    return total_ce / K, total_correct / K
+
+
+def rollout_ce(agent: Agent, vec, heuristic_fn, to_obs_fn,
+               device: torch.device, n_eps: int
+               ) -> tuple[float, float, list[int], list[int]]:
+    """Roll student out for n_eps; at each state ask teacher's action, log CE.
+
+    Diagnoses distribution shift: if train/holdout CE are near zero but this
+    is high, the student is fine on states the teacher visits and lost on
+    states the student visits (classic DAgger failure mode).
+
+    Returns (mean_ce, accuracy, death_lengths, scores).
+    """
+    was_training = agent.training
+    agent.eval()
+    obs_np = vec.reset()
+    obs_t = to_obs_fn(obs_np, device)
+    ce_sum = 0.0
+    correct = 0
+    steps = 0
+    death_lens: list[int] = []
+    scores: list[int] = []
+    with torch.no_grad():
+        while len(scores) < n_eps:
+            teacher_a = heuristic_fn(vec._env._game)
+            logits = agent.actor(agent.encode(obs_t))
+            t_act = torch.tensor([teacher_a], device=device)
+            ce_sum += F.cross_entropy(logits, t_act,
+                                      reduction="sum").item()
+            correct += int(logits.argmax(-1).item() == teacher_a)
+            steps += 1
+            student_a = int(torch.distributions.Categorical(
+                logits=logits).sample().item())
+            obs_np, _, dones, infos = vec.step(np.array([student_a]))
+            obs_t = to_obs_fn(obs_np, device)
+            if dones[0]:
+                info = infos[0]
+                if info.get("died", False):
+                    death_lens.append(int(info.get("length", 0)))
+                scores.append(int(info.get("score", 0)))
+    if was_training:
+        agent.train()
+    return ce_sum / max(steps, 1), correct / max(steps, 1), death_lens, scores
+
+
+def diagnose(agent: Agent,
+             train_obs: np.ndarray, train_act: np.ndarray,
+             holdout_obs: np.ndarray, holdout_act: np.ndarray,
+             vec, heuristic_fn, to_obs_fn,
+             device: torch.device, n_eps: int,
+             tag: str = "") -> None:
+    """Print the three-metric decomposition + length-at-death histogram.
+
+    Interpretation:
+      - train_ce stuck > 0.1 with enough epochs -> capacity wall (grow model)
+      - train_ce ~0 but holdout_ce >> train_ce -> data wall on teacher dist
+      - holdout_ce ~0 but rollout_ce >> holdout_ce -> distribution shift
+        (student visits states teacher rarely does -> DAgger / coverage-DAgger)
+      - all three ~0 but eval score < teacher -> not BC's fault; check eval
+    """
+    tr_ce, tr_acc = eval_ce_batched(agent, train_obs, train_act,
+                                    to_obs_fn, device)
+    ho_ce, ho_acc = eval_ce_batched(agent, holdout_obs, holdout_act,
+                                    to_obs_fn, device)
+    ro_ce, ro_acc, death_lens, scores = rollout_ce(
+        agent, vec, heuristic_fn, to_obs_fn, device, n_eps)
+    print(f"{tag}DIAG  train_ce {tr_ce:.3f} acc {tr_acc:.3f}  |  "
+          f"holdout_ce {ho_ce:.3f} acc {ho_acc:.3f}  |  "
+          f"rollout_ce {ro_ce:.3f} acc {ro_acc:.3f}", flush=True)
+    if scores:
+        s = np.array(scores)
+        print(f"{tag}DIAG  rollout scores: mean {s.mean():.1f}  "
+              f"max {s.max()}  min {s.min()}", flush=True)
+    if death_lens:
+        d = np.array(death_lens)
+        print(f"{tag}DIAG  length-at-death: mean {d.mean():.1f}  "
+              f"median {int(np.median(d))}  max {d.max()}  "
+              f"(teacher ~30 on tiny)", flush=True)
+
+
 def evaluate(agent: Agent, vec, n_eps: int,
              device: torch.device, to_obs_fn,
              greedy: bool = False,
@@ -391,6 +497,13 @@ def main() -> None:
     p.add_argument("--dagger-collect-steps", type=int, default=10_000)
     p.add_argument("--dagger-epochs", type=int, default=3)
     p.add_argument("--eval-eps", type=int, default=10)
+    p.add_argument("--holdout-frac", type=float, default=0.05,
+                   help="fraction of the initial teacher warmup buffer to "
+                        "reserve for held-out CE (never trained on). Set to "
+                        "0 to skip the holdout metric.")
+    p.add_argument("--diag-eps", type=int, default=20,
+                   help="episodes for rollout-CE diagnostic (distribution "
+                        "shift check).")
     p.add_argument("--env-max-steps", type=int, default=10_000,
                    help="env max_steps cap; episodes truncate (done=True) here.")
     p.add_argument("--lr", type=float, default=2.5e-4)
@@ -438,6 +551,12 @@ def main() -> None:
                    metavar="CKPT_PATH",
                    help="load an existing checkpoint, run only the eval, "
                         "and exit (skip warmup, DAGGER, save)")
+    p.add_argument("--resume-from", type=str, default="",
+                   metavar="CKPT_PATH",
+                   help="load an existing checkpoint before training. Combine "
+                        "with --warmup-epochs 0 to skip warmup training and "
+                        "run only additional DAGGER iters on top of a prior "
+                        "run.")
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
@@ -516,6 +635,12 @@ def main() -> None:
         vec.close()
         return
 
+    if args.resume_from:
+        ckpt = torch.load(args.resume_from, map_location=device,
+                          weights_only=False)
+        agent.load_state_dict(ckpt["agent"])
+        print(f"{tag}resumed from {args.resume_from}", flush=True)
+
     optim = Adam(agent.parameters(), lr=args.lr, eps=1e-5)
 
     def _credits(rews, dones):
@@ -533,11 +658,33 @@ def main() -> None:
           flush=True)
     obs_store, act_store, rew_store, done_store = collect_with_teacher(
         vec, args.warmup_steps, obs_shape, heuristic_fn, num_actions, tag=tag)
+
+    # Reserve a slice of the initial teacher buffer as held-out. Take from
+    # the tail (later rollouts) so the earliest states — likely the least
+    # varied — end up in train. Holdout is frozen: DAgger only grows train.
+    K_ho = int(len(act_store) * args.holdout_frac) if args.holdout_frac > 0 else 0
+    if K_ho > 0:
+        holdout_obs = obs_store[-K_ho:].copy()
+        holdout_act = act_store[-K_ho:].copy()
+        obs_store = obs_store[:-K_ho]
+        act_store = act_store[:-K_ho]
+        rew_store = rew_store[:-K_ho]
+        done_store = done_store[:-K_ho]
+        print(f"{tag}holdout: reserved {K_ho:,} samples "
+              f"({args.holdout_frac:.0%}); train {len(act_store):,}",
+              flush=True)
+    else:
+        holdout_obs = np.zeros((0, *obs_shape), dtype=obs_store.dtype)
+        holdout_act = np.zeros((0,), dtype=act_store.dtype)
+
     weight_store = _credits(rew_store, done_store)
     print(f"{tag}warmup: training {args.warmup_epochs} epochs", flush=True)
     train_epochs(agent, optim, obs_store, act_store, weight_store,
                  args.warmup_epochs, args.bc_batch_size,
                  args.max_grad_norm, device, args.seed, to_obs_fn, tag=tag)
+    diagnose(agent, obs_store, act_store, holdout_obs, holdout_act,
+             vec, heuristic_fn, to_obs_fn, device,
+             args.diag_eps, tag=tag + "warmup-")
 
     for it in range(args.dagger_iters):
         K = args.dagger_collect_steps
@@ -563,6 +710,9 @@ def main() -> None:
         arr_mid = np.array(mid, dtype=np.int32)
         print(f"{tag}DAGGER iter {it+1} mid-eval: mean {arr_mid.mean():.0f}  "
               f"max {arr_mid.max()}", flush=True)
+        diagnose(agent, obs_store, act_store, holdout_obs, holdout_act,
+                 vec, heuristic_fn, to_obs_fn, device,
+                 args.diag_eps, tag=f"{tag}dagger{it+1}-")
 
     mode = "greedy" if args.greedy_eval else "stochastic"
     print(f"{tag}final eval ({args.eval_eps} episodes, {mode})", flush=True)
