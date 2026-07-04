@@ -37,6 +37,17 @@ digger-rl. Until then, the Python sim lets us iterate fast.
 | Tiny-snake + efficient specialist (ppo06_efficient) | **8.3** | Init from ppo05, `--reward-eat 1 --reward-die -1 --reward-step -0.02`: penalty per step encourages bee-line paths to food. Eval 50 eps mean 8.30 median 8 max 14. |
 | Tiny-snake + uniform soup (soup_uniform) | **8.9** | Uniform average of the three ppo06 specialist state_dicts via `tools/soup_checkpoints.py`. No further training. Eval 50 eps mean 8.90 median 9 — beats every individual specialist. The specialists share BC-init + ppo05 as their common basin, so weight averaging composes cleanly. |
 | **Tiny-snake + task-arithmetic soup (soup_taskarith)** | **9.2** | Ilharco-style `θ_base + Σ αᵢ(θᵢ − θ_base)` with ppo05 as base, α=0.5 per specialist. Eval 50 eps mean 9.24 median 8 **max 20** — best result to date. **+75% over the BC teacher (5.3) and 6.6× the from-scratch PPO baseline (ppo04, 1.4).** |
+| BC model-size sweep — micro-CNN (bc_scan_micro) | **1.0** | 15k params, 300k warmup + 3 DAGGER × 100k, dist channel. Train CE plateaued at 0.10 — model literally can't fit the labels. **Capacity wall.** |
+| BC model-size sweep — width=0.25 (bc_scan_w025) | **0.0** | 300k params. Train CE 0.008 (perfect fit) but rollout CE **25.9** and *rose* with more DAGGER data. **Memorization wall** — intermediate capacity + insufficient regularization overfits teacher trajectories and picks confidently-wrong actions off-distribution. |
+| BC model-size sweep — width=0.5 (bc_scan_w05) | **0.0** | 1.2M params. Same shape as w0.25: train 0.003, rollout 23.4. Memorization wall. |
+| **Tiny-snake BC + 4.78M NatureCNN (bc_scan_w10)** | **10.0** | 4.78M params, 300k warmup + 3 DAGGER × 100k, dist channel, greedy eval. Each DAGGER round approximately halved rollout CE (19.5 → 9.1 → 4.6 → 3.6). Length-at-death climbed 6.1 → 13.1 (max 24). **BC alone matches the whole soup pipeline** — finding #6 in the earlier list was wrong: capacity matters, it was just masked by capping at 15k params. |
+| BC continued-DAGGER on w10 (bc_scan_w10_more) | 5 | Two more DAGGER iters (8 epochs × 100k) on the already-converged w10. Rollout CE blew up 1.5 → 3.8 → 17.3 and eval dropped 10 → 5. **DAGGER overtraining**: past a saturation point, more epochs on student-visited data pushes the model into confident errors on rare states. Lesson: DAGGER needs early stopping on rollout_ce, not more compute. |
+| **Tiny-snake + PPO from bc_scan_w10 (ppo05_w10)** | **17.6** | BC-init PPO on the 4.78M net, 150k steps, dist channel, BC anchor 0.3→0.05. Training peak eval 17.3 at upd 500; final 13.7; head-to-head 50-ep 17.56. **1.75× soup_taskarith (9.24) already before specialists.** |
+| Tiny-snake + greedy specialist on w10 (ppo06_w10_greedy) | 17.5 | Same shaping as ppo06_greedy (reward_eat 5, vf 0.02) from ppo05_w10. Head-to-head stoch 17.52, greedy 18.28 max 35. |
+| Tiny-snake + survivor specialist on w10 (ppo06_w10_survivor) | 16.2 | reward_step +0.005, reward_die -5. Head-to-head 16.16 / 18.08. |
+| Tiny-snake + efficient specialist on w10 (ppo06_w10_efficient) | 16.8 | reward_step -0.02. Head-to-head 16.84 / 17.48. Training-time peak 33 apples. |
+| **Tiny-snake + w10 task-arithmetic soup (soup_w10_taskarith)** | 18.7 | Ilharco arithmetic with ppo05_w10 as base, α=0.5 per specialist. 50 eps stoch 18.70, greedy 18.92. |
+| **Tiny-snake + w10 uniform soup (soup_w10_uniform)** ⭐ | **19.8** | Uniform average of the three w10 specialists. **Best result to date: 50 eps mean 19.80 stoch / 19.84 greedy, median 20, max 33. 73% of the BFS teacher's 27.22 ceiling, and 2.15× soup_taskarith.** Same recipe as soup_uniform above but on the 4.78M base — the entire delta from 8.9 → 19.8 comes from a bigger BC teacher clone at the front of the pipeline. |
 
 ## Findings so far
 
@@ -56,6 +67,14 @@ The story arc, condensed:
 
 7. **BC-init + specialists + weight soup climbed above the BC ceiling** — from the run12 dist-BC teacher (5.3), BC-init PPO with a truncation-aware GAE fix and the dist channel wired through (ppo05, 6.1) was the load-bearing step. Warm-starting three reward-shaped specialists from ppo05 (greedy / survivor / efficient, 200k steps each) each cleared 8. Uniformly averaging their weights beat every individual specialist (8.9); Ilharco-style task arithmetic against ppo05 as the base was the best (9.24, max 20 apples — a length-23 snake on the 12×12 board). The trick isn't scale, it's a small basin (BC-init) + orthogonal reward shaping + cheap merge.
 
+8. **Three-metric BC diagnostic (train / holdout / rollout CE) decomposes the wall.** Adding `train_bc.py`'s `diagnose()` (train CE on the fitted data, holdout CE on a frozen slice, rollout CE at student-visited states with teacher-relabeled targets) lets a single run distinguish capacity-limited (train stuck > 0.1), data-limited on the teacher's distribution (train ≈ 0 but holdout ≫ train), and distribution-shift-limited (holdout ≈ 0 but rollout ≫ holdout — the DAgger regime). The length-at-death histogram bolts on for free and reveals whether failures cluster in early or late game.
+
+9. **Correction to finding #6 — capacity actually matters, it was masked by too-small models.** A model-size sweep with 6× the data (300k warmup + 3 DAgger × 100k, dist channel) shows a clean picture: micro-CNN (15k) hits a capacity wall (train CE 0.10), NatureCNN widths 0.25 / 0.5 (300k / 1.2M) hit a memorization wall (train ≈ 0 but rollout 23-26), and width 1.0 (4.78M) generalizes cleanly with each DAgger round halving rollout CE (19.5 → 3.6). Under greedy eval the 4.78M BC clone alone hits mean 10 — matching the entire previous RL+soup pipeline. Finding #6 was true within its tested budget but false in general.
+
+10. **BC-init a 4.78M net into the full RL pipeline crossed the 2x barrier.** Replaying the ppo05 → three specialists → soup recipe with the 4.78M `bc_scan_w10` as the BC init (instead of the 15k `run12`) lifted every step of the pipeline together: base 17.6, specialists 16-18, `soup_w10_uniform` mean **19.8** greedy (max 33 apples), median 20. That's 73% of the BFS teacher's ceiling and 2.15× the previous best (`soup_taskarith` 9.24). The whole pipeline was capacity-limited at the BC-teacher clone; everything downstream inherited that ceiling.
+
+11. **DAgger can overtrain past a saturation point.** Running two more DAgger iters (8 epochs × 100k student samples each) on top of the already-strong bc_scan_w10 pushed rollout CE *up* from 1.5 → 17.3 and eval score from 10 → 5. train_ce stayed at 0.001 (perfect fit); holdout_ce crept 0.002 → 0.036. The failure mode is confidently-wrong outputs on rare states — the model has room to memorize new DAgger data without changing its behavior on typical states, but the memorization pushes it into pathological corners of logit space elsewhere. Practical rule: watch rollout CE and early-stop when it stops falling.
+
 ## Layout
 
 | File | Purpose |
@@ -64,7 +83,7 @@ The story arc, condensed:
 | `nibbles_env.py` | `NibblesEnv` (single env, RGB framebuffer, score/lives in info dict) and `NibblesVecEnv` (in-proc for `num_envs=1`, subprocess workers for >1). Same API shape as `digger_env.py`. |
 | `tools/heuristic_agent.py` | BFS-to-number teacher with self / wall avoidance. The teacher policy for BC pretrain + DAGGER. |
 | `tools/play_human.py` | ncurses front-end — play the sim with arrow keys (Unicode half-blocks render the 50-row arena into 25 terminal rows). |
-| `train_bc.py` | First-iteration pixel BC trainer. Warmup with BFS-teacher labels → optional DAGGER iterations → stochastic eval. NatureCNN trunk, shared actor/critic heads (PPO not yet ported). |
+| `train_bc.py` | BC trainer with DAGGER, three-metric diagnostic (train / holdout / rollout CE + length-at-death), `--resume-from` for continued DAgger, `--dist-feature` for the 6-channel obs. NatureCNN or micro-CNN trunk. |
 | `train_ppo.py` | PPO trainer with BC-init (`--load-bc`), dist-feature channel wiring, truncation-aware GAE (V(terminal_obs) bootstrap), and `--reward-eat/die/step` for specialist shaping. |
 | `tools/soup_checkpoints.py` | Merge N `Agent` checkpoints into one. Uniform / weighted soup, or Ilharco task arithmetic against a `--base`. Output loads through `--load-bc` and `tools/play_agent.py`. |
 | `interaction-log.txt` | Full chronological log of every prompt; the journey. |

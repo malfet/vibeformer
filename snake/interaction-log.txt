@@ -82,3 +82,14 @@ Yes, let's kick the run
 Sure
 Have they finished by now?
 Please commit changes (may be breaj them down into a few individual commits and update README
+What would be the strategy to push it even further? Or like why can't it even learn after teach (or can it?)
+Can you re-read README, may be it was discussed before, but let's just train a model that follows teacher, and figure out how many iterations is needed to properly teach what to do. Or may be try to trick the system by generating semi random inputs and ask teachers guidance on what to do?
+Let's just learn from the teacher and tune model size until it can reliably match the teacher. Two questions that I have: what metric one can use to understand the model size limitations vs training set limitations
+Engage
+So, what's the status?
+I guess it's probably finished. Please check results and propose ideas how it could be overcome. Feels like network should be able to learn shouldn't it?
+Let's do 1
+And 2 in parallel as well
+Any updates?
+Can you summarize your findings to README.md and tell me which checkpoint I should try to see the best effort so far
+Commit this
