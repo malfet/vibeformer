@@ -60,3 +60,5 @@ My goal with larger corpus was to understand fine-tuning a bit better, but also 
 I'm not curious about era only words, but in general, I suspect Balmont only corpus has say 50k words, while bigger corpus probably has 150k words or so, isn't it?
 Sure, but can you check if model learned from those new words? Or may be how you can better fine-tune to Balmont corpus, but still retain bigger expressivity?
 Go for it and commit pending changes
+Please update README.md with the summary
+how do you calculate bits/char?
