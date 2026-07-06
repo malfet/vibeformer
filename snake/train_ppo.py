@@ -45,7 +45,10 @@ def main() -> None:
     p.add_argument("--load-bc", type=str, default="",
                    help="path to a BC checkpoint to initialise the agent from")
     p.add_argument("--num-steps", type=int, default=128,
-                   help="policy steps per rollout (= per update)")
+                   help="policy steps per rollout (= per update), per env")
+    p.add_argument("--num-envs", type=int, default=8,
+                   help="parallel in-proc envs. Batch per update is "
+                        "num_steps * num_envs (default 128*8 = 1024).")
     p.add_argument("--lr", type=float, default=2.5e-4)
     p.add_argument("--anneal-lr", action="store_true", default=True)
     p.add_argument("--no-anneal-lr", dest="anneal_lr", action="store_false")
@@ -80,6 +83,17 @@ def main() -> None:
                         "channel (matches train_bc's --dist-feature). Hands "
                         "the teacher's intermediate computation to PPO so it "
                         "doesn't have to derive long-horizon credit on its own.")
+    p.add_argument("--extra-features", action="store_true",
+                   help="Use the 11-channel obs (one-hot + distance + "
+                        "body-age + heading planes; matches train_bc's "
+                        "--extra-features). Supersedes --dist-feature.")
+    p.add_argument("--teacher", choices=["bfs", "safe"], default="bfs",
+                   help="which scripted teacher labels the BC anchor: "
+                        "`bfs` = greedy shortest-path (mean ~27 @ 500 "
+                        "steps), `safe` = tail-safe (mean ~39, never dies).")
+    p.add_argument("--save-best", action="store_true",
+                   help="at every eval, also run a greedy eval and save the "
+                        "best-so-far checkpoint to ppo_tiny_best.pt.")
     p.add_argument("--env-max-steps", type=int, default=500)
     p.add_argument("--reward-eat", type=float, default=1.0,
                    help="Reward per food eaten. Scaling up (e.g. 10) gives a "
@@ -121,9 +135,21 @@ def main() -> None:
                       reward_die=args.reward_die,
                       reward_step=args.reward_step)
     vec = tiny_snake.TinySnakeVecEnv(
-        env_kwargs=env_kwargs, add_distance=args.dist_feature)
+        env_kwargs=env_kwargs, add_distance=args.dist_feature,
+        full_features=args.extra_features, num_envs=args.num_envs)
+    # Separate single-env for eval so eval never disturbs rollout state.
+    # Shaped rewards don't matter here — eval reads info["score"].
+    eval_vec = tiny_snake.TinySnakeVecEnv(
+        env_kwargs=dict(env_kwargs, rng_seed=args.seed + 777),
+        add_distance=args.dist_feature,
+        full_features=args.extra_features, num_envs=1)
     obs_grid = tiny_snake.TinySnakeVecEnv.OBS_SHAPE  # (12, 12)
-    if args.dist_feature:
+    if args.extra_features:
+        in_ch = tiny_snake.FULL_OBS_CHANNELS
+        obs_buf_shape = (in_ch, *obs_grid)
+        obs_buf_dtype = np.float32
+        to_obs_fn = _to_obs_dist
+    elif args.dist_feature:
         in_ch = tiny_snake.SYM_NUM_TYPES + 1
         obs_buf_shape = (in_ch, *obs_grid)
         obs_buf_dtype = np.float32
@@ -135,6 +161,9 @@ def main() -> None:
         to_obs_fn = _to_obs_symbolic
     obs_shape = obs_grid
     num_actions = tiny_snake.NUM_ACTIONS
+    heuristic_fn = (tiny_snake.safe_heuristic_action
+                    if args.teacher == "safe"
+                    else tiny_snake.heuristic_action)
 
     agent = Agent(num_actions, in_channels=in_ch,
                   obs_size=obs_shape,
@@ -150,34 +179,35 @@ def main() -> None:
         print(f"{tag}loaded BC ckpt: {args.load_bc}", flush=True)
     optim = Adam(agent.parameters(), lr=args.lr, eps=1e-5)
 
-    # Rollout storage (num_envs=1, N policy steps per update).
+    # Rollout storage: (N policy steps, E envs) per update.
     N = args.num_steps
-    # Symbolic mode: uint8 cell-type codes (one-hot at boundary). Dist mode:
-    # already-stacked float32 (6, H, W) tensors.
-    obs_buf_np = np.zeros((N, *obs_buf_shape), dtype=obs_buf_dtype)
-    act_buf = torch.zeros(N, dtype=torch.long, device=device)
-    logp_buf = torch.zeros(N, device=device)
-    rew_buf = torch.zeros(N, device=device)
-    done_buf = torch.zeros(N, device=device)
+    E = args.num_envs
+    # Symbolic mode: uint8 cell-type codes (one-hot at boundary). Dist/full
+    # modes: already-stacked float32 (C, H, W) tensors.
+    obs_buf_np = np.zeros((N, E, *obs_buf_shape), dtype=obs_buf_dtype)
+    act_buf = torch.zeros(N, E, dtype=torch.long, device=device)
+    logp_buf = torch.zeros(N, E, device=device)
+    rew_buf = torch.zeros(N, E, device=device)
+    done_buf = torch.zeros(N, E, device=device)
     # truncated_buf[t] = 1 iff step t-1 finished by --env-max-steps rather than
     # death — used to bootstrap V(terminal) instead of zeroing it.
-    truncated_buf = torch.zeros(N, device=device)
-    val_buf = torch.zeros(N, device=device)
-    teacher_buf = torch.full((N,), -1, dtype=torch.long, device=device)
+    truncated_buf = torch.zeros(N, E, device=device)
+    val_buf = torch.zeros(N, E, device=device)
+    teacher_buf = torch.full((N, E), -1, dtype=torch.long, device=device)
 
     use_anchor = args.bc_anchor_coef > 0 or (
         args.bc_anchor_final is not None and args.bc_anchor_final > 0)
 
     obs_np = vec.reset()
     obs_t = to_obs_fn(obs_np, device)
-    done_t = torch.zeros(1, device=device)
-    truncated_t = torch.zeros(1, device=device)
-    last_terminal_obs: np.ndarray | None = None  # set when last step truncated
+    done_t = torch.zeros(E, device=device)
+    truncated_t = torch.zeros(E, device=device)
 
     global_step = 0
     update = 0
+    best_eval = -float("inf")
     ep_returns: list[float] = []
-    ep_return_running = 0.0
+    ep_return_running = np.zeros(E, dtype=np.float64)
     t0 = time.monotonic()
 
     while global_step < args.total_timesteps:
@@ -197,75 +227,71 @@ def main() -> None:
             current_anchor = args.bc_anchor_coef
 
         # ---- rollout --------------------------------------------------------
-        # Map step index -> terminal obs whenever that step truncated. Used
+        # Map (step, env) -> terminal obs whenever that step truncated. Used
         # after the rollout to compute V(terminal_obs) for bootstrap.
-        trunc_terminal_obs: dict[int, np.ndarray] = {}
+        trunc_terminal_obs: dict[tuple[int, int], np.ndarray] = {}
         for step in range(N):
-            obs_buf_np[step] = obs_np[0]
-            done_buf[step] = done_t.squeeze()
-            truncated_buf[step] = truncated_t.squeeze()
+            obs_buf_np[step] = obs_np
+            done_buf[step] = done_t
+            truncated_buf[step] = truncated_t
             if use_anchor:
-                teacher_buf[step] = tiny_snake.heuristic_action(
-                    vec._env._game)
+                for e, game in enumerate(vec.games):
+                    teacher_buf[step, e] = heuristic_fn(game)
             with torch.no_grad():
                 action, logp, _, value = agent.act(obs_t)
-            act_buf[step] = action.squeeze()
-            logp_buf[step] = logp.squeeze()
-            val_buf[step] = value.squeeze()
+            act_buf[step] = action
+            logp_buf[step] = logp
+            val_buf[step] = value
             obs_np, rewards, dones, infos = vec.step(action.cpu().numpy())
-            global_step += 1
-            rew_buf[step] = float(rewards[0])
-            ep_return_running += float(rewards[0])
-            is_trunc = bool(dones[0]) and bool(infos[0].get("truncated", False))
-            if dones[0]:
-                ep_returns.append(ep_return_running)
-                ep_return_running = 0.0
-            if is_trunc:
-                trunc_terminal_obs[step] = infos[0]["terminal_obs"]
-                last_terminal_obs = infos[0]["terminal_obs"]
-            done_t = torch.tensor([float(dones[0])], device=device)
-            truncated_t = torch.tensor([float(is_trunc)], device=device)
+            global_step += E
+            rew_buf[step] = torch.from_numpy(rewards).to(device)
+            trunc_flags = np.zeros(E, dtype=np.float32)
+            for e in range(E):
+                ep_return_running[e] += float(rewards[e])
+                if dones[e]:
+                    ep_returns.append(float(ep_return_running[e]))
+                    ep_return_running[e] = 0.0
+                    if infos[e].get("truncated", False):
+                        trunc_flags[e] = 1.0
+                        trunc_terminal_obs[(step, e)] = infos[e]["terminal_obs"]
+            done_t = torch.from_numpy(dones.astype(np.float32)).to(device)
+            truncated_t = torch.from_numpy(trunc_flags).to(device)
             obs_t = to_obs_fn(obs_np, device)
 
         # ---- GAE ------------------------------------------------------------
         with torch.no_grad():
-            # Precompute V(terminal_obs) for every truncated step in this
-            # rollout, batched for one forward pass.
-            trunc_v_buf = torch.zeros(N, device=device)
+            # Precompute V(terminal_obs) for every truncated (step, env) in
+            # this rollout, batched for one forward pass.
+            trunc_v_buf = torch.zeros(N, E, device=device)
             if trunc_terminal_obs:
                 keys = sorted(trunc_terminal_obs.keys())
                 obs_batch = np.stack([trunc_terminal_obs[k] for k in keys])
                 _, _, _, vs = agent.act(to_obs_fn(obs_batch, device))
-                for k, v in zip(keys, vs):
-                    trunc_v_buf[k] = v
+                for (t_k, e_k), v in zip(keys, vs):
+                    trunc_v_buf[t_k, e_k] = v
 
-            # Bootstrap value at end of rollout: if the last step truncated,
-            # V(terminal_obs) is the right estimate; otherwise V(next obs) (which
-            # is either mid-episode or a fresh reset, both fine since the death
-            # mask zeros the reset case).
-            if bool(truncated_t.squeeze().item() > 0.5) \
-                    and last_terminal_obs is not None:
-                _, _, _, next_value = agent.act(
-                    to_obs_fn(last_terminal_obs[None], device))
-            else:
-                _, _, _, next_value = agent.act(obs_t)
+            # Bootstrap value at end of rollout: for envs whose last step
+            # truncated, V(terminal_obs) is the right estimate; otherwise
+            # V(next obs) (either mid-episode or a fresh reset, both fine
+            # since the death mask zeros the reset case).
+            _, _, _, next_value = agent.act(obs_t)
+            next_value = torch.where(truncated_t > 0.5,
+                                     trunc_v_buf[N - 1], next_value)
 
             advantages = torch.zeros_like(rew_buf)
-            lastgae = torch.zeros(1, device=device)
+            lastgae = torch.zeros(E, device=device)
             for t in reversed(range(N)):
                 if t == N - 1:
-                    d_next = done_t.squeeze()
-                    tr_next = truncated_t.squeeze()
-                    v_next = next_value.squeeze()
+                    d_next = done_t
+                    tr_next = truncated_t
+                    v_next = next_value
                 else:
                     d_next = done_buf[t + 1]
                     tr_next = truncated_buf[t + 1]
-                    # If step t was truncated, override bootstrap source with
+                    # If step t truncated, override bootstrap source with
                     # V(terminal_obs) rather than V(reset obs).
-                    if tr_next.item() > 0.5:
-                        v_next = trunc_v_buf[t]
-                    else:
-                        v_next = val_buf[t + 1]
+                    v_next = torch.where(tr_next > 0.5,
+                                         trunc_v_buf[t], val_buf[t + 1])
                 # bootstrap_mask is 0 only on real death (done & not truncated);
                 # truncation keeps the bootstrap so long horizons aren't punished.
                 real_term = d_next * (1.0 - tr_next)
@@ -277,15 +303,15 @@ def main() -> None:
             returns = advantages + val_buf
 
         # ---- PPO update over flattened batch -------------------------------
-        flat_obs_t = to_obs_fn(obs_buf_np, device)  # (N, C, H, W)
-        flat_act = act_buf
-        flat_logp = logp_buf
-        flat_val = val_buf
-        flat_adv = advantages
-        flat_ret = returns
-        flat_teacher = teacher_buf
+        flat_obs_t = to_obs_fn(
+            obs_buf_np.reshape(N * E, *obs_buf_shape), device)
+        flat_act = act_buf.reshape(-1)
+        flat_logp = logp_buf.reshape(-1)
+        flat_adv = advantages.reshape(-1)
+        flat_ret = returns.reshape(-1)
+        flat_teacher = teacher_buf.reshape(-1)
 
-        total = N
+        total = N * E
         b_inds = np.arange(total)
         mb_size = max(1, total // args.num_minibatches)
         approx_kls = []
@@ -358,16 +384,35 @@ def main() -> None:
                   flush=True)
 
         if update % args.eval_every == 0:
-            scores = evaluate(agent, vec, args.eval_eps, device,
+            scores = evaluate(agent, eval_vec, args.eval_eps, device,
                               to_obs_fn, greedy=False, tag=tag)
             arr = np.array(scores, dtype=np.int32)
             print(f"{tag}EVAL @ upd {update}: mean {arr.mean():.1f}  "
                   f"max {arr.max()}  min {arr.min()}  "
                   f"median {int(np.median(arr))}", flush=True)
+            if args.save_best:
+                g_scores = evaluate(agent, eval_vec, args.eval_eps, device,
+                                    to_obs_fn, greedy=True,
+                                    tag=tag + "greedy-")
+                g_mean = float(np.mean(g_scores))
+                print(f"{tag}GREEDY EVAL @ upd {update}: mean {g_mean:.1f}",
+                      flush=True)
+                if g_mean > best_eval:
+                    best_eval = g_mean
+                    best_out = ckpt_dir / "ppo_tiny_best.pt"
+                    torch.save({
+                        "agent": agent.state_dict(),
+                        "config": vars(args),
+                        "eval_scores": g_scores,
+                        "update": update,
+                        "global_step": global_step,
+                    }, best_out)
+                    print(f"{tag}new best {g_mean:.1f} -> {best_out}",
+                          flush=True)
 
     # ---- final eval + save -------------------------------------------------
     print(f"{tag}final eval ({args.eval_eps} episodes)", flush=True)
-    scores = evaluate(agent, vec, args.eval_eps, device,
+    scores = evaluate(agent, eval_vec, args.eval_eps, device,
                       to_obs_fn, greedy=False, tag=tag)
     arr = np.array(scores, dtype=np.int32)
     print(f"{tag}FINAL: mean {arr.mean():.1f}  "
