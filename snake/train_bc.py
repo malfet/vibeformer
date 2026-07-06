@@ -196,9 +196,15 @@ def _to_obs_dist(obs_np: np.ndarray, device: torch.device) -> torch.Tensor:
 def collect_with_teacher(vec, K: int,
                          obs_shape: tuple, heuristic_fn,
                          num_actions: int,
-                         tag: str = "") -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Teacher drives; record (obs, action, reward, done) per step."""
-    obs_store = np.zeros((K, *obs_shape), dtype=np.uint8)
+                         tag: str = "",
+                         obs_dtype=np.uint8) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Teacher drives; record (obs, action, reward, done) per step.
+
+    `obs_dtype` must match what the env emits: uint8 for the bare symbolic
+    grid, float32 for the dist / full-feature modes (a uint8 store would
+    silently truncate the float channels to {0, 1}).
+    """
+    obs_store = np.zeros((K, *obs_shape), dtype=obs_dtype)
     act_store = np.zeros((K,), dtype=np.int64)
     rew_store = np.zeros((K,), dtype=np.float32)
     done_store = np.zeros((K,), dtype=bool)
@@ -223,14 +229,15 @@ def collect_with_teacher(vec, K: int,
 def collect_with_student(agent: Agent, vec,
                          device: torch.device, K: int,
                          obs_shape: tuple, to_obs_fn, heuristic_fn,
-                         tag: str = ""
+                         tag: str = "",
+                         obs_dtype=np.uint8
                          ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Student drives; teacher labels every state. DAGGER's covariate-shift fix.
 
     Records the *student's* reward + done stream alongside the teacher's
     labels — needed for MC credit weighting on student-visited rollouts.
     """
-    obs_store = np.zeros((K, *obs_shape), dtype=np.uint8)
+    obs_store = np.zeros((K, *obs_shape), dtype=obs_dtype)
     act_store = np.zeros((K,), dtype=np.int64)
     rew_store = np.zeros((K,), dtype=np.float32)
     done_store = np.zeros((K,), dtype=bool)
@@ -523,6 +530,18 @@ def main() -> None:
                    help="Augment tiny-snake obs with a BFS-distance-to-food "
                         "channel. Hands the teacher's intermediate "
                         "computation directly to the encoder.")
+    p.add_argument("--extra-features", action="store_true",
+                   help="Tiny-snake only: use the 11-channel obs (one-hot + "
+                        "distance + body-age + heading planes). Supersedes "
+                        "--dist-feature. Fixes the relative-action "
+                        "observability gap: heading and which-cell-vacates-"
+                        "next are otherwise not inferable from the grid.")
+    p.add_argument("--teacher", choices=["bfs", "safe"], default="bfs",
+                   help="Tiny-snake only: `bfs` = greedy shortest-path "
+                        "teacher (mean ~27 @ 500 steps). `safe` = tail-safe "
+                        "teacher that only eats when the post-eat snake can "
+                        "still reach its tail (mean ~39 @ 500 steps, never "
+                        "dies).")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--force-cpu", action="store_true")
     p.add_argument("--run-name", type=str, default="")
@@ -570,23 +589,33 @@ def main() -> None:
     print(f"{tag}args={vars(args)}", flush=True)
 
     env_kwargs = dict(max_steps=args.env_max_steps, rng_seed=args.seed)
+    obs_dtype = np.uint8
     if args.env_kind == "tiny":
         if args.obs_mode != "symbolic":
             print(f"{tag}NOTE: --env-kind tiny forces --obs-mode symbolic",
                   flush=True)
         vec = tiny_snake.TinySnakeVecEnv(
-            env_kwargs=env_kwargs, add_distance=args.dist_feature)
+            env_kwargs=env_kwargs, add_distance=args.dist_feature,
+            full_features=args.extra_features)
         obs_shape_grid = tiny_snake.TinySnakeVecEnv.OBS_SHAPE
-        if args.dist_feature:
+        if args.extra_features:
+            in_ch = tiny_snake.FULL_OBS_CHANNELS
+            obs_shape = (in_ch, *obs_shape_grid)
+            to_obs_fn = _to_obs_dist
+            obs_dtype = np.float32
+        elif args.dist_feature:
             in_ch = tiny_snake.SYM_NUM_TYPES + 1  # 5 one-hot + 1 distance
             obs_shape = (in_ch, *obs_shape_grid)
             to_obs_fn = _to_obs_dist
+            obs_dtype = np.float32
         else:
             in_ch = tiny_snake.SYM_NUM_TYPES
             obs_shape = obs_shape_grid
             to_obs_fn = _to_obs_symbolic
         agent_obs_size = obs_shape_grid
-        heuristic_fn = tiny_snake.heuristic_action
+        heuristic_fn = (tiny_snake.safe_heuristic_action
+                        if args.teacher == "safe"
+                        else tiny_snake.heuristic_action)
         num_actions = tiny_snake.NUM_ACTIONS
     elif args.obs_mode == "symbolic":
         vec = SymbolicVecEnv(env_kwargs=env_kwargs)
@@ -657,7 +686,8 @@ def main() -> None:
     print(f"{tag}warmup: teacher-driven collect of {args.warmup_steps}",
           flush=True)
     obs_store, act_store, rew_store, done_store = collect_with_teacher(
-        vec, args.warmup_steps, obs_shape, heuristic_fn, num_actions, tag=tag)
+        vec, args.warmup_steps, obs_shape, heuristic_fn, num_actions, tag=tag,
+        obs_dtype=obs_dtype)
 
     # Reserve a slice of the initial teacher buffer as held-out. Take from
     # the tail (later rollouts) so the earliest states — likely the least
@@ -692,7 +722,7 @@ def main() -> None:
               f"student-collect of {K}", flush=True)
         new_obs, new_act, new_rew, new_done = collect_with_student(
             agent, vec, device, K, obs_shape, to_obs_fn, heuristic_fn,
-            tag=tag)
+            tag=tag, obs_dtype=obs_dtype)
         obs_store = np.concatenate([obs_store, new_obs], axis=0)
         act_store = np.concatenate([act_store, new_act], axis=0)
         rew_store = np.concatenate([rew_store, new_rew], axis=0)
