@@ -47,7 +47,10 @@ digger-rl. Until then, the Python sim lets us iterate fast.
 | Tiny-snake + survivor specialist on w10 (ppo06_w10_survivor) | 16.2 | reward_step +0.005, reward_die -5. Head-to-head 16.16 / 18.08. |
 | Tiny-snake + efficient specialist on w10 (ppo06_w10_efficient) | 16.8 | reward_step -0.02. Head-to-head 16.84 / 17.48. Training-time peak 33 apples. |
 | **Tiny-snake + w10 task-arithmetic soup (soup_w10_taskarith)** | 18.7 | Ilharco arithmetic with ppo05_w10 as base, α=0.5 per specialist. 50 eps stoch 18.70, greedy 18.92. |
-| **Tiny-snake + w10 uniform soup (soup_w10_uniform)** ⭐ | **19.8** | Uniform average of the three w10 specialists. **Best result to date: 50 eps mean 19.80 stoch / 19.84 greedy, median 20, max 33. 73% of the BFS teacher's 27.22 ceiling, and 2.15× soup_taskarith.** Same recipe as soup_uniform above but on the 4.78M base — the entire delta from 8.9 → 19.8 comes from a bigger BC teacher clone at the front of the pipeline. |
+| **Tiny-snake + w10 uniform soup (soup_w10_uniform)** | **19.8** | Uniform average of the three w10 specialists. 50 eps mean 19.80 stoch / 19.84 greedy, median 20, max 33. 73% of the BFS teacher's 27.22 ceiling, and 2.15× soup_taskarith. Same recipe as soup_uniform above but on the 4.78M base — the entire delta from 8.9 → 19.8 comes from a bigger BC teacher clone at the front of the pipeline. |
+| **Tail-safe teacher (scripted)** | **39.3** | `safe_heuristic_action`: take the BFS path to food only if the post-eat snake can still reach its own tail (simulated with real body dynamics); otherwise chase the tail. 50 eps @ 500-step cap: mean 39.30, **zero deaths** — every episode truncates. At a 5000-step cap: mean 54.7, max 95 (board-full is ~97). Purely truncation-limited. `python tiny_snake.py --teacher safe`. |
+| Safe-teacher BC + 11-ch obs (bc_safe01) | 22 | 4.78M net, 300k warmup + 3 DAgger × 100k, `--teacher safe --extra-features` (one-hot + dist + **body-age** + **heading planes**; also fixes the uint8 store that quantized the float dist channel in every earlier dist-BC run). Warmup agree 95%, rollout CE 0.44 → 0.32 → 0.68 → 0.52. Greedy 50-ep fresh-seed eval mean 22, median 22, max 36. |
+| **PPO on bc_safe01, 16 envs (ppo_safe01)** ⭐ | **30.0** | 2M steps, `--num-envs 16` (2048 samples/update), γ=0.997, safe-teacher anchor 0.3→0.05, ent 0.02→0.005, `--save-best`. Best checkpoint @ upd 850. 50-ep greedy eval mean 30.0, median 31, max 43 (fresh seed: 30 / 31 / 41). **First student above the BFS teacher: 30.0 vs 27.24 (+10%)** — the original goal. 77% of the safe teacher's 39.3. |
 
 ## Findings so far
 
@@ -75,6 +78,31 @@ The story arc, condensed:
 
 11. **DAgger can overtrain past a saturation point.** Running two more DAgger iters (8 epochs × 100k student samples each) on top of the already-strong bc_scan_w10 pushed rollout CE *up* from 1.5 → 17.3 and eval score from 10 → 5. train_ce stayed at 0.001 (perfect fit); holdout_ce crept 0.002 → 0.036. The failure mode is confidently-wrong outputs on rare states — the model has room to memorize new DAgger data without changing its behavior on typical states, but the memorization pushes it into pathological corners of logit space elsewhere. Practical rule: watch rollout CE and early-stop when it stops falling.
 
+12. **Beating the teacher took a better teacher, an observability fix, and
+    10× the PPO budget — together.** (a) The tail-safe teacher
+    (`safe_heuristic_action`) lifts the scripted ceiling from 27.2 to 39.3
+    @ 500 steps by gating every eat behind a simulate-the-path-then-check-
+    tail-reachability test; it *never dies*. (b) `--extra-features` adds a
+    body-age channel (which cells vacate soon — the key fact for late-game
+    routing) and 4 heading planes; with **relative** actions the heading was
+    otherwise ambiguous whenever the body coiled next to the head. The same
+    change fixed a silent bug: BC collect buffers were uint8, so the float
+    potential-field channel had been quantized to {0,1} in every earlier
+    dist-BC run (train saw quantized, eval saw real). (c) `train_ppo.py`
+    vectorized (`--num-envs 16`), γ=0.997 for the longer food-to-food
+    horizons, `--save-best` greedy checkpointing, 2M steps. Result:
+    BC-clone of the safe teacher evals 22; PPO on top reaches **30.0**
+    fresh-seed greedy — past the BFS teacher (27.24) that every earlier
+    pipeline (best 19.8) had been chasing.
+
+13. **`--eval-only` with the collection seed replays training episodes.**
+    The bc_safe01 checkpoint evals 36 with seed 1 (the same game-seed
+    stream its training data was collected from) but 22 with seed 9999: a
+    96%-agreement clone effectively re-runs memorized episodes. The PPO
+    checkpoint was immune (30 on both seeds) — its rollouts had long
+    diverged from the seed stream. Rule: eval seeds must be disjoint from
+    collection seeds.
+
 ## Layout
 
 | File | Purpose |
@@ -83,8 +111,9 @@ The story arc, condensed:
 | `nibbles_env.py` | `NibblesEnv` (single env, RGB framebuffer, score/lives in info dict) and `NibblesVecEnv` (in-proc for `num_envs=1`, subprocess workers for >1). Same API shape as `digger_env.py`. |
 | `tools/heuristic_agent.py` | BFS-to-number teacher with self / wall avoidance. The teacher policy for BC pretrain + DAGGER. |
 | `tools/play_human.py` | ncurses front-end — play the sim with arrow keys (Unicode half-blocks render the 50-row arena into 25 terminal rows). |
-| `train_bc.py` | BC trainer with DAGGER, three-metric diagnostic (train / holdout / rollout CE + length-at-death), `--resume-from` for continued DAgger, `--dist-feature` for the 6-channel obs. NatureCNN or micro-CNN trunk. |
-| `train_ppo.py` | PPO trainer with BC-init (`--load-bc`), dist-feature channel wiring, truncation-aware GAE (V(terminal_obs) bootstrap), and `--reward-eat/die/step` for specialist shaping. |
+| `tiny_snake.py` | 12×12 textbook snake with 3-action relative space. BFS teacher (`heuristic_action`), tail-safe teacher (`safe_heuristic_action`), obs extractors (bare symbolic / 6-ch dist / 11-ch full with body-age + heading), in-proc `TinySnakeVecEnv` with `num_envs`, teacher benchmark CLI (`python tiny_snake.py --teacher safe`). |
+| `train_bc.py` | BC trainer with DAGGER, three-metric diagnostic (train / holdout / rollout CE + length-at-death), `--resume-from` for continued DAgger, `--dist-feature` / `--extra-features` obs modes, `--teacher bfs|safe`. NatureCNN or micro-CNN trunk. |
+| `train_ppo.py` | PPO trainer with BC-init (`--load-bc`), vectorized rollouts (`--num-envs`), truncation-aware GAE (V(terminal_obs) bootstrap), `--extra-features` / `--teacher` matching train_bc, `--save-best` greedy checkpointing, and `--reward-eat/die/step` for specialist shaping. |
 | `tools/soup_checkpoints.py` | Merge N `Agent` checkpoints into one. Uniform / weighted soup, or Ilharco task arithmetic against a `--base`. Output loads through `--load-bc` and `tools/play_agent.py`. |
 | `interaction-log.txt` | Full chronological log of every prompt; the journey. |
 | `nibbles/` | (gitignored) QBASIC.EXE + NIBBLES.BAS for the eventual DOSBox-hosted env. |
@@ -121,12 +150,15 @@ python train_bc.py --warmup-steps 15000 --warmup-epochs 5 \
 
 ## Open paths
 
-1. **BFS heuristic teacher** — first deliverable; the upper bound for
-   per-level score that BC will imitate.
-2. **Pixel PPO + BC pretrain** — port `train_ppo.py` from digger-rl with
-   the env swapped.
-3. **Symbolic obs ablation** — digger-rl saw 3x gains symbolic-vs-pixel;
-   worth knowing the ceiling for Nibbles too.
+1. **Specialists + soup on ppo_safe01** — replay the reward-shaped
+   specialists → uniform-soup round (the recipe that added +2 last time)
+   on the new 30.0 base; chase the safe teacher's 39.3.
+2. **Expert iteration** — once the student outscores its teacher, use the
+   student itself (optionally with shallow value-guided lookahead) as the
+   DAgger labeler and turn the crank again.
+3. **Back-port the tiny-snake recipe to full Nibbles** — safe teacher,
+   extra-feature channels, and scaled PPO onto the 50×80 arena where runs
+   01-04 stalled.
 4. **Swap to DOSBox-hosted real nibbles.bas** — once the recipe works on
    the Python sim, reuse `_libretro.cpython-312-darwin.so` from
    digger-rl, point at `nibbles/QBASIC.EXE /RUN NIBBLES.BAS`.

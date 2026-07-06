@@ -93,3 +93,6 @@ And 2 in parallel as well
 Any updates?
 Can you summarize your findings to README.md and tell me which checkpoint I should try to see the best effort so far
 Commit this
+[2026-07-04] Look at README and current codebase and suggest strategies to actually train the network that can beat the teacher
+[2026-07-04] Sure, let's do 1 and 2, and in parallel can you may be do 4? (1=heading/body-age obs channels, 2=scaled multi-env PPO, 4=tail-safe teacher)
+[2026-07-06] Please updated readme (if you have not done so) and commit changes, perhaps as several independent commits
