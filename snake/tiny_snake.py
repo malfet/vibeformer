@@ -193,43 +193,62 @@ class TinySnake:
 
 # -- heuristic teacher (BFS in absolute coords, relabeled to relative) -------
 
-def _bfs_next_absolute(snake: TinySnake) -> Optional[int]:
-    """BFS from head to food, avoiding walls / body. Return absolute next-step
-    direction (UP/DOWN/LEFT/RIGHT), or None if unreachable.
-    """
-    start = snake.head
-    goal = snake.food
+_WALLS = frozenset(
+    [(0, c) for c in range(GRID_COLS)]
+    + [(GRID_ROWS - 1, c) for c in range(GRID_COLS)]
+    + [(r, 0) for r in range(GRID_ROWS)]
+    + [(r, GRID_COLS - 1) for r in range(GRID_ROWS)])
+
+
+def _bfs_path(start: tuple[int, int], goal: tuple[int, int],
+              blocked: set) -> Optional[list[tuple[int, int]]]:
+    """Shortest path from start to goal avoiding `blocked`. Returns the list
+    of cells [first_step, ..., goal] (start excluded), or None."""
     if start == goal:
         return None
-    # Forbidden cells: walls + body (excluding tail, which moves out).
-    body_list = list(snake.body)
-    blocked = set([(0, c) for c in range(GRID_COLS)]
-                  + [(GRID_ROWS - 1, c) for c in range(GRID_COLS)]
-                  + [(r, 0) for r in range(GRID_ROWS)]
-                  + [(r, GRID_COLS - 1) for r in range(GRID_ROWS)])
-    blocked.update(body_list[1:])  # head's spot will be vacated, tail vacates
-    # Parent pointers for path reconstruction.
     from collections import deque as _dq
-    seen = {start: None}
+    seen: dict[tuple[int, int], Optional[tuple[int, int]]] = {start: None}
     q = _dq([start])
     while q:
         cur = q.popleft()
         if cur == goal:
             break
         cr, cc = cur
-        for d, (dr, dc) in _DELTA.items():
+        for dr, dc in _DELTA.values():
             nxt = (cr + dr, cc + dc)
             if nxt in seen or nxt in blocked:
                 continue
-            seen[nxt] = (cur, d)
+            seen[nxt] = cur
             q.append(nxt)
     if goal not in seen:
         return None
-    # Trace back to find the first move's direction.
-    cur = goal
-    while seen[cur] is not None and seen[cur][0] != start:
-        cur = seen[cur][0]
-    return seen[cur][1]
+    path = [goal]
+    while seen[path[-1]] != start:
+        path.append(seen[path[-1]])
+    path.reverse()
+    return path
+
+
+def _dir_of(a: tuple[int, int], b: tuple[int, int]) -> int:
+    """Absolute direction of the single-cell move a -> b."""
+    dr, dc = b[0] - a[0], b[1] - a[1]
+    for d, delta in _DELTA.items():
+        if delta == (dr, dc):
+            return d
+    raise ValueError(f"cells not adjacent: {a} -> {b}")
+
+
+def _bfs_next_absolute(snake: TinySnake) -> Optional[int]:
+    """BFS from head to food, avoiding walls / body. Return absolute next-step
+    direction (UP/DOWN/LEFT/RIGHT), or None if unreachable.
+    """
+    body_list = list(snake.body)
+    blocked = set(_WALLS)
+    blocked.update(body_list[1:])  # head's spot will be vacated, tail vacates
+    path = _bfs_path(snake.head, snake.food, blocked)
+    if path is None:
+        return None
+    return _dir_of(snake.head, path[0])
 
 
 def _abs_to_relative(snake_dir: int, next_dir: int) -> int:
@@ -245,23 +264,10 @@ def _abs_to_relative(snake_dir: int, next_dir: int) -> int:
     return STRAIGHT
 
 
-def heuristic_action(snake: TinySnake) -> int:
-    """BFS-driven teacher in the 3-action relative space.
-
-    Falls back to "the safest of the three available moves" (max flood-fill
-    from the resulting head cell) when BFS finds no path to the food, e.g.
-    when the snake's body completely cordons it off.
-    """
-    nxt = _bfs_next_absolute(snake)
-    if nxt is not None:
-        return _abs_to_relative(snake.direction, nxt)
-    # No path — pick the relative action whose flood-fill reach is largest.
-    body_set = set(snake.body)
-    walls = set([(0, c) for c in range(GRID_COLS)]
-                + [(GRID_ROWS - 1, c) for c in range(GRID_COLS)]
-                + [(r, 0) for r in range(GRID_ROWS)]
-                + [(r, GRID_COLS - 1) for r in range(GRID_ROWS)])
-    blocked = walls | body_set
+def _floodfill_fallback(snake: TinySnake) -> int:
+    """Pick the relative action whose flood-fill reach from the resulting
+    head cell is largest. Last-resort move when no BFS path exists."""
+    blocked = _WALLS | set(snake.body)
     best_a, best_size = STRAIGHT, -1
     for a, abs_dir in (
             (STRAIGHT, snake.direction),
@@ -288,6 +294,83 @@ def heuristic_action(snake: TinySnake) -> int:
             best_size = size
             best_a = a
     return best_a
+
+
+def heuristic_action(snake: TinySnake) -> int:
+    """BFS-driven teacher in the 3-action relative space.
+
+    Falls back to "the safest of the three available moves" (max flood-fill
+    from the resulting head cell) when BFS finds no path to the food, e.g.
+    when the snake's body completely cordons it off.
+    """
+    nxt = _bfs_next_absolute(snake)
+    if nxt is not None:
+        return _abs_to_relative(snake.direction, nxt)
+    return _floodfill_fallback(snake)
+
+
+# -- tail-safe teacher --------------------------------------------------------
+
+def _simulate_path(body: list[tuple[int, int]], path: list[tuple[int, int]],
+                   food: tuple[int, int]
+                   ) -> Optional[deque]:
+    """Walk the snake along `path` with real body dynamics (tail vacates each
+    step; eating the food cell grows by one). Returns the resulting body
+    deque, or None if the path collides with the (moving) body."""
+    b = deque(body)
+    for cell in path:
+        grow = cell == food
+        occupied = set(b) if grow else set(list(b)[1:])
+        if cell in occupied:
+            return None
+        b.append(cell)
+        if not grow:
+            b.popleft()
+    return b
+
+
+def _tail_reachable(body: deque) -> bool:
+    """True if the head can reach the tail cell (which vacates next tick)."""
+    body_list = list(body)
+    head, tail = body_list[-1], body_list[0]
+    if head == tail:
+        return True
+    blocked = set(_WALLS)
+    blocked.update(body_list[1:-1])  # tail is the goal, head is the start
+    return _bfs_path(head, tail, blocked) is not None
+
+
+def safe_heuristic_action(snake: TinySnake) -> int:
+    """Tail-safe BFS teacher: take the shortest path to food only if, after
+    simulating the full path (including growth), the head can still reach
+    its own tail. Otherwise chase the tail — following your own vacating
+    tail is always survivable — and only then fall back to flood-fill.
+
+    This fixes the plain BFS teacher's dominant failure mode: greedy
+    shortest paths that box the snake in right after eating.
+    """
+    body = list(snake.body)
+    head, tail = body[-1], body[0]
+    blocked = set(_WALLS)
+    blocked.update(body[1:])  # tail vacates
+    path = _bfs_path(head, snake.food, blocked)
+    if path is not None:
+        virt = _simulate_path(body, path, snake.food)
+        if virt is not None and _tail_reachable(virt):
+            return _abs_to_relative(snake.direction, _dir_of(head, path[0]))
+    # Unsafe (or no path) to eat: chase the tail, preferring not to eat
+    # accidentally along the way.
+    chase_blocked = set(_WALLS)
+    chase_blocked.update(body[1:-1])
+    for avoid_food in (True, False):
+        b = set(chase_blocked)
+        if avoid_food:
+            b.add(snake.food)
+        tail_path = _bfs_path(head, tail, b)
+        if tail_path is not None:
+            return _abs_to_relative(snake.direction,
+                                    _dir_of(head, tail_path[0]))
+    return _floodfill_fallback(snake)
 
 
 # -- VecEnv wrapper (single env, mirrors SymbolicVecEnv API) ------------------
@@ -357,50 +440,109 @@ def extract_obs_with_dist(snake: TinySnake) -> np.ndarray:
     return np.concatenate([onehot, potential[None]], axis=0)
 
 
+# 5 one-hot + food potential + body-age + 4 heading planes.
+FULL_OBS_CHANNELS = SYM_NUM_TYPES + 1 + 1 + 4
+
+
+def extract_obs_full(snake: TinySnake) -> np.ndarray:
+    """Return an (11, GRID_ROWS, GRID_COLS) float32 obs:
+
+        channels 0-5:  same as `extract_obs_with_dist` (one-hot + potential)
+        channel 6:     body-age: for each body cell (tail..head), the value
+                       (index_from_tail + 1) / len(body). The tail (smallest
+                       value) vacates first; the head is 1.0. Elsewhere 0.
+        channels 7-10: constant planes, one-hot of the absolute heading
+                       (UP/DOWN/LEFT/RIGHT).
+
+    Motivation: actions are *relative*, but the bare grid neither encodes
+    the heading (ambiguous when the body coils next to the head) nor which
+    body cells vacate soon — the single most useful fact for late-game
+    routing. The teacher reads both straight off game state; this hands
+    them to the encoder.
+    """
+    base = extract_obs_with_dist(snake)
+    age = np.zeros((1, GRID_ROWS, GRID_COLS), dtype=np.float32)
+    L = len(snake.body)
+    for i, (r, c) in enumerate(snake.body):  # i = 0 at tail, L-1 at head
+        age[0, r, c] = (i + 1) / L
+    heading = np.zeros((4, GRID_ROWS, GRID_COLS), dtype=np.float32)
+    heading[snake.direction] = 1.0
+    return np.concatenate([base, age, heading], axis=0)
+
+
 class TinySnakeVecEnv:
-    """1-env wrapper. `add_distance` switches the obs from the bare 1-channel
-    int grid (5-class one-hot built at the model boundary) to the 6-channel
-    float tensor with the distance map already pre-computed.
+    """In-proc vectorized wrapper over `num_envs` TinySnake instances.
+
+    Obs modes: bare 1-channel int grid (default; 5-class one-hot built at
+    the model boundary), `add_distance` = 6-channel float with the distance
+    map pre-computed, `full_features` = 11-channel float (adds body-age +
+    heading planes; implies the distance channel).
     """
     OBS_SHAPE = (GRID_ROWS, GRID_COLS)
     NUM_ACTIONS = NUM_ACTIONS
 
     def __init__(self, env_kwargs: dict | None = None,
-                 add_distance: bool = False):
-        self._snake = TinySnake(**(env_kwargs or {}))
-        self._snake.reset()
+                 add_distance: bool = False,
+                 full_features: bool = False,
+                 num_envs: int = 1):
+        kw = dict(env_kwargs or {})
+        seed = kw.pop("rng_seed", None)
+        self._snakes = [
+            TinySnake(**kw,
+                      rng_seed=None if seed is None else seed + 1000 * i)
+            for i in range(num_envs)
+        ]
+        for s in self._snakes:
+            s.reset()
+        self.num_envs = num_envs
         self.add_distance = add_distance
+        self.full_features = full_features
 
-    def _obs(self) -> np.ndarray:
+    def _obs_one(self, snake: TinySnake) -> np.ndarray:
+        if self.full_features:
+            return extract_obs_full(snake)
         if self.add_distance:
-            return extract_obs_with_dist(self._snake)
-        return self._snake.obs()
+            return extract_obs_with_dist(snake)
+        return snake.obs()
+
+    def _obs_all(self) -> np.ndarray:
+        return np.stack([self._obs_one(s) for s in self._snakes])
 
     def reset(self) -> np.ndarray:
-        self._snake.reset()
-        return self._obs()[None]
+        for s in self._snakes:
+            s.reset()
+        return self._obs_all()
 
     def step(self, actions):
-        s = self._snake.step(int(actions[0]))
-        info = dict(s.info)
-        if s.done:
-            # On truncation the snake is still alive — capture the obs at the
-            # truncation point so the trainer can bootstrap V(s_terminal) instead
-            # of zeroing the bootstrap. Real deaths leave the snake in a pre-move
-            # state and bootstrap stays 0.
-            if info.get("truncated", False):
-                info["terminal_obs"] = self._obs()
-            self._snake.reset()
-        obs = self._obs()
-        return (obs[None],
-                np.array([s.reward], dtype=np.float32),
-                np.array([s.done], dtype=bool),
-                [info])
+        rewards = np.zeros(self.num_envs, dtype=np.float32)
+        dones = np.zeros(self.num_envs, dtype=bool)
+        infos: list[dict] = []
+        for i, snake in enumerate(self._snakes):
+            s = snake.step(int(actions[i]))
+            info = dict(s.info)
+            if s.done:
+                # On truncation the snake is still alive — capture the obs at
+                # the truncation point so the trainer can bootstrap
+                # V(s_terminal) instead of zeroing the bootstrap. Real deaths
+                # leave the snake in a pre-move state and bootstrap stays 0.
+                if info.get("truncated", False):
+                    info["terminal_obs"] = self._obs_one(snake)
+                snake.reset()
+            rewards[i] = s.reward
+            dones[i] = s.done
+            infos.append(info)
+        return self._obs_all(), rewards, dones, infos
+
+    @property
+    def games(self) -> list[TinySnake]:
+        """Per-env game state, e.g. for teacher labeling during rollouts."""
+        return self._snakes
 
     @property
     def _env(self):
-        """Expose the inner snake so the heuristic can read state directly."""
-        return _Adapter(self._snake)
+        """Expose env 0 so the single-env heuristic access pattern
+        (`vec._env._game`) keeps working."""
+        return _Adapter(self._snakes[0])
 
     def close(self) -> None:
         pass
@@ -412,25 +554,37 @@ class _Adapter:
         self._game = snake
 
 
-# -- smoke test ---------------------------------------------------------------
+# -- teacher benchmark ---------------------------------------------------------
 
-def _smoke() -> None:
-    s = TinySnake(max_steps=500, rng_seed=0)
-    s.reset()
-    eaten = 0
-    deaths = 0
-    while True:
-        a = heuristic_action(s)
-        r = s.step(a)
-        if r.info["ate"]:
-            eaten += 1
-        if r.info["died"]:
-            deaths += 1
-        if r.done:
-            print(f"done in {s.steps} steps, score {s.score}, "
-                  f"died={r.info['died']}, ate={eaten}, length={len(s.body)}")
-            break
+def _benchmark(teacher: str = "bfs", episodes: int = 50,
+               max_steps: int = 500, seed: int = 0) -> None:
+    fn = safe_heuristic_action if teacher == "safe" else heuristic_action
+    scores, lengths, deaths, truncs = [], [], 0, 0
+    for ep in range(episodes):
+        s = TinySnake(max_steps=max_steps, rng_seed=seed + ep)
+        s.reset()
+        while True:
+            r = s.step(fn(s))
+            if r.done:
+                scores.append(s.score)
+                lengths.append(len(s.body))
+                deaths += int(r.info["died"])
+                truncs += int(r.info["truncated"])
+                break
+    arr = np.array(scores)
+    print(f"teacher={teacher}  eps={episodes}  max_steps={max_steps}  "
+          f"mean {arr.mean():.2f}  median {int(np.median(arr))}  "
+          f"min/max {arr.min()}/{arr.max()}  "
+          f"deaths {deaths}  truncations {truncs}  "
+          f"mean final length {np.mean(lengths):.1f}")
 
 
 if __name__ == "__main__":
-    _smoke()
+    import argparse
+    _p = argparse.ArgumentParser(description="Benchmark a scripted teacher.")
+    _p.add_argument("--teacher", choices=["bfs", "safe"], default="bfs")
+    _p.add_argument("--episodes", type=int, default=50)
+    _p.add_argument("--max-steps", type=int, default=500)
+    _p.add_argument("--seed", type=int, default=0)
+    _a = _p.parse_args()
+    _benchmark(_a.teacher, _a.episodes, _a.max_steps, _a.seed)
