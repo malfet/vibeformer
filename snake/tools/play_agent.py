@@ -137,58 +137,89 @@ def _query_agent(agent, obs, device, greedy: bool, to_obs_fn):
     return a, probs
 
 
+def load_agent_for_play(ckpt_path: Path, device):
+    """Build + load an Agent from a BC/PPO checkpoint, detecting the obs
+    mode (bare symbolic / 6-ch dist / 11-ch full) and the teacher it was
+    trained against.
+
+    Returns (agent, obs_fn, to_obs_fn, teacher_name).
+    """
+    ckpt = torch.load(str(ckpt_path), map_location=device,
+                      weights_only=False)
+    state = ckpt["agent"]
+    cfg = ckpt.get("config", {})
+
+    # Detect the obs mode from saved config; if missing, infer from the
+    # encoder's first-conv input channels (11 -> full; 6 -> dist; 5 -> bare).
+    first_conv_in = None
+    if "encoder.0.0.weight" in state:
+        first_conv_in = state["encoder.0.0.weight"].shape[1]
+    if bool(cfg.get("extra_features", False)) \
+            or first_conv_in == tiny_snake.FULL_OBS_CHANNELS:
+        obs_fn = tiny_snake.extract_obs_full
+        to_obs_fn = _to_obs_dist
+        in_ch = tiny_snake.FULL_OBS_CHANNELS
+    elif bool(cfg.get("dist_feature", False)) or first_conv_in == 6:
+        obs_fn = tiny_snake.extract_obs_with_dist
+        to_obs_fn = _to_obs_dist
+        in_ch = tiny_snake.SYM_NUM_TYPES + 1
+    else:
+        obs_fn = lambda snake: snake.obs()
+        to_obs_fn = _to_obs_symbolic
+        in_ch = tiny_snake.SYM_NUM_TYPES
+
+    def _build(micro: bool, width: float):
+        return Agent(tiny_snake.NUM_ACTIONS,
+                     in_channels=in_ch,
+                     obs_size=tiny_snake.TinySnakeVecEnv.OBS_SHAPE,
+                     width=width, micro=micro).to(device)
+
+    # Prefer the saved config's flags when present.
+    agent = _build(micro=bool(cfg.get("micro_cnn", False)),
+                   width=float(cfg.get("encoder_width", 1.0)))
+    try:
+        agent.load_state_dict(state)
+    except RuntimeError:
+        # Fall back to inferring the encoder type from the saved actor's
+        # input dim. fc_dim == 32 -> micro CNN; otherwise scale width.
+        w_actor = state["actor.weight"]
+        fc_dim = w_actor.shape[1]
+        if fc_dim == 32:
+            agent = _build(micro=True, width=1.0)
+        else:
+            agent = _build(micro=False,
+                           width=max(0.0625, fc_dim / 512.0))
+        agent.load_state_dict(state)
+    agent.eval()
+    return agent, obs_fn, to_obs_fn, cfg.get("teacher", "bfs")
+
+
+def _teacher_fn(name: str):
+    return (tiny_snake.safe_heuristic_action if name == "safe"
+            else tiny_snake.heuristic_action)
+
+
 def _loop(stdscr, ckpt_path: Path | None, total_eps: int,
           delay_ms: int, greedy: bool, seed: int,
-          teacher_mode: bool = False) -> None:
+          teacher_play: str | None = None, vs: str = "auto") -> None:
     curses.curs_set(0)
     _init_colors()
     stdscr.nodelay(True)
 
     device = select_device(False)
     agent = None
+    teacher_mode = teacher_play is not None
     # Default obs path: bare (H, W) int grid -> 5-channel one-hot.
     obs_fn = lambda snake: snake.obs()
     to_obs_fn = _to_obs_symbolic
-    in_ch = tiny_snake.SYM_NUM_TYPES
-    if not teacher_mode:
-        ckpt = torch.load(str(ckpt_path), map_location=device,
-                          weights_only=False)
-        state = ckpt["agent"]
-        cfg = ckpt.get("config", {})
-
-        # Detect dist-feature mode from saved config; if missing, infer from
-        # the encoder's first-conv input channels (6 -> dist; 5 -> bare sym).
-        dist_feature = bool(cfg.get("dist_feature", False))
-        if not dist_feature and "encoder.0.0.weight" in state:
-            dist_feature = state["encoder.0.0.weight"].shape[1] == 6
-        if dist_feature:
-            obs_fn = tiny_snake.extract_obs_with_dist
-            to_obs_fn = _to_obs_dist
-            in_ch = tiny_snake.SYM_NUM_TYPES + 1
-
-        def _build(micro: bool, width: float):
-            return Agent(tiny_snake.NUM_ACTIONS,
-                         in_channels=in_ch,
-                         obs_size=tiny_snake.TinySnakeVecEnv.OBS_SHAPE,
-                         width=width, micro=micro).to(device)
-
-        # Prefer the saved config's flags when present.
-        agent = _build(micro=bool(cfg.get("micro_cnn", False)),
-                       width=float(cfg.get("encoder_width", 1.0)))
-        try:
-            agent.load_state_dict(state)
-        except RuntimeError:
-            # Fall back to inferring the encoder type from the saved actor's
-            # input dim. fc_dim == 32 -> micro CNN; otherwise scale width.
-            w_actor = state["actor.weight"]
-            fc_dim = w_actor.shape[1]
-            if fc_dim == 32:
-                agent = _build(micro=True, width=1.0)
-            else:
-                agent = _build(micro=False,
-                               width=max(0.0625, fc_dim / 512.0))
-            agent.load_state_dict(state)
-        agent.eval()
+    if teacher_mode:
+        compare_fn = _teacher_fn(teacher_play)
+    else:
+        agent, obs_fn, to_obs_fn, ckpt_teacher = load_agent_for_play(
+            ckpt_path, device)
+        # Comparison panel: the teacher the ckpt was trained against,
+        # unless overridden with --vs.
+        compare_fn = _teacher_fn(vs if vs != "auto" else ckpt_teacher)
 
     for ep_idx in range(1, total_eps + 1):
         snake = tiny_snake.TinySnake(max_steps=1000, rng_seed=seed + ep_idx)
@@ -198,7 +229,7 @@ def _loop(stdscr, ckpt_path: Path | None, total_eps: int,
         probs = np.array([0.0, 0.0, 0.0])
         paused = False
         if teacher_mode:
-            mode = "TEACH"
+            mode = teacher_play.upper()
         else:
             mode = "greedy" if greedy else "stoch"
 
@@ -231,7 +262,7 @@ def _loop(stdscr, ckpt_path: Path | None, total_eps: int,
                       paused, delay_ms, ep_idx, total_eps, probs)
                 continue
 
-            last_teacher = tiny_snake.heuristic_action(snake)
+            last_teacher = compare_fn(snake)
             if teacher_mode:
                 last_student = last_teacher
                 probs = np.zeros(3, dtype=np.float32)
@@ -265,9 +296,15 @@ def main() -> None:
     )
     p.add_argument("--ckpt", type=Path, default=None,
                    help="path to a BC or PPO checkpoint (omit when --teacher)")
-    p.add_argument("--teacher", action="store_true",
-                   help="play the BFS heuristic teacher (no model needed). "
-                        "Useful for sanity-checking the teacher's ceiling.")
+    p.add_argument("--teacher", nargs="?", const="bfs",
+                   choices=["bfs", "safe"], default=None,
+                   help="play a scripted teacher instead of a model (no "
+                        "ckpt needed). Bare --teacher = the BFS teacher; "
+                        "--teacher safe = the tail-safe teacher.")
+    p.add_argument("--vs", choices=["auto", "bfs", "safe"], default="auto",
+                   help="which teacher the side panel compares the student "
+                        "against. auto (default) = the teacher recorded in "
+                        "the checkpoint's config.")
     p.add_argument("--episodes", type=int, default=3)
     p.add_argument("--delay-ms", type=int, default=200,
                    help="step interval; smaller = faster")
@@ -276,13 +313,13 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=42)
     args = p.parse_args()
 
-    if not args.teacher:
+    if args.teacher is None:
         if args.ckpt is None or not args.ckpt.exists():
             raise SystemExit(
                 "need either --teacher or --ckpt <existing-path>")
     curses.wrapper(_loop, args.ckpt, args.episodes,
                    args.delay_ms, args.greedy, args.seed,
-                   teacher_mode=args.teacher)
+                   teacher_play=args.teacher, vs=args.vs)
 
 
 if __name__ == "__main__":
