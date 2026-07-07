@@ -50,7 +50,11 @@ digger-rl. Until then, the Python sim lets us iterate fast.
 | **Tiny-snake + w10 uniform soup (soup_w10_uniform)** | **19.8** | Uniform average of the three w10 specialists. 50 eps mean 19.80 stoch / 19.84 greedy, median 20, max 33. 73% of the BFS teacher's 27.22 ceiling, and 2.15× soup_taskarith. Same recipe as soup_uniform above but on the 4.78M base — the entire delta from 8.9 → 19.8 comes from a bigger BC teacher clone at the front of the pipeline. |
 | **Tail-safe teacher (scripted)** | **46.2** | `safe_heuristic_action`: take the BFS path to food only if the post-eat snake can still reach its own tail (simulated with real body dynamics); otherwise chase the tail **the long way** (max head-to-tail distance among tail-preserving moves). 50 eps @ 500-step cap: mean 46.16, min 41, zero deaths. At a 5000-step cap: mean **96.1, median 97 = board-full**. First version chased the tail via *shortest* path and could coil into a filled ring that rotates forever (mean 39.3, min 9); bc/ppo_safe01 below were trained on that version and inherited the circling. `python tiny_snake.py --teacher safe`. |
 | Safe-teacher BC + 11-ch obs (bc_safe01) | 22 | 4.78M net, 300k warmup + 3 DAgger × 100k, `--teacher safe --extra-features` (one-hot + dist + **body-age** + **heading planes**; also fixes the uint8 store that quantized the float dist channel in every earlier dist-BC run). Warmup agree 95%, rollout CE 0.44 → 0.32 → 0.68 → 0.52. Greedy 50-ep fresh-seed eval mean 22, median 22, max 36. |
-| **PPO on bc_safe01, 16 envs (ppo_safe01)** ⭐ | **30.0** | 2M steps, `--num-envs 16` (2048 samples/update), γ=0.997, safe-teacher anchor 0.3→0.05, ent 0.02→0.005, `--save-best`. Best checkpoint @ upd 850. 50-ep greedy eval mean 30.0, median 31, max 43 (fresh seed: 30 / 31 / 41). **First student above the BFS teacher: 30.0 vs 27.24 (+10%)** — the original goal. 77% of the safe teacher's 39.3. |
+| **PPO on bc_safe01, 16 envs (ppo_safe01)** | **30.0** | 2M steps, `--num-envs 16` (2048 samples/update), γ=0.997, safe-teacher anchor 0.3→0.05, ent 0.02→0.005, `--save-best`. Best checkpoint @ upd 850. 50-ep greedy eval mean 30.0, median 31, max 43 (fresh seed: 30 / 31 / 41). **First student above the BFS teacher: 30.0 vs 27.24 (+10%)** — the original goal. Trained on the ring-buggy teacher, so it inherits the circling failure mode. |
+| BC v2 vs fixed teacher — scratch arm (bc_safe02) | 29 | Same recipe as bc_safe01 but against the long-way-tail-chase teacher (46.2). Random init. Fresh-seed 50-ep greedy: mean 29, median 30, min/max 6/47. |
+| BC v2 vs fixed teacher — fine-tune arm (bc_safe02_ft) | **32** | Identical run (same seed, same data budget) but `--resume-from` the ppo_safe01 best weights. Fresh-seed: mean 32, median 33, **min 11** (scratch: min 6). Led the scratch arm at every DAgger checkpoint; DAgger relabeling removed the inherited circling habit. Fine-tune's BC alone ≈ scratch's post-PPO result. |
+| **PPO on bc_safe02 (ppo_safe02)** ⭐ | **36** | Same PPO recipe as ppo_safe01. Training-time best 38.3 @ upd 800. Fresh-seed 50-ep greedy: mean 36, median 37, **max 49** (a length-52 snake). +20% over ppo_safe01; 78% of the fixed teacher's 46.2. |
+| PPO on bc_safe02_ft (ppo_safe02_ft) | 35 | Identical PPO on the fine-tune-arm BC. Training-time best 39.2 @ upd 600. Fresh-seed: mean 35, median 35, max 47. **Statistical tie with ppo_safe02** — the init advantage washes out under 2M PPO steps. |
 
 ## Findings so far
 
@@ -95,7 +99,20 @@ The story arc, condensed:
     fresh-seed greedy — past the BFS teacher (27.24) that every earlier
     pipeline (best 19.8) had been chasing.
 
-13. **`--eval-only` with the collection seed replays training episodes.**
+13. **Fine-tune vs from-scratch (after a teacher upgrade): fine-tune wins
+    the BC stage, PPO equalizes.** Controlled A/B — identical data budget,
+    epochs, and seed against the fixed teacher; only the init differs
+    (random vs ppo_safe01's weights). The fine-tune arm led every DAgger
+    checkpoint (fresh-seed BC evals 32 vs 29; rollout min 11 vs 6) and its
+    BC stage alone matched the scratch arm's post-PPO score. The feared
+    failure — inheriting the old teacher's circling attractor — didn't
+    materialize: DAgger relabels exactly the states the student actually
+    visits, which is where the habit lives. But after identical 2M-step
+    PPO stages the arms tie (36 vs 35). Practical rule: warm-start when
+    compute-limited or iterating quickly; from-scratch costs one extra PPO
+    stage and erases any doubt about inherited habits.
+
+14. **`--eval-only` with the collection seed replays training episodes.**
     The bc_safe01 checkpoint evals 36 with seed 1 (the same game-seed
     stream its training data was collected from) but 22 with seed 9999: a
     96%-agreement clone effectively re-runs memorized episodes. The PPO

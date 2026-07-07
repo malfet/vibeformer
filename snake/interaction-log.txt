@@ -98,3 +98,4 @@ Commit this
 [2026-07-06] Please updated readme (if you have not done so) and commit changes, perhaps as several independent commits
 [2026-07-07] Hmm, but I can't load the checkpoint using play_agent.py, nor can I apparently use the teacher
 [2026-07-07] Hmm, but looks like a safe teacher is sometimes buggy, i.e. it can run in circles instead of trying to reach to a new apple (observed: length 22 score 19, chasing its tail in a ring instead of moving left to the apple)
+[2026-07-07] Question - which strategy is better - fine tune existing best model with the safe teacher or train from the ground up? Can you start two experiments on that matter? Also, please delete older checkpoints which no longer match our goals
