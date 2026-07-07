@@ -58,6 +58,7 @@ digger-rl. Until then, the Python sim lets us iterate fast.
 | Env generalization prep | — | `num_apples` (0 = survival-only), `canvas` vs per-episode `field_range`, `start_length_range`; multi-goal teachers. Teacher baselines: safe 61.8 @ 2 apples, 36.9 @ fields 6-12. **Zero-shot ppo_safe02**: 37 @ 2 apples (nearest-apple dist channel transfers free), but only **14** @ fields 6-12 (wall-position generality is not free). |
 | **Pure-reward 2-apple fine-tune (ppo_2apples01)** | **53** | From ppo_safe02 best, `--num-apples 2 --bc-anchor-coef 0` — **no teacher involved**, reward only, 2M steps. Fresh-seed 50-ep greedy: mean 53, median 55, max 70; training-time best 55.7. Zero-shot 37 → 53 (+43%), 86% of the safe teacher's 61.8. First demonstration of substantial *new* behavior learned purely from reward. |
 | **Death-averse fine-tune (ppo_survive01)** | 38 | From ppo_safe02 best, `--reward-die -5 --reward-step 0.005 --bc-anchor-coef 0`, standard 1-apple env. Fresh-seed: mean 38 (base: 36) and **deaths 6/50 vs the base's 41/50** — death rate 82% → 12% with score *up*. Post-training "don't hit the walls" via reward shaping alone works. |
+| **Field-randomized fine-tune (ppo_fields01)** | **28** @ fields 6-12 | From ppo_safe02 best, `--field-min 6 --field-max 12`, safe-teacher anchor 0.3→0.05, 2M steps. Fresh-seed 50-ep greedy on random fields: mean 28 (zero-shot: 14; teacher: 36.9). Retention on the fixed 12×12: **35 vs the base's 36 — no forgetting**. One net now plays every field size it has seen. |
 
 ## Findings so far
 
