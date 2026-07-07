@@ -59,14 +59,34 @@ class StepResult:
 
 
 class TinySnake:
-    """Single-env textbook snake. Plays one continuous episode at a time."""
+    """Single-env textbook snake. Plays one continuous episode at a time.
+
+    Generalized dimensions (defaults reproduce the original 12x12 game
+    bit-for-bit):
+
+      - `canvas_rows/cols`: the observation size, constant across episodes
+        (the CNN's input shape).
+      - `field_range`: if set to (lo, hi), each reset samples playable field
+        rows/cols independently from [lo, hi]; the wall ring sits at the
+        field boundary and everything beyond it (up to the canvas edge) is
+        solid wall. None = field fills the canvas.
+      - `num_apples`: simultaneous apples on the board; each eaten apple is
+        replaced. 0 = survival-only mode (no food, no growth).
+      - `start_length_range`: if set to (lo, hi), each reset samples the
+        starting snake length.
+    """
 
     def __init__(self, max_steps: int = 1000,
                  start_length: int = 3,
                  rng_seed: Optional[int] = None,
                  reward_eat: float = 1.0,
                  reward_die: float = -1.0,
-                 reward_step: float = 0.0):
+                 reward_step: float = 0.0,
+                 canvas_rows: int = GRID_ROWS,
+                 canvas_cols: int = GRID_COLS,
+                 field_range: Optional[tuple[int, int]] = None,
+                 num_apples: int = 1,
+                 start_length_range: Optional[tuple[int, int]] = None):
         self.max_steps = max_steps
         self.start_length = start_length
         self.reward_eat = reward_eat
@@ -75,28 +95,66 @@ class TinySnake:
         # incentive (long games score better); negative -> efficiency penalty
         # (bee-line to food). Set to 0 for the classic sparse reward.
         self.reward_step = reward_step
+        self.canvas_rows = canvas_rows
+        self.canvas_cols = canvas_cols
+        if field_range is not None:
+            assert field_range[0] >= 6, "field must be at least 6 cells"
+            assert field_range[1] <= min(canvas_rows, canvas_cols)
+        self.field_range = field_range
+        self.num_apples = num_apples
+        self.start_length_range = start_length_range
+        self.field_rows = canvas_rows
+        self.field_cols = canvas_cols
+        self.walls: frozenset = frozenset()
+        self._wall_mask = np.zeros((canvas_rows, canvas_cols), dtype=bool)
         self._seeder = random.Random(rng_seed)
         self._game_rng = random.Random()
         self.body: deque = deque()
         self.direction = RIGHT
-        self.food: tuple[int, int] = (0, 0)
+        self.foods: list[tuple[int, int]] = []
         self.steps = 0
         self.score = 0
         self.alive = False
 
     # -- core mechanics -----------------------------------------------------
 
+    def _build_walls(self) -> None:
+        mask = np.zeros((self.canvas_rows, self.canvas_cols), dtype=bool)
+        mask[0, :] = True
+        mask[:, 0] = True
+        mask[self.field_rows - 1:, :] = True
+        mask[:, self.field_cols - 1:] = True
+        self._wall_mask = mask
+        self.walls = frozenset(
+            (int(r), int(c)) for r, c in np.argwhere(mask))
+
     def reset(self) -> np.ndarray:
         self._game_rng.seed(self._seeder.randrange(2 ** 31))
-        r = GRID_ROWS // 2
-        c = GRID_COLS // 2
+        if self.field_range is not None:
+            lo, hi = self.field_range
+            self.field_rows = self._game_rng.randint(lo, hi)
+            self.field_cols = self._game_rng.randint(lo, hi)
+        else:
+            self.field_rows = self.canvas_rows
+            self.field_cols = self.canvas_cols
+        self._build_walls()
+        length = self.start_length
+        if self.start_length_range is not None:
+            lo, hi = self.start_length_range
+            # Cap so the horizontal start pose fits the sampled field.
+            hi = min(hi, self.field_cols // 2 - 1)
+            length = self._game_rng.randint(min(lo, hi), hi)
+        r = self.field_rows // 2
+        c = self.field_cols // 2
         # Build the starting snake horizontally so STRAIGHT initially = RIGHT.
-        self.body = deque((r, c - i) for i in range(self.start_length - 1, -1, -1))
+        self.body = deque((r, c - i) for i in range(length - 1, -1, -1))
         self.direction = RIGHT
         self.alive = True
         self.steps = 0
         self.score = 0
-        self._spawn_food()
+        self.foods = []
+        for _ in range(self.num_apples):
+            self._spawn_food()
         return self.obs()
 
     def step(self, action: int) -> StepResult:
@@ -112,15 +170,10 @@ class TinySnake:
         hr, hc = self.body[-1]
         nr, nc = hr + dr, hc + dc
 
-        # Death by wall: 1..GRID_ROWS-2 and 1..GRID_COLS-2 are interior; the
-        # border (row 0, GRID_ROWS-1, col 0, GRID_COLS-1) is a kill zone.
-        died = (
-            nr <= 0 or nr >= GRID_ROWS - 1
-            or nc <= 0 or nc >= GRID_COLS - 1
-        )
+        died = (nr, nc) in self.walls
         # Self-collision: head about to enter a body cell that won't move
         # this tick (i.e., everything except the tail when we won't grow).
-        will_grow = (nr, nc) == self.food
+        will_grow = (nr, nc) in self.foods
         body_check = set(self.body) if will_grow else set(list(self.body)[1:])
         if not died and (nr, nc) in body_check:
             died = True
@@ -140,6 +193,7 @@ class TinySnake:
             self.score += 1
             reward = self.reward_eat + self.reward_step
             info["ate"] = True
+            self.foods.remove((nr, nc))
             self._spawn_food()
         else:
             self.body.popleft()
@@ -158,60 +212,59 @@ class TinySnake:
 
     def _spawn_food(self) -> None:
         body_set = set(self.body)
+        taken = body_set | set(self.foods)
         empties = [
             (r, c)
-            for r in range(1, GRID_ROWS - 1)
-            for c in range(1, GRID_COLS - 1)
-            if (r, c) not in body_set
+            for r in range(1, self.field_rows - 1)
+            for c in range(1, self.field_cols - 1)
+            if (r, c) not in taken
         ]
         if not empties:
-            # Filled the whole interior; degenerate. Park food on the head
-            # so eat-check never fires again.
-            self.food = self.body[-1]
+            # Filled the whole interior; nothing to spawn. The apple count
+            # drops until space frees up (or the episode ends).
             return
-        self.food = self._game_rng.choice(empties)
+        self.foods.append(self._game_rng.choice(empties))
 
     def obs(self) -> np.ndarray:
-        arr = np.zeros((GRID_ROWS, GRID_COLS), dtype=np.uint8)
-        # Walls = border ring.
-        arr[0, :] = SYM_WALL
-        arr[GRID_ROWS - 1, :] = SYM_WALL
-        arr[:, 0] = SYM_WALL
-        arr[:, GRID_COLS - 1] = SYM_WALL
+        arr = np.zeros((self.canvas_rows, self.canvas_cols), dtype=np.uint8)
+        arr[self._wall_mask] = SYM_WALL
         for r, c in self.body:
             arr[r, c] = SYM_BODY
         hr, hc = self.body[-1]
         arr[hr, hc] = SYM_HEAD
-        fr, fc = self.food
-        arr[fr, fc] = SYM_FOOD
+        for fr, fc in self.foods:
+            arr[fr, fc] = SYM_FOOD
         return arr
 
     @property
     def head(self) -> tuple[int, int]:
         return self.body[-1]
 
+    @property
+    def food(self) -> tuple[int, int]:
+        """Back-compat single-apple accessor (first apple)."""
+        return self.foods[0] if self.foods else (0, 0)
+
 
 # -- heuristic teacher (BFS in absolute coords, relabeled to relative) -------
 
-_WALLS = frozenset(
-    [(0, c) for c in range(GRID_COLS)]
-    + [(GRID_ROWS - 1, c) for c in range(GRID_COLS)]
-    + [(r, 0) for r in range(GRID_ROWS)]
-    + [(r, GRID_COLS - 1) for r in range(GRID_ROWS)])
-
-
-def _bfs_path(start: tuple[int, int], goal: tuple[int, int],
-              blocked: set) -> Optional[list[tuple[int, int]]]:
-    """Shortest path from start to goal avoiding `blocked`. Returns the list
-    of cells [first_step, ..., goal] (start excluded), or None."""
-    if start == goal:
+def _bfs_path(start: tuple[int, int], goals, blocked: set
+              ) -> Optional[list[tuple[int, int]]]:
+    """Shortest path from start to the NEAREST of `goals` (a single cell or
+    a collection of cells), avoiding `blocked`. Returns the list of cells
+    [first_step, ..., goal] (start excluded), or None."""
+    goal_set = {goals} if isinstance(goals, tuple) else set(goals)
+    goal_set.discard(start)
+    if not goal_set:
         return None
     from collections import deque as _dq
     seen: dict[tuple[int, int], Optional[tuple[int, int]]] = {start: None}
     q = _dq([start])
+    hit = None
     while q:
         cur = q.popleft()
-        if cur == goal:
+        if cur in goal_set:
+            hit = cur
             break
         cr, cc = cur
         for dr, dc in _DELTA.values():
@@ -220,9 +273,9 @@ def _bfs_path(start: tuple[int, int], goal: tuple[int, int],
                 continue
             seen[nxt] = cur
             q.append(nxt)
-    if goal not in seen:
+    if hit is None:
         return None
-    path = [goal]
+    path = [hit]
     while seen[path[-1]] != start:
         path.append(seen[path[-1]])
     path.reverse()
@@ -239,13 +292,14 @@ def _dir_of(a: tuple[int, int], b: tuple[int, int]) -> int:
 
 
 def _bfs_next_absolute(snake: TinySnake) -> Optional[int]:
-    """BFS from head to food, avoiding walls / body. Return absolute next-step
-    direction (UP/DOWN/LEFT/RIGHT), or None if unreachable.
+    """BFS from head to the nearest food, avoiding walls / body. Return
+    absolute next-step direction (UP/DOWN/LEFT/RIGHT), or None if no food
+    is reachable (or none exists).
     """
     body_list = list(snake.body)
-    blocked = set(_WALLS)
+    blocked = set(snake.walls)
     blocked.update(body_list[1:])  # head's spot will be vacated, tail vacates
-    path = _bfs_path(snake.head, snake.food, blocked)
+    path = _bfs_path(snake.head, snake.foods, blocked)
     if path is None:
         return None
     return _dir_of(snake.head, path[0])
@@ -267,7 +321,8 @@ def _abs_to_relative(snake_dir: int, next_dir: int) -> int:
 def _floodfill_fallback(snake: TinySnake) -> int:
     """Pick the relative action whose flood-fill reach from the resulting
     head cell is largest. Last-resort move when no BFS path exists."""
-    blocked = _WALLS | set(snake.body)
+    blocked = snake.walls | set(snake.body)
+    cap = snake.canvas_rows * snake.canvas_cols
     best_a, best_size = STRAIGHT, -1
     for a, abs_dir in (
             (STRAIGHT, snake.direction),
@@ -282,7 +337,7 @@ def _floodfill_fallback(snake: TinySnake) -> int:
             from collections import deque as _dq
             seen = {cand}
             q = _dq([cand])
-            while q and len(seen) < GRID_ROWS * GRID_COLS:
+            while q and len(seen) < cap:
                 r, c = q.popleft()
                 for ddr, ddc in _DELTA.values():
                     n = (r + ddr, c + ddc)
@@ -312,52 +367,60 @@ def heuristic_action(snake: TinySnake) -> int:
 # -- tail-safe teacher --------------------------------------------------------
 
 def _simulate_path(body: list[tuple[int, int]], path: list[tuple[int, int]],
-                   food: tuple[int, int]
-                   ) -> Optional[deque]:
+                   foods) -> Optional[deque]:
     """Walk the snake along `path` with real body dynamics (tail vacates each
-    step; eating the food cell grows by one). Returns the resulting body
+    step; entering any food cell grows by one). Returns the resulting body
     deque, or None if the path collides with the (moving) body."""
+    food_set = set(foods)
     b = deque(body)
     for cell in path:
-        grow = cell == food
+        grow = cell in food_set
         occupied = set(b) if grow else set(list(b)[1:])
         if cell in occupied:
             return None
         b.append(cell)
-        if not grow:
+        if grow:
+            food_set.discard(cell)
+        else:
             b.popleft()
     return b
 
 
-def _tail_reachable(body: deque) -> bool:
+def _tail_reachable(body: deque, walls: frozenset) -> bool:
     """True if the head can reach the tail cell (which vacates next tick)."""
     body_list = list(body)
     head, tail = body_list[-1], body_list[0]
     if head == tail:
         return True
-    blocked = set(_WALLS)
+    blocked = set(walls)
     blocked.update(body_list[1:-1])  # tail is the goal, head is the start
     return _bfs_path(head, tail, blocked) is not None
 
 
 def safe_heuristic_action(snake: TinySnake) -> int:
-    """Tail-safe BFS teacher: take the shortest path to food only if, after
-    simulating the full path (including growth), the head can still reach
-    its own tail. Otherwise chase the tail — following your own vacating
+    """Tail-safe BFS teacher: take the shortest path to the nearest food
+    only if, after simulating the full path (including growth), the head
+    can still reach its own tail; unsafe apples are skipped in favor of the
+    next-nearest. Otherwise chase the tail — following your own vacating
     tail is always survivable — and only then fall back to flood-fill.
 
     This fixes the plain BFS teacher's dominant failure mode: greedy
-    shortest paths that box the snake in right after eating.
+    shortest paths that box the snake in right after eating. With
+    `num_apples=0` it degenerates into a pure survivor policy.
     """
     body = list(snake.body)
     head, tail = body[-1], body[0]
-    blocked = set(_WALLS)
+    blocked = set(snake.walls)
     blocked.update(body[1:])  # tail vacates
-    path = _bfs_path(head, snake.food, blocked)
-    if path is not None:
-        virt = _simulate_path(body, path, snake.food)
-        if virt is not None and _tail_reachable(virt):
+    remaining = set(snake.foods)
+    while remaining:
+        path = _bfs_path(head, remaining, blocked)
+        if path is None:
+            break
+        virt = _simulate_path(body, path, snake.foods)
+        if virt is not None and _tail_reachable(virt, snake.walls):
             return _abs_to_relative(snake.direction, _dir_of(head, path[0]))
+        remaining.discard(path[-1])  # this apple is a trap; try the next
     # Unsafe (or no path) to eat: give ourselves room by chasing the tail
     # the LONG way. Shortest-path tail chasing coils the snake into a tight
     # ring that can exactly fill its own circuit and rotate forever (no gap
@@ -374,16 +437,16 @@ def safe_heuristic_action(snake: TinySnake) -> int:
             (TURN_RIGHT, _TURN_RIGHT[snake.direction])):
         dr, dc = _DELTA[abs_dir]
         cand = (head[0] + dr, head[1] + dc)
-        grow = cand == snake.food
+        grow = cand in snake.foods
         occupied = set(body) if grow else set(body[1:])
-        if cand in _WALLS or cand in occupied:
+        if cand in snake.walls or cand in occupied:
             continue  # immediate death
         nb = deque(body)
         nb.append(cand)
         if not grow:
             nb.popleft()
         nb_list = list(nb)
-        nb_blocked = set(_WALLS)
+        nb_blocked = set(snake.walls)
         nb_blocked.update(nb_list[1:-1])
         tail_path = _bfs_path(cand, nb_list[0], nb_blocked)
         if tail_path is None:
@@ -404,30 +467,29 @@ def safe_heuristic_action(snake: TinySnake) -> int:
 # -- VecEnv wrapper (single env, mirrors SymbolicVecEnv API) ------------------
 
 def compute_distance_map(snake: TinySnake) -> np.ndarray:
-    """BFS distance from each cell to the food, treating walls + body as
-    blocked. Unreachable cells get GRID_ROWS*GRID_COLS as a sentinel.
+    """BFS distance from each cell to the NEAREST food (multi-source BFS),
+    treating walls + body as blocked. Unreachable cells get canvas area as
+    a sentinel; with no food on the board the whole map is the sentinel.
 
-    Returns (GRID_ROWS, GRID_COLS) float32. The teacher essentially picks
-    the action whose next-head-cell has the smallest value in this map.
+    Returns (canvas_rows, canvas_cols) float32. The teacher essentially
+    picks the action whose next-head-cell has the smallest value here.
     """
-    INF = float(GRID_ROWS * GRID_COLS)
-    dist = np.full((GRID_ROWS, GRID_COLS), INF, dtype=np.float32)
-    fr, fc = snake.food
-    walls = {(0, c) for c in range(GRID_COLS)}
-    walls |= {(GRID_ROWS - 1, c) for c in range(GRID_COLS)}
-    walls |= {(r, 0) for r in range(GRID_ROWS)}
-    walls |= {(r, GRID_COLS - 1) for r in range(GRID_ROWS)}
-    blocked = walls | set(snake.body)
-    if (fr, fc) in blocked:
-        return dist
-    dist[fr, fc] = 0.0
+    R, C = snake.canvas_rows, snake.canvas_cols
+    INF = float(R * C)
+    dist = np.full((R, C), INF, dtype=np.float32)
+    blocked = snake.walls | set(snake.body)
     from collections import deque as _dq
-    q = _dq([(fr, fc)])
+    q = _dq()
+    for fr, fc in snake.foods:
+        if (fr, fc) in blocked:
+            continue
+        dist[fr, fc] = 0.0
+        q.append((fr, fc))
     while q:
         r, c = q.popleft()
         for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
             nr, nc = r + dr, c + dc
-            if not (0 <= nr < GRID_ROWS and 0 <= nc < GRID_COLS):
+            if not (0 <= nr < R and 0 <= nc < C):
                 continue
             if (nr, nc) in blocked:
                 continue
@@ -460,7 +522,7 @@ def extract_obs_with_dist(snake: TinySnake) -> np.ndarray:
     sym = snake.obs()
     onehot = np.eye(SYM_NUM_TYPES, dtype=np.float32)[sym]  # (H, W, 5)
     onehot = onehot.transpose(2, 0, 1)                     # (5, H, W)
-    INF = float(GRID_ROWS * GRID_COLS)
+    INF = float(snake.canvas_rows * snake.canvas_cols)
     dist = compute_distance_map(snake)
     potential = np.where(dist < INF,
                          np.exp(-dist / _DIST_SCALE), 0.0
@@ -489,11 +551,12 @@ def extract_obs_full(snake: TinySnake) -> np.ndarray:
     them to the encoder.
     """
     base = extract_obs_with_dist(snake)
-    age = np.zeros((1, GRID_ROWS, GRID_COLS), dtype=np.float32)
+    R, C = snake.canvas_rows, snake.canvas_cols
+    age = np.zeros((1, R, C), dtype=np.float32)
     L = len(snake.body)
     for i, (r, c) in enumerate(snake.body):  # i = 0 at tail, L-1 at head
         age[0, r, c] = (i + 1) / L
-    heading = np.zeros((4, GRID_ROWS, GRID_COLS), dtype=np.float32)
+    heading = np.zeros((4, R, C), dtype=np.float32)
     heading[snake.direction] = 1.0
     return np.concatenate([base, age, heading], axis=0)
 
@@ -525,6 +588,9 @@ class TinySnakeVecEnv:
         self.num_envs = num_envs
         self.add_distance = add_distance
         self.full_features = full_features
+        # Instance obs shape (canvas may differ from the 12x12 default).
+        self.OBS_SHAPE = (self._snakes[0].canvas_rows,
+                          self._snakes[0].canvas_cols)
 
     def _obs_one(self, snake: TinySnake) -> np.ndarray:
         if self.full_features:
@@ -585,11 +651,16 @@ class _Adapter:
 # -- teacher benchmark ---------------------------------------------------------
 
 def _benchmark(teacher: str = "bfs", episodes: int = 50,
-               max_steps: int = 500, seed: int = 0) -> None:
+               max_steps: int = 500, seed: int = 0,
+               apples: int = 1, canvas: int = GRID_ROWS,
+               field_min: int = 0, field_max: int = 0) -> None:
     fn = safe_heuristic_action if teacher == "safe" else heuristic_action
+    field_range = (field_min, field_max) if field_min > 0 else None
     scores, lengths, deaths, truncs = [], [], 0, 0
     for ep in range(episodes):
-        s = TinySnake(max_steps=max_steps, rng_seed=seed + ep)
+        s = TinySnake(max_steps=max_steps, rng_seed=seed + ep,
+                      num_apples=apples, canvas_rows=canvas,
+                      canvas_cols=canvas, field_range=field_range)
         s.reset()
         while True:
             r = s.step(fn(s))
@@ -614,5 +685,11 @@ if __name__ == "__main__":
     _p.add_argument("--episodes", type=int, default=50)
     _p.add_argument("--max-steps", type=int, default=500)
     _p.add_argument("--seed", type=int, default=0)
+    _p.add_argument("--apples", type=int, default=1)
+    _p.add_argument("--canvas", type=int, default=GRID_ROWS)
+    _p.add_argument("--field-min", type=int, default=0,
+                    help="with --field-max, sample field size per episode")
+    _p.add_argument("--field-max", type=int, default=0)
     _a = _p.parse_args()
-    _benchmark(_a.teacher, _a.episodes, _a.max_steps, _a.seed)
+    _benchmark(_a.teacher, _a.episodes, _a.max_steps, _a.seed,
+               _a.apples, _a.canvas, _a.field_min, _a.field_max)

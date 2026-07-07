@@ -95,6 +95,21 @@ def main() -> None:
                    help="at every eval, also run a greedy eval and save the "
                         "best-so-far checkpoint to ppo_tiny_best.pt.")
     p.add_argument("--env-max-steps", type=int, default=500)
+    p.add_argument("--num-apples", type=int, default=1,
+                   help="simultaneous apples on the board; 0 = survival-only "
+                        "(no food, no growth).")
+    p.add_argument("--canvas", type=int, default=12,
+                   help="observation canvas size (square). Constant per "
+                        "run — it fixes the CNN input shape.")
+    p.add_argument("--field-min", type=int, default=0,
+                   help="with --field-max, sample the playable field size "
+                        "per episode from [min, max]; walls fill the rest "
+                        "of the canvas. 0 = field fills the canvas.")
+    p.add_argument("--field-max", type=int, default=0)
+    p.add_argument("--start-len-min", type=int, default=0,
+                   help="with --start-len-max, sample the starting snake "
+                        "length per episode. 0 = fixed length 3.")
+    p.add_argument("--start-len-max", type=int, default=0)
     p.add_argument("--reward-eat", type=float, default=1.0,
                    help="Reward per food eaten. Scaling up (e.g. 10) gives a "
                         "much stronger signal for the from-scratch case; "
@@ -133,7 +148,14 @@ def main() -> None:
     env_kwargs = dict(max_steps=args.env_max_steps, rng_seed=args.seed,
                       reward_eat=args.reward_eat,
                       reward_die=args.reward_die,
-                      reward_step=args.reward_step)
+                      reward_step=args.reward_step,
+                      num_apples=args.num_apples,
+                      canvas_rows=args.canvas, canvas_cols=args.canvas)
+    if args.field_min > 0:
+        env_kwargs["field_range"] = (args.field_min, args.field_max)
+    if args.start_len_min > 0:
+        env_kwargs["start_length_range"] = (args.start_len_min,
+                                            args.start_len_max)
     vec = tiny_snake.TinySnakeVecEnv(
         env_kwargs=env_kwargs, add_distance=args.dist_feature,
         full_features=args.extra_features, num_envs=args.num_envs)
@@ -143,7 +165,7 @@ def main() -> None:
         env_kwargs=dict(env_kwargs, rng_seed=args.seed + 777),
         add_distance=args.dist_feature,
         full_features=args.extra_features, num_envs=1)
-    obs_grid = tiny_snake.TinySnakeVecEnv.OBS_SHAPE  # (12, 12)
+    obs_grid = vec.OBS_SHAPE  # (canvas, canvas)
     if args.extra_features:
         in_ch = tiny_snake.FULL_OBS_CHANNELS
         obs_buf_shape = (in_ch, *obs_grid)

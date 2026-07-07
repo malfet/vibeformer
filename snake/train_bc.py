@@ -540,8 +540,19 @@ def main() -> None:
                    help="Tiny-snake only: `bfs` = greedy shortest-path "
                         "teacher (mean ~27 @ 500 steps). `safe` = tail-safe "
                         "teacher that only eats when the post-eat snake can "
-                        "still reach its tail (mean ~39 @ 500 steps, never "
+                        "still reach its tail (mean ~46 @ 500 steps, never "
                         "dies).")
+    p.add_argument("--num-apples", type=int, default=1,
+                   help="simultaneous apples; 0 = survival-only.")
+    p.add_argument("--canvas", type=int, default=12,
+                   help="observation canvas size (square), fixes CNN input.")
+    p.add_argument("--field-min", type=int, default=0,
+                   help="with --field-max, sample playable field size per "
+                        "episode; walls fill the rest of the canvas.")
+    p.add_argument("--field-max", type=int, default=0)
+    p.add_argument("--start-len-min", type=int, default=0,
+                   help="with --start-len-max, sample starting length.")
+    p.add_argument("--start-len-max", type=int, default=0)
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--force-cpu", action="store_true")
     p.add_argument("--run-name", type=str, default="")
@@ -594,10 +605,17 @@ def main() -> None:
         if args.obs_mode != "symbolic":
             print(f"{tag}NOTE: --env-kind tiny forces --obs-mode symbolic",
                   flush=True)
+        env_kwargs.update(num_apples=args.num_apples,
+                          canvas_rows=args.canvas, canvas_cols=args.canvas)
+        if args.field_min > 0:
+            env_kwargs["field_range"] = (args.field_min, args.field_max)
+        if args.start_len_min > 0:
+            env_kwargs["start_length_range"] = (args.start_len_min,
+                                                args.start_len_max)
         vec = tiny_snake.TinySnakeVecEnv(
             env_kwargs=env_kwargs, add_distance=args.dist_feature,
             full_features=args.extra_features)
-        obs_shape_grid = tiny_snake.TinySnakeVecEnv.OBS_SHAPE
+        obs_shape_grid = vec.OBS_SHAPE
         if args.extra_features:
             in_ch = tiny_snake.FULL_OBS_CHANNELS
             obs_shape = (in_ch, *obs_shape_grid)

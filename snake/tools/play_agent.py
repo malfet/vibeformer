@@ -93,15 +93,16 @@ def _draw(stdscr, snake, last_student, last_teacher, mode: str,
                  curses.color_pair(_PAIR_HEADER) | curses.A_BOLD)
 
     obs = snake.obs()
+    rows, cols = obs.shape
     # Render board starting at row 2.
-    for r in range(tiny_snake.GRID_ROWS):
-        for c in range(tiny_snake.GRID_COLS):
+    for r in range(rows):
+        for c in range(cols):
             glyph, pair = _CELL_GLYPH[int(obs[r, c])]
             attr = curses.color_pair(pair) if pair else 0
             _safe_addstr(stdscr, 2 + r, 2 + c * 2, glyph, attr)
 
     # Side panel: student vs teacher actions + probs.
-    base_x = 2 + tiny_snake.GRID_COLS * 2 + 3
+    base_x = 2 + cols * 2 + 3
     _safe_addstr(stdscr, 2, base_x,
                  f"student: {_ACTION_NAME.get(last_student, '?')}",
                  curses.color_pair(_PAIR_HEADER) | curses.A_BOLD)
@@ -168,10 +169,12 @@ def load_agent_for_play(ckpt_path: Path, device):
         to_obs_fn = _to_obs_symbolic
         in_ch = tiny_snake.SYM_NUM_TYPES
 
+    canvas = int(cfg.get("canvas", 12))
+
     def _build(micro: bool, width: float):
         return Agent(tiny_snake.NUM_ACTIONS,
                      in_channels=in_ch,
-                     obs_size=tiny_snake.TinySnakeVecEnv.OBS_SHAPE,
+                     obs_size=(canvas, canvas),
                      width=width, micro=micro).to(device)
 
     # Prefer the saved config's flags when present.
@@ -201,11 +204,13 @@ def _teacher_fn(name: str):
 
 def _loop(stdscr, ckpt_path: Path | None, total_eps: int,
           delay_ms: int, greedy: bool, seed: int,
-          teacher_play: str | None = None, vs: str = "auto") -> None:
+          teacher_play: str | None = None, vs: str = "auto",
+          env_kwargs: dict | None = None) -> None:
     curses.curs_set(0)
     _init_colors()
     stdscr.nodelay(True)
 
+    env_kwargs = dict(env_kwargs or {})
     device = select_device(False)
     agent = None
     teacher_mode = teacher_play is not None
@@ -217,12 +222,19 @@ def _loop(stdscr, ckpt_path: Path | None, total_eps: int,
     else:
         agent, obs_fn, to_obs_fn, ckpt_teacher = load_agent_for_play(
             ckpt_path, device)
+        # Play on the canvas the ckpt was trained for.
+        ckpt = torch.load(str(ckpt_path), map_location="cpu",
+                          weights_only=False)
+        canvas = int(ckpt.get("config", {}).get("canvas", 12))
+        env_kwargs.setdefault("canvas_rows", canvas)
+        env_kwargs.setdefault("canvas_cols", canvas)
         # Comparison panel: the teacher the ckpt was trained against,
         # unless overridden with --vs.
         compare_fn = _teacher_fn(vs if vs != "auto" else ckpt_teacher)
 
     for ep_idx in range(1, total_eps + 1):
-        snake = tiny_snake.TinySnake(max_steps=1000, rng_seed=seed + ep_idx)
+        snake = tiny_snake.TinySnake(max_steps=1000, rng_seed=seed + ep_idx,
+                                     **env_kwargs)
         snake.reset()
         last_student = tiny_snake.STRAIGHT
         last_teacher = tiny_snake.STRAIGHT
@@ -254,7 +266,8 @@ def _loop(stdscr, ckpt_path: Path | None, total_eps: int,
                     mode = "greedy" if greedy else "stoch"
                 elif ch in (ord('r'), ord('R')):
                     snake = tiny_snake.TinySnake(
-                        max_steps=1000, rng_seed=seed + ep_idx + 1000)
+                        max_steps=1000, rng_seed=seed + ep_idx + 1000,
+                        **env_kwargs)
                     snake.reset()
 
             if paused:
@@ -306,6 +319,13 @@ def main() -> None:
                         "against. auto (default) = the teacher recorded in "
                         "the checkpoint's config.")
     p.add_argument("--episodes", type=int, default=3)
+    p.add_argument("--apples", type=int, default=1,
+                   help="simultaneous apples (0 = survival-only)")
+    p.add_argument("--canvas", type=int, default=0,
+                   help="canvas size; default = ckpt's canvas (or 12)")
+    p.add_argument("--field-min", type=int, default=0,
+                   help="with --field-max, random field size per episode")
+    p.add_argument("--field-max", type=int, default=0)
     p.add_argument("--delay-ms", type=int, default=200,
                    help="step interval; smaller = faster")
     p.add_argument("--greedy", action="store_true",
@@ -317,9 +337,16 @@ def main() -> None:
         if args.ckpt is None or not args.ckpt.exists():
             raise SystemExit(
                 "need either --teacher or --ckpt <existing-path>")
+    env_kwargs: dict = {"num_apples": args.apples}
+    if args.canvas > 0:
+        env_kwargs["canvas_rows"] = args.canvas
+        env_kwargs["canvas_cols"] = args.canvas
+    if args.field_min > 0:
+        env_kwargs["field_range"] = (args.field_min, args.field_max)
     curses.wrapper(_loop, args.ckpt, args.episodes,
                    args.delay_ms, args.greedy, args.seed,
-                   teacher_play=args.teacher, vs=args.vs)
+                   teacher_play=args.teacher, vs=args.vs,
+                   env_kwargs=env_kwargs)
 
 
 if __name__ == "__main__":
