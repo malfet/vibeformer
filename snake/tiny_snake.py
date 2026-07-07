@@ -358,18 +358,46 @@ def safe_heuristic_action(snake: TinySnake) -> int:
         virt = _simulate_path(body, path, snake.food)
         if virt is not None and _tail_reachable(virt):
             return _abs_to_relative(snake.direction, _dir_of(head, path[0]))
-    # Unsafe (or no path) to eat: chase the tail, preferring not to eat
-    # accidentally along the way.
-    chase_blocked = set(_WALLS)
-    chase_blocked.update(body[1:-1])
-    for avoid_food in (True, False):
-        b = set(chase_blocked)
-        if avoid_food:
-            b.add(snake.food)
-        tail_path = _bfs_path(head, tail, b)
-        if tail_path is not None:
-            return _abs_to_relative(snake.direction,
-                                    _dir_of(head, tail_path[0]))
+    # Unsafe (or no path) to eat: give ourselves room by chasing the tail
+    # the LONG way. Shortest-path tail chasing coils the snake into a tight
+    # ring that can exactly fill its own circuit and rotate forever (no gap
+    # -> food outside stays unreachable -> never leaves chase mode). Instead,
+    # among the moves that keep the tail reachable, take the one that
+    # MAXIMIZES head-to-tail distance: the body stays stretched, gaps
+    # remain, and the food path reopens. Moves that would eat are held as a
+    # last resort (eating here is what the safety check deemed unsafe).
+    best_a, best_d = None, -1
+    eat_a, eat_d = None, -1
+    for a, abs_dir in (
+            (STRAIGHT, snake.direction),
+            (TURN_LEFT, _TURN_LEFT[snake.direction]),
+            (TURN_RIGHT, _TURN_RIGHT[snake.direction])):
+        dr, dc = _DELTA[abs_dir]
+        cand = (head[0] + dr, head[1] + dc)
+        grow = cand == snake.food
+        occupied = set(body) if grow else set(body[1:])
+        if cand in _WALLS or cand in occupied:
+            continue  # immediate death
+        nb = deque(body)
+        nb.append(cand)
+        if not grow:
+            nb.popleft()
+        nb_list = list(nb)
+        nb_blocked = set(_WALLS)
+        nb_blocked.update(nb_list[1:-1])
+        tail_path = _bfs_path(cand, nb_list[0], nb_blocked)
+        if tail_path is None:
+            continue  # move would lose the follow-your-tail invariant
+        d = len(tail_path)
+        if grow:
+            if d > eat_d:
+                eat_a, eat_d = a, d
+        elif d > best_d:
+            best_a, best_d = a, d
+    if best_a is not None:
+        return best_a
+    if eat_a is not None:
+        return eat_a
     return _floodfill_fallback(snake)
 
 
