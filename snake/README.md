@@ -55,6 +55,9 @@ digger-rl. Until then, the Python sim lets us iterate fast.
 | BC v2 vs fixed teacher — fine-tune arm (bc_safe02_ft) | **32** | Identical run (same seed, same data budget) but `--resume-from` the ppo_safe01 best weights. Fresh-seed: mean 32, median 33, **min 11** (scratch: min 6). Led the scratch arm at every DAgger checkpoint; DAgger relabeling removed the inherited circling habit. Fine-tune's BC alone ≈ scratch's post-PPO result. |
 | **PPO on bc_safe02 (ppo_safe02)** ⭐ | **36** | Same PPO recipe as ppo_safe01. Training-time best 38.3 @ upd 800. Fresh-seed 50-ep greedy: mean 36, median 37, **max 49** (a length-52 snake). +20% over ppo_safe01; 78% of the fixed teacher's 46.2. |
 | PPO on bc_safe02_ft (ppo_safe02_ft) | 35 | Identical PPO on the fine-tune-arm BC. Training-time best 39.2 @ upd 600. Fresh-seed: mean 35, median 35, max 47. **Statistical tie with ppo_safe02** — the init advantage washes out under 2M PPO steps. |
+| Env generalization prep | — | `num_apples` (0 = survival-only), `canvas` vs per-episode `field_range`, `start_length_range`; multi-goal teachers. Teacher baselines: safe 61.8 @ 2 apples, 36.9 @ fields 6-12. **Zero-shot ppo_safe02**: 37 @ 2 apples (nearest-apple dist channel transfers free), but only **14** @ fields 6-12 (wall-position generality is not free). |
+| **Pure-reward 2-apple fine-tune (ppo_2apples01)** | **53** | From ppo_safe02 best, `--num-apples 2 --bc-anchor-coef 0` — **no teacher involved**, reward only, 2M steps. Fresh-seed 50-ep greedy: mean 53, median 55, max 70; training-time best 55.7. Zero-shot 37 → 53 (+43%), 86% of the safe teacher's 61.8. First demonstration of substantial *new* behavior learned purely from reward. |
+| **Death-averse fine-tune (ppo_survive01)** | 38 | From ppo_safe02 best, `--reward-die -5 --reward-step 0.005 --bc-anchor-coef 0`, standard 1-apple env. Fresh-seed: mean 38 (base: 36) and **deaths 6/50 vs the base's 41/50** — death rate 82% → 12% with score *up*. Post-training "don't hit the walls" via reward shaping alone works. |
 
 ## Findings so far
 
@@ -119,6 +122,20 @@ The story arc, condensed:
     checkpoint was immune (30 on both seeds) — its rollouts had long
     diverged from the seed stream. Rule: eval seeds must be disjoint from
     collection seeds.
+
+15. **Pure reward is enough to learn new behavior — once a navigation core
+    exists.** Two teacher-free fine-tunes from ppo_safe02 (anchor = 0, 2M
+    steps): (a) on the 2-apple env, zero-shot transfer already scores 37
+    (the nearest-apple potential channel generalizes for free), and pure
+    PPO lifts it to 53 — 86% of the safe teacher's 61.8, learning
+    second-apple routing no demonstration ever showed it; (b) with
+    `--reward-die -5 --reward-step 0.005` on the standard env, the death
+    rate falls 82% → 12% *while the score rises* 36 → 38. The earlier
+    worry that the student "only learns after the teacher" was a statement
+    about cold-start BC, not about the fine-tuning regime: reward shaping
+    alone reshapes behavior once the model can already play. Zero-shot to
+    varied field sizes (14 vs 36) is the transfer that does NOT come free
+    — that's the next experiment.
 
 ## Layout
 
