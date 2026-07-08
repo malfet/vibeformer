@@ -102,3 +102,4 @@ Commit this
 [2026-07-07] Prep for independent branches: A) discuss why model can't infer features from raw obs; B) add num-apples arg, train 2-apple behavior purely from score/death rewards; C) variable field sizes inside a larger perception field for transfer learning toward original nibbles
 [2026-07-07] What is the minimum/maximum supported canvas size? Multiple of something? --canvas 20 gave 'input and weight can not be multiplied'
 [2026-07-07] Go for it (big-canvas pipeline), start with smaller fields, and try augmenting by positioning play fields at different locations so the model learns relative position matters more than global
+[2026-07-08] In the meantime any theories why it failed to generalize

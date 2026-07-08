@@ -58,6 +58,8 @@ digger-rl. Until then, the Python sim lets us iterate fast.
 | Env generalization prep | — | `num_apples` (0 = survival-only), `canvas` vs per-episode `field_range`, `start_length_range`; multi-goal teachers. Teacher baselines: safe 61.8 @ 2 apples, 36.9 @ fields 6-12. **Zero-shot ppo_safe02**: 37 @ 2 apples (nearest-apple dist channel transfers free), but only **14** @ fields 6-12 (wall-position generality is not free). |
 | **Pure-reward 2-apple fine-tune (ppo_2apples01)** | **53** | From ppo_safe02 best, `--num-apples 2 --bc-anchor-coef 0` — **no teacher involved**, reward only, 2M steps. Fresh-seed 50-ep greedy: mean 53, median 55, max 70; training-time best 55.7. Zero-shot 37 → 53 (+43%), 86% of the safe teacher's 61.8. First demonstration of substantial *new* behavior learned purely from reward. |
 | **Death-averse fine-tune (ppo_survive01)** | 38 | From ppo_safe02 best, `--reward-die -5 --reward-step 0.005 --bc-anchor-coef 0`, standard 1-apple env. Fresh-seed: mean 38 (base: 36) and **deaths 6/50 vs the base's 41/50** — death rate 82% → 12% with score *up*. Post-training "don't hit the walls" via reward shaping alone works. |
+| Canvas-48 allocentric BC (bc_c48_01/02) | 5 / 7 | Canvas 48, fields 6-16 at **random offsets**, safe teacher (44.0 baseline), width 2.0 / 4.0. Both hit the same wall: train CE → 0 while holdout CE climbed to 2.5 — the flatten→FC head has to learn each of the ~1000 field placements as a separate case, and 400k samples can't cover placements × situations. Capacity (2→4×) didn't help: the missing piece was inductive bias, not parameters. |
+| **Canvas-48 egocentric BC (bc_c48_03)** | **23** | Identical to bc_c48_02 plus `--egocentric` (obs translated so the head is always at the window center — translation invariance by construction). Holdout CE stayed at 0.24-0.55 (tracking train) instead of diverging; final eval 21, fresh-seed 23 @ trained sizes 6-16. **On UNSEEN field sizes 17-24: mean 26 — better than on trained sizes, 71% of the teacher's 36.7 there. Size extrapolation for free.** 3× the allocentric twin from the obs change alone. |
 | **Field-randomized fine-tune (ppo_fields01)** | **28** @ fields 6-12 | From ppo_safe02 best, `--field-min 6 --field-max 12`, safe-teacher anchor 0.3→0.05, 2M steps. Fresh-seed 50-ep greedy on random fields: mean 28 (zero-shot: 14; teacher: 36.9). Retention on the fixed 12×12: **35 vs the base's 36 — no forgetting**. One net now plays every field size it has seen. |
 
 ## Findings so far
@@ -137,6 +139,21 @@ The story arc, condensed:
     alone reshapes behavior once the model can already play. Zero-shot to
     varied field sizes (14 vs 36) is the transfer that does NOT come free
     — that's the next experiment.
+
+16. **Augmentation reveals a missing inductive bias; architecture supplies
+    it.** Random field offsets (user's suggestion) were the right pressure
+    but the CNN+FC hypothesis class couldn't express the invariance: the
+    conv trunk is (coarsely) equivariant, then the flatten→FC head assigns
+    a private weight to every canvas position, so it can only *memorize*
+    placements — train CE → 0, holdout CE 2.5 and rising, score 7 vs
+    teacher 44 at width 4.0 and 400k samples. Head-centered (egocentric)
+    obs removes absolute position from the input entirely: same budget,
+    same net → holdout tracks train, score 23, and — the real prize —
+    **unseen field sizes 17-24 score 26 vs 36.7 teacher, better than the
+    trained sizes**. Translation invariance by construction beats
+    translation invariance by data. (The strided encoder's stride-4 phase
+    sensitivity and the 2×2 final spatial map were aggravators; egocentric
+    sidesteps both since the head always lands in the same phase.)
 
 ## Layout
 
