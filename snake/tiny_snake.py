@@ -575,6 +575,36 @@ def extract_obs_full(snake: TinySnake) -> np.ndarray:
     return np.concatenate([base, age, heading], axis=0)
 
 
+def egocentric_obs(full: np.ndarray, head: tuple[int, int]) -> np.ndarray:
+    """Translate a (C, H, W) obs so the snake's head sits at the window
+    center. Cells shifted in from beyond the original canvas are filled
+    as solid wall (wall channel 1, everything else 0; the constant
+    heading planes keep their value).
+
+    Makes translation invariance structural instead of learned: absolute
+    canvas position vanishes from the input entirely. If the apple falls
+    outside the window, the potential-field channel still carries its
+    gradient near the head, so clipping is benign.
+    """
+    n_ch, H, W = full.shape
+    hr, hc = head
+    out = np.zeros_like(full)
+    # Fill defaults: wall channel = 1 beyond the canvas; heading planes
+    # are constant, so pre-fill them with their own value.
+    out[SYM_WALL] = 1.0
+    for ch in range(SYM_NUM_TYPES + 2, n_ch):  # heading planes
+        out[ch] = full[ch, 0, 0]
+    dr = H // 2 - hr
+    dc = W // 2 - hc
+    src_r0, src_r1 = max(0, -dr), min(H, H - dr)
+    src_c0, src_c1 = max(0, -dc), min(W, W - dc)
+    dst_r0, dst_c0 = src_r0 + dr, src_c0 + dc
+    out[:, dst_r0:dst_r0 + (src_r1 - src_r0),
+        dst_c0:dst_c0 + (src_c1 - src_c0)] = \
+        full[:, src_r0:src_r1, src_c0:src_c1]
+    return out
+
+
 def quantize_obs(obs: np.ndarray) -> np.ndarray:
     """Quantize a float obs in [0, 1] to uint8 (x255). Applied at the env
     boundary for the dist / full-feature modes so buffers are 4x smaller
@@ -601,7 +631,8 @@ class TinySnakeVecEnv:
     def __init__(self, env_kwargs: dict | None = None,
                  add_distance: bool = False,
                  full_features: bool = False,
-                 num_envs: int = 1):
+                 num_envs: int = 1,
+                 egocentric: bool = False):
         kw = dict(env_kwargs or {})
         seed = kw.pop("rng_seed", None)
         self._snakes = [
@@ -614,15 +645,19 @@ class TinySnakeVecEnv:
         self.num_envs = num_envs
         self.add_distance = add_distance
         self.full_features = full_features
+        # Head-centered obs (float modes only): see egocentric_obs.
+        self.egocentric = egocentric
         # Instance obs shape (canvas may differ from the 12x12 default).
         self.OBS_SHAPE = (self._snakes[0].canvas_rows,
                           self._snakes[0].canvas_cols)
 
     def _obs_one(self, snake: TinySnake) -> np.ndarray:
-        if self.full_features:
-            return quantize_obs(extract_obs_full(snake))
-        if self.add_distance:
-            return quantize_obs(extract_obs_with_dist(snake))
+        if self.full_features or self.add_distance:
+            f = (extract_obs_full(snake) if self.full_features
+                 else extract_obs_with_dist(snake))
+            if self.egocentric:
+                f = egocentric_obs(f, snake.head)
+            return quantize_obs(f)
         return snake.obs()
 
     def _obs_all(self) -> np.ndarray:

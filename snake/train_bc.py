@@ -556,6 +556,11 @@ def main() -> None:
                    help="place the playable field at a random offset "
                         "within the canvas each episode (translation "
                         "augmentation).")
+    p.add_argument("--egocentric", action="store_true",
+                   help="head-centered obs: translate the canvas so the "
+                        "snake's head is always at the window center. "
+                        "Translation invariance by construction instead "
+                        "of learned from data. Float obs modes only.")
     p.add_argument("--canvas-cols", type=int, default=0,
                    help="rectangular canvas: columns (0 = square --canvas).")
     p.add_argument("--start-len-min", type=int, default=0,
@@ -624,7 +629,7 @@ def main() -> None:
                                                 args.start_len_max)
         vec = tiny_snake.TinySnakeVecEnv(
             env_kwargs=env_kwargs, add_distance=args.dist_feature,
-            full_features=args.extra_features)
+            full_features=args.extra_features, egocentric=args.egocentric)
         obs_shape_grid = vec.OBS_SHAPE
         if args.extra_features:
             in_ch = tiny_snake.FULL_OBS_CHANNELS

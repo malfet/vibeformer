@@ -110,6 +110,9 @@ def main() -> None:
                    help="place the playable field at a random offset "
                         "within the canvas each episode (translation "
                         "augmentation).")
+    p.add_argument("--egocentric", action="store_true",
+                   help="head-centered obs (matches train_bc's "
+                        "--egocentric).")
     p.add_argument("--canvas-cols", type=int, default=0,
                    help="rectangular canvas: columns (0 = square --canvas).")
     p.add_argument("--start-len-min", type=int, default=0,
@@ -166,13 +169,15 @@ def main() -> None:
                                             args.start_len_max)
     vec = tiny_snake.TinySnakeVecEnv(
         env_kwargs=env_kwargs, add_distance=args.dist_feature,
-        full_features=args.extra_features, num_envs=args.num_envs)
+        full_features=args.extra_features, num_envs=args.num_envs,
+        egocentric=args.egocentric)
     # Separate single-env for eval so eval never disturbs rollout state.
     # Shaped rewards don't matter here — eval reads info["score"].
     eval_vec = tiny_snake.TinySnakeVecEnv(
         env_kwargs=dict(env_kwargs, rng_seed=args.seed + 777),
         add_distance=args.dist_feature,
-        full_features=args.extra_features, num_envs=1)
+        full_features=args.extra_features, num_envs=1,
+        egocentric=args.egocentric)
     obs_grid = vec.OBS_SHAPE  # (canvas, canvas)
     if args.extra_features:
         in_ch = tiny_snake.FULL_OBS_CHANNELS
