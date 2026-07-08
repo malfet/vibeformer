@@ -190,9 +190,9 @@ def _to_obs_symbolic(obs_np: np.ndarray, device: torch.device) -> torch.Tensor:
 
 
 def _to_obs_dist(obs_np: np.ndarray, device: torch.device) -> torch.Tensor:
-    """(N, 6, H, W) float32 obs (already one-hot + distance channel) ->
-    just shipped to device as float. No transform needed."""
-    return torch.from_numpy(obs_np).to(device).float()
+    """(N, C, H, W) uint8-quantized obs (one-hot + float channels x255,
+    see tiny_snake.quantize_obs) -> float in [0, 1] on device."""
+    return torch.from_numpy(obs_np).to(device).float().mul_(1.0 / 255.0)
 
 
 def collect_with_teacher(vec, K: int,
@@ -552,6 +552,12 @@ def main() -> None:
                    help="with --field-max, sample playable field size per "
                         "episode; walls fill the rest of the canvas.")
     p.add_argument("--field-max", type=int, default=0)
+    p.add_argument("--field-offset-random", action="store_true",
+                   help="place the playable field at a random offset "
+                        "within the canvas each episode (translation "
+                        "augmentation).")
+    p.add_argument("--canvas-cols", type=int, default=0,
+                   help="rectangular canvas: columns (0 = square --canvas).")
     p.add_argument("--start-len-min", type=int, default=0,
                    help="with --start-len-max, sample starting length.")
     p.add_argument("--start-len-max", type=int, default=0)
@@ -608,7 +614,9 @@ def main() -> None:
             print(f"{tag}NOTE: --env-kind tiny forces --obs-mode symbolic",
                   flush=True)
         env_kwargs.update(num_apples=args.num_apples,
-                          canvas_rows=args.canvas, canvas_cols=args.canvas)
+                          canvas_rows=args.canvas,
+                          canvas_cols=args.canvas_cols or args.canvas,
+                          field_offset_random=args.field_offset_random)
         if args.field_min > 0:
             env_kwargs["field_range"] = (args.field_min, args.field_max)
         if args.start_len_min > 0:
@@ -622,12 +630,12 @@ def main() -> None:
             in_ch = tiny_snake.FULL_OBS_CHANNELS
             obs_shape = (in_ch, *obs_shape_grid)
             to_obs_fn = _to_obs_dist
-            obs_dtype = np.float32
+            obs_dtype = np.uint8  # env emits quantized x255
         elif args.dist_feature:
             in_ch = tiny_snake.SYM_NUM_TYPES + 1  # 5 one-hot + 1 distance
             obs_shape = (in_ch, *obs_shape_grid)
             to_obs_fn = _to_obs_dist
-            obs_dtype = np.float32
+            obs_dtype = np.uint8  # env emits quantized x255
         else:
             in_ch = tiny_snake.SYM_NUM_TYPES
             obs_shape = obs_shape_grid

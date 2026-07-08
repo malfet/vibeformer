@@ -86,7 +86,8 @@ class TinySnake:
                  canvas_cols: int = GRID_COLS,
                  field_range: Optional[tuple[int, int]] = None,
                  num_apples: int = 1,
-                 start_length_range: Optional[tuple[int, int]] = None):
+                 start_length_range: Optional[tuple[int, int]] = None,
+                 field_offset_random: bool = False):
         self.max_steps = max_steps
         self.start_length = start_length
         self.reward_eat = reward_eat
@@ -103,8 +104,15 @@ class TinySnake:
         self.field_range = field_range
         self.num_apples = num_apples
         self.start_length_range = start_length_range
+        # If True, the playable field is placed at a random offset within
+        # the canvas each reset (instead of anchored at the top-left).
+        # Augmentation: forces the policy to key on relative geometry
+        # rather than absolute canvas coordinates.
+        self.field_offset_random = field_offset_random
         self.field_rows = canvas_rows
         self.field_cols = canvas_cols
+        self.off_r = 0
+        self.off_c = 0
         self.walls: frozenset = frozenset()
         self._wall_mask = np.zeros((canvas_rows, canvas_cols), dtype=bool)
         self._seeder = random.Random(rng_seed)
@@ -119,11 +127,10 @@ class TinySnake:
     # -- core mechanics -----------------------------------------------------
 
     def _build_walls(self) -> None:
-        mask = np.zeros((self.canvas_rows, self.canvas_cols), dtype=bool)
-        mask[0, :] = True
-        mask[:, 0] = True
-        mask[self.field_rows - 1:, :] = True
-        mask[:, self.field_cols - 1:] = True
+        # Everything is wall except the field interior (ring included).
+        mask = np.ones((self.canvas_rows, self.canvas_cols), dtype=bool)
+        mask[self.off_r + 1:self.off_r + self.field_rows - 1,
+             self.off_c + 1:self.off_c + self.field_cols - 1] = False
         self._wall_mask = mask
         self.walls = frozenset(
             (int(r), int(c)) for r, c in np.argwhere(mask))
@@ -137,6 +144,13 @@ class TinySnake:
         else:
             self.field_rows = self.canvas_rows
             self.field_cols = self.canvas_cols
+        self.off_r = 0
+        self.off_c = 0
+        if self.field_offset_random:
+            self.off_r = self._game_rng.randint(
+                0, self.canvas_rows - self.field_rows)
+            self.off_c = self._game_rng.randint(
+                0, self.canvas_cols - self.field_cols)
         self._build_walls()
         length = self.start_length
         if self.start_length_range is not None:
@@ -144,8 +158,8 @@ class TinySnake:
             # Cap so the horizontal start pose fits the sampled field.
             hi = min(hi, self.field_cols // 2 - 1)
             length = self._game_rng.randint(min(lo, hi), hi)
-        r = self.field_rows // 2
-        c = self.field_cols // 2
+        r = self.off_r + self.field_rows // 2
+        c = self.off_c + self.field_cols // 2
         # Build the starting snake horizontally so STRAIGHT initially = RIGHT.
         self.body = deque((r, c - i) for i in range(length - 1, -1, -1))
         self.direction = RIGHT
@@ -215,8 +229,8 @@ class TinySnake:
         taken = body_set | set(self.foods)
         empties = [
             (r, c)
-            for r in range(1, self.field_rows - 1)
-            for c in range(1, self.field_cols - 1)
+            for r in range(self.off_r + 1, self.off_r + self.field_rows - 1)
+            for c in range(self.off_c + 1, self.off_c + self.field_cols - 1)
             if (r, c) not in taken
         ]
         if not empties:
@@ -561,13 +575,25 @@ def extract_obs_full(snake: TinySnake) -> np.ndarray:
     return np.concatenate([base, age, heading], axis=0)
 
 
+def quantize_obs(obs: np.ndarray) -> np.ndarray:
+    """Quantize a float obs in [0, 1] to uint8 (x255). Applied at the env
+    boundary for the dist / full-feature modes so buffers are 4x smaller
+    and train/eval see the identical (quantized) distribution. One-hot and
+    heading channels are exact; the potential and body-age channels lose
+    at most 1/255 ~= 0.004, well under their meaningful deltas (~0.18 and
+    1/length)."""
+    return np.rint(obs * 255.0).astype(np.uint8)
+
+
 class TinySnakeVecEnv:
     """In-proc vectorized wrapper over `num_envs` TinySnake instances.
 
     Obs modes: bare 1-channel int grid (default; 5-class one-hot built at
-    the model boundary), `add_distance` = 6-channel float with the distance
-    map pre-computed, `full_features` = 11-channel float (adds body-age +
-    heading planes; implies the distance channel).
+    the model boundary), `add_distance` = 6-channel with the distance map
+    pre-computed, `full_features` = 11-channel (adds body-age + heading
+    planes; implies the distance channel). The float modes are emitted
+    uint8-quantized (x255); undo with `.float() / 255` at the model
+    boundary (train_bc._to_obs_dist does).
     """
     OBS_SHAPE = (GRID_ROWS, GRID_COLS)
     NUM_ACTIONS = NUM_ACTIONS
@@ -594,9 +620,9 @@ class TinySnakeVecEnv:
 
     def _obs_one(self, snake: TinySnake) -> np.ndarray:
         if self.full_features:
-            return extract_obs_full(snake)
+            return quantize_obs(extract_obs_full(snake))
         if self.add_distance:
-            return extract_obs_with_dist(snake)
+            return quantize_obs(extract_obs_with_dist(snake))
         return snake.obs()
 
     def _obs_all(self) -> np.ndarray:
@@ -653,14 +679,16 @@ class _Adapter:
 def _benchmark(teacher: str = "bfs", episodes: int = 50,
                max_steps: int = 500, seed: int = 0,
                apples: int = 1, canvas: int = GRID_ROWS,
-               field_min: int = 0, field_max: int = 0) -> None:
+               field_min: int = 0, field_max: int = 0,
+               field_offset: bool = False) -> None:
     fn = safe_heuristic_action if teacher == "safe" else heuristic_action
     field_range = (field_min, field_max) if field_min > 0 else None
     scores, lengths, deaths, truncs = [], [], 0, 0
     for ep in range(episodes):
         s = TinySnake(max_steps=max_steps, rng_seed=seed + ep,
                       num_apples=apples, canvas_rows=canvas,
-                      canvas_cols=canvas, field_range=field_range)
+                      canvas_cols=canvas, field_range=field_range,
+                      field_offset_random=field_offset)
         s.reset()
         while True:
             r = s.step(fn(s))
@@ -690,6 +718,8 @@ if __name__ == "__main__":
     _p.add_argument("--field-min", type=int, default=0,
                     help="with --field-max, sample field size per episode")
     _p.add_argument("--field-max", type=int, default=0)
+    _p.add_argument("--field-offset", action="store_true")
     _a = _p.parse_args()
     _benchmark(_a.teacher, _a.episodes, _a.max_steps, _a.seed,
-               _a.apples, _a.canvas, _a.field_min, _a.field_max)
+               _a.apples, _a.canvas, _a.field_min, _a.field_max,
+               _a.field_offset)

@@ -157,11 +157,13 @@ def load_agent_for_play(ckpt_path: Path, device):
         first_conv_in = state["encoder.0.0.weight"].shape[1]
     if bool(cfg.get("extra_features", False)) \
             or first_conv_in == tiny_snake.FULL_OBS_CHANNELS:
-        obs_fn = tiny_snake.extract_obs_full
+        obs_fn = lambda s: tiny_snake.quantize_obs(
+            tiny_snake.extract_obs_full(s))
         to_obs_fn = _to_obs_dist
         in_ch = tiny_snake.FULL_OBS_CHANNELS
     elif bool(cfg.get("dist_feature", False)) or first_conv_in == 6:
-        obs_fn = tiny_snake.extract_obs_with_dist
+        obs_fn = lambda s: tiny_snake.quantize_obs(
+            tiny_snake.extract_obs_with_dist(s))
         to_obs_fn = _to_obs_dist
         in_ch = tiny_snake.SYM_NUM_TYPES + 1
     else:
