@@ -121,9 +121,11 @@ def _nature_cnn(in_channels: int, obs_h: int, obs_w: int,
 
     Handles rectangular inputs (e.g. the 50x80 symbolic grid) as well as
     the classic 84x84 / 168x168 pixel setups. Falls back to a small 3x3
-    stack when the input grid is too small for the 8x8 first conv.
+    stack when the input grid is too small for the strided conv stack
+    (8/4 -> 4/2 -> 3/1 needs >= 36 px on a side to keep the last conv's
+    input at 3x3 or more).
     """
-    if obs_h < 30 or obs_w < 30:
+    if obs_h < 36 or obs_w < 36:
         return _small_cnn(in_channels, obs_h, obs_w, c1, c2, c3, fc)
     convs = nn.Sequential(
         layer_init(nn.Conv2d(in_channels, c1, 8, stride=4)), nn.ReLU(),
@@ -666,8 +668,17 @@ def main() -> None:
           f"width={args.encoder_width}  num_actions={num_actions}  "
           f"params={n_params:,}", flush=True)
 
+    def _check_canvas(ckpt, path):
+        ckpt_canvas = int(ckpt.get("config", {}).get("canvas", 12))
+        if args.env_kind == "tiny" and ckpt_canvas != args.canvas:
+            raise SystemExit(
+                f"--canvas {args.canvas} but {path} was trained at canvas "
+                f"{ckpt_canvas}. The flatten->FC layer bakes the canvas "
+                f"into the weights; use --canvas {ckpt_canvas}.")
+
     if args.eval_only:
         ckpt = torch.load(args.eval_only, map_location=device, weights_only=False)
+        _check_canvas(ckpt, args.eval_only)
         agent.load_state_dict(ckpt["agent"])
         agent.eval()
         mode = "greedy" if args.greedy_eval else "stochastic"
@@ -685,6 +696,7 @@ def main() -> None:
     if args.resume_from:
         ckpt = torch.load(args.resume_from, map_location=device,
                           weights_only=False)
+        _check_canvas(ckpt, args.resume_from)
         agent.load_state_dict(ckpt["agent"])
         print(f"{tag}resumed from {args.resume_from}", flush=True)
 

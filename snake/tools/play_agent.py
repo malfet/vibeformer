@@ -339,6 +339,17 @@ def main() -> None:
                 "need either --teacher or --ckpt <existing-path>")
     env_kwargs: dict = {"num_apples": args.apples}
     if args.canvas > 0:
+        if args.ckpt is not None and args.ckpt.exists():
+            _cfg = torch.load(str(args.ckpt), map_location="cpu",
+                              weights_only=False).get("config", {})
+            _ck_canvas = int(_cfg.get("canvas", 12))
+            if args.canvas != _ck_canvas:
+                raise SystemExit(
+                    f"--canvas {args.canvas} but the checkpoint was trained "
+                    f"at canvas {_ck_canvas}; the FC layer bakes the canvas "
+                    f"into the weights. Omit --canvas, or use "
+                    f"--field-min/--field-max to vary the playable area "
+                    f"inside the canvas instead.")
         env_kwargs["canvas_rows"] = args.canvas
         env_kwargs["canvas_cols"] = args.canvas
     if args.field_min > 0:

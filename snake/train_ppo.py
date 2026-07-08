@@ -197,6 +197,13 @@ def main() -> None:
     if args.load_bc:
         ckpt = torch.load(args.load_bc, map_location=device,
                           weights_only=False)
+        ckpt_canvas = int(ckpt.get("config", {}).get("canvas", 12))
+        if ckpt_canvas != args.canvas:
+            raise SystemExit(
+                f"--canvas {args.canvas} but {args.load_bc} was trained at "
+                f"canvas {ckpt_canvas}. The flatten->FC layer bakes the "
+                f"canvas into the weights; run with --canvas {ckpt_canvas} "
+                f"or train a fresh net at the new canvas.")
         agent.load_state_dict(ckpt["agent"])
         print(f"{tag}loaded BC ckpt: {args.load_bc}", flush=True)
     optim = Adam(agent.parameters(), lr=args.lr, eps=1e-5)
