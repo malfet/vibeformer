@@ -104,3 +104,4 @@ Commit this
 [2026-07-07] Go for it (big-canvas pipeline), start with smaller fields, and try augmenting by positioning play fields at different locations so the model learns relative position matters more than global
 [2026-07-08] In the meantime any theories why it failed to generalize
 [2026-07-08] Can you propose a model architecture that is best suited for learning the rules of snake-like game which quickly learns position agnostic rules
+[2026-07-10] Let's try canonicalized architecture

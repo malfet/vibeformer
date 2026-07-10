@@ -605,6 +605,43 @@ def egocentric_obs(full: np.ndarray, head: tuple[int, int]) -> np.ndarray:
     return out
 
 
+# Canonical obs: 5 one-hot + food potential + body-age. Heading planes are
+# unnecessary — the grid is rotated so the snake always faces up.
+CANONICAL_OBS_CHANNELS = SYM_NUM_TYPES + 2
+
+# np.rot90 turns counterclockwise; k chosen so the cell the snake faces
+# lands directly above the (odd-canvas) center.
+_ROT_K = {UP: 0, RIGHT: 1, DOWN: 2, LEFT: 3}
+
+
+def extract_obs_canonical(snake: TinySnake,
+                          with_dist: bool = True) -> np.ndarray:
+    """Fully canonicalized obs: egocentric (head at window center) AND
+    rotated so the heading is always up. After this, STRAIGHT is always
+    the cell above center, TURN_LEFT the cell to its left, TURN_RIGHT to
+    its right — relative geometry is all that remains in the input.
+
+    Channels: 5 one-hot + food potential (unless with_dist=False) +
+    body-age. Requires an odd canvas so rotations keep the center fixed.
+    """
+    assert snake.canvas_rows % 2 == 1 and snake.canvas_cols % 2 == 1, \
+        "canonical mode needs an odd canvas (e.g. --canvas 49)"
+    assert snake.canvas_rows == snake.canvas_cols, \
+        "canonical mode needs a square canvas (rotations)"
+    base = extract_obs_with_dist(snake)
+    if not with_dist:
+        base = base[:SYM_NUM_TYPES]
+    R, C = snake.canvas_rows, snake.canvas_cols
+    age = np.zeros((1, R, C), dtype=np.float32)
+    L = len(snake.body)
+    for i, (r, c) in enumerate(snake.body):
+        age[0, r, c] = (i + 1) / L
+    full = np.concatenate([base, age], axis=0)
+    ego = egocentric_obs(full, snake.head)
+    return np.ascontiguousarray(
+        np.rot90(ego, k=_ROT_K[snake.direction], axes=(1, 2)))
+
+
 def quantize_obs(obs: np.ndarray) -> np.ndarray:
     """Quantize a float obs in [0, 1] to uint8 (x255). Applied at the env
     boundary for the dist / full-feature modes so buffers are 4x smaller
@@ -632,7 +669,9 @@ class TinySnakeVecEnv:
                  add_distance: bool = False,
                  full_features: bool = False,
                  num_envs: int = 1,
-                 egocentric: bool = False):
+                 egocentric: bool = False,
+                 canonical: bool = False,
+                 canonical_dist: bool = True):
         kw = dict(env_kwargs or {})
         seed = kw.pop("rng_seed", None)
         self._snakes = [
@@ -647,11 +686,17 @@ class TinySnakeVecEnv:
         self.full_features = full_features
         # Head-centered obs (float modes only): see egocentric_obs.
         self.egocentric = egocentric
+        # Fully canonicalized obs (egocentric + rotated to face up).
+        self.canonical = canonical
+        self.canonical_dist = canonical_dist
         # Instance obs shape (canvas may differ from the 12x12 default).
         self.OBS_SHAPE = (self._snakes[0].canvas_rows,
                           self._snakes[0].canvas_cols)
 
     def _obs_one(self, snake: TinySnake) -> np.ndarray:
+        if self.canonical:
+            return quantize_obs(
+                extract_obs_canonical(snake, self.canonical_dist))
         if self.full_features or self.add_distance:
             f = (extract_obs_full(snake) if self.full_features
                  else extract_obs_with_dist(snake))

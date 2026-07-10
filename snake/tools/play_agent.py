@@ -28,7 +28,8 @@ import numpy as np
 import torch
 
 import tiny_snake
-from train_bc import Agent, select_device, _to_obs_symbolic, _to_obs_dist
+from train_bc import (Agent, IterAgent, select_device, _to_obs_symbolic,
+                      _to_obs_dist)
 
 
 _PAIR_WALL = 1
@@ -164,6 +165,28 @@ def load_agent_for_play(ckpt_path: Path, device):
                 f = tiny_snake.egocentric_obs(f, s.head)
             return tiny_snake.quantize_obs(f)
         return fn
+
+    if bool(cfg.get("canonical", False)):
+        with_dist = not bool(cfg.get("canonical_no_dist", False))
+        obs_fn = lambda s: tiny_snake.quantize_obs(
+            tiny_snake.extract_obs_canonical(s, with_dist))
+        to_obs_fn = _to_obs_dist
+        in_ch = tiny_snake.CANONICAL_OBS_CHANNELS - (0 if with_dist else 1)
+        canvas = int(cfg.get("canvas", 49))
+        if cfg.get("arch", "cnn") == "iter":
+            agent = IterAgent(tiny_snake.NUM_ACTIONS, in_channels=in_ch,
+                              obs_size=(canvas, canvas),
+                              channels=int(cfg.get("iter_channels", 96)),
+                              iters=int(cfg.get("iter_steps", 16))
+                              ).to(device)
+        else:
+            agent = Agent(tiny_snake.NUM_ACTIONS, in_channels=in_ch,
+                          obs_size=(canvas, canvas),
+                          width=float(cfg.get("encoder_width", 1.0)),
+                          micro=bool(cfg.get("micro_cnn", False))).to(device)
+        agent.load_state_dict(state)
+        agent.eval()
+        return agent, obs_fn, to_obs_fn, cfg.get("teacher", "bfs")
 
     if bool(cfg.get("extra_features", False)) \
             or first_conv_in == tiny_snake.FULL_OBS_CHANNELS:

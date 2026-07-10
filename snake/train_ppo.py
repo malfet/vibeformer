@@ -34,8 +34,8 @@ from torch.optim import Adam
 
 import tiny_snake
 from train_bc import (
-    Agent, select_device, _to_obs_symbolic, _to_obs_dist, evaluate,
-    CKPT_DIR,
+    Agent, IterAgent, select_device, _to_obs_symbolic, _to_obs_dist,
+    evaluate, CKPT_DIR,
 )
 
 
@@ -113,6 +113,12 @@ def main() -> None:
     p.add_argument("--egocentric", action="store_true",
                    help="head-centered obs (matches train_bc's "
                         "--egocentric).")
+    p.add_argument("--canonical", action="store_true",
+                   help="fully canonicalized obs (matches train_bc).")
+    p.add_argument("--canonical-no-dist", action="store_true")
+    p.add_argument("--arch", choices=["cnn", "iter"], default="cnn")
+    p.add_argument("--iter-channels", type=int, default=96)
+    p.add_argument("--iter-steps", type=int, default=16)
     p.add_argument("--canvas-cols", type=int, default=0,
                    help="rectangular canvas: columns (0 = square --canvas).")
     p.add_argument("--start-len-min", type=int, default=0,
@@ -170,16 +176,24 @@ def main() -> None:
     vec = tiny_snake.TinySnakeVecEnv(
         env_kwargs=env_kwargs, add_distance=args.dist_feature,
         full_features=args.extra_features, num_envs=args.num_envs,
-        egocentric=args.egocentric)
+        egocentric=args.egocentric, canonical=args.canonical,
+        canonical_dist=not args.canonical_no_dist)
     # Separate single-env for eval so eval never disturbs rollout state.
     # Shaped rewards don't matter here — eval reads info["score"].
     eval_vec = tiny_snake.TinySnakeVecEnv(
         env_kwargs=dict(env_kwargs, rng_seed=args.seed + 777),
         add_distance=args.dist_feature,
         full_features=args.extra_features, num_envs=1,
-        egocentric=args.egocentric)
+        egocentric=args.egocentric, canonical=args.canonical,
+        canonical_dist=not args.canonical_no_dist)
     obs_grid = vec.OBS_SHAPE  # (canvas, canvas)
-    if args.extra_features:
+    if args.canonical:
+        in_ch = tiny_snake.CANONICAL_OBS_CHANNELS - (
+            1 if args.canonical_no_dist else 0)
+        obs_buf_shape = (in_ch, *obs_grid)
+        obs_buf_dtype = np.uint8
+        to_obs_fn = _to_obs_dist
+    elif args.extra_features:
         in_ch = tiny_snake.FULL_OBS_CHANNELS
         obs_buf_shape = (in_ch, *obs_grid)
         obs_buf_dtype = np.uint8  # env emits quantized x255
@@ -200,10 +214,17 @@ def main() -> None:
                     if args.teacher == "safe"
                     else tiny_snake.heuristic_action)
 
-    agent = Agent(num_actions, in_channels=in_ch,
-                  obs_size=obs_shape,
-                  width=args.encoder_width,
-                  micro=args.micro_cnn).to(device)
+    if args.arch == "iter":
+        assert args.canonical, "--arch iter requires --canonical obs"
+        agent = IterAgent(num_actions, in_channels=in_ch,
+                          obs_size=obs_shape,
+                          channels=args.iter_channels,
+                          iters=args.iter_steps).to(device)
+    else:
+        agent = Agent(num_actions, in_channels=in_ch,
+                      obs_size=obs_shape,
+                      width=args.encoder_width,
+                      micro=args.micro_cnn).to(device)
     n_params = sum(p.numel() for p in agent.parameters())
     print(f"{tag}agent: in_ch={in_ch}  obs_shape={obs_shape}  "
           f"width={args.encoder_width}  params={n_params:,}", flush=True)

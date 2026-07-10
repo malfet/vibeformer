@@ -179,6 +179,82 @@ class Agent(nn.Module):
         return action, dist.log_prob(action), dist.entropy(), v
 
 
+class _SharedCellActor(nn.Module):
+    """Policy head for the canonical obs: one shared MLP scores each of the
+    three candidate next cells (straight/left/right feature vectors packed
+    at the front of z). Action symmetry by construction."""
+
+    def __init__(self, ch: int, hidden: int = 64):
+        super().__init__()
+        self.ch = ch
+        self.mlp = nn.Sequential(
+            layer_init(nn.Linear(ch, hidden)), nn.ReLU(),
+            layer_init(nn.Linear(hidden, 1), std=0.01))
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        cells = z[:, :3 * self.ch].reshape(-1, 3, self.ch)
+        return self.mlp(cells).squeeze(-1)
+
+
+class IterAgent(nn.Module):
+    """Canonicalized-obs agent: stride-1 conv stem + a weight-tied residual
+    conv block applied `iters` times (a learned BFS/value-iteration step —
+    each application propagates information one cell further), then a
+    head-local readout: the three candidate next cells feed a shared MLP
+    for the policy; center + global-average features feed the critic.
+
+    Fully convolutional: parameter count is independent of board size, and
+    `iters` is an inference-time dial (raise it for bigger boards).
+    Expects the canonical obs (head at center, facing up, odd canvas).
+    """
+
+    def __init__(self, num_actions: int, in_channels: int = 7,
+                 obs_size: tuple[int, int] = (49, 49),
+                 channels: int = 96, iters: int = 16):
+        super().__init__()
+        assert num_actions == 3, "IterAgent assumes the 3-action space"
+        h, w = obs_size
+        assert h % 2 == 1 and w % 2 == 1, "canonical obs needs odd canvas"
+        self.cr, self.cc = h // 2, w // 2
+        self.channels = channels
+        self.iters = iters
+        self.stem = nn.Sequential(
+            layer_init(nn.Conv2d(in_channels, channels, 3, padding=1)),
+            nn.ReLU(),
+            layer_init(nn.Conv2d(channels, channels, 3, padding=1)),
+            nn.ReLU(),
+        )
+        # Near-identity init keeps the residual accumulation stable over
+        # many tied applications.
+        self.iter_conv = layer_init(
+            nn.Conv2d(channels, channels, 3, padding=1), std=0.1)
+        self.actor = _SharedCellActor(channels)
+        self.critic = nn.Sequential(
+            layer_init(nn.Linear(5 * channels, 128)), nn.ReLU(),
+            layer_init(nn.Linear(128, 1), std=1.0))
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.stem(x)
+        for _ in range(self.iters):
+            h = h + F.relu(self.iter_conv(h))
+        cr, cc = self.cr, self.cc
+        cell_s = h[:, :, cr - 1, cc]      # STRAIGHT target cell
+        cell_l = h[:, :, cr, cc - 1]      # TURN_LEFT target cell
+        cell_r = h[:, :, cr, cc + 1]      # TURN_RIGHT target cell
+        center = h[:, :, cr, cc]
+        gap = h.mean(dim=(2, 3))
+        return torch.cat([cell_s, cell_l, cell_r, center, gap], dim=1)
+
+    def act(self, x: torch.Tensor, action: torch.Tensor | None = None):
+        z = self.encode(x)
+        logits = self.actor(z)
+        dist = Categorical(logits=logits)
+        if action is None:
+            action = dist.sample()
+        v = self.critic(z).squeeze(-1)
+        return action, dist.log_prob(action), dist.entropy(), v
+
+
 def _to_obs(obs_np: np.ndarray, device: torch.device) -> torch.Tensor:
     return torch.from_numpy(obs_np).to(device).float().mul_(1.0 / 255.0)
 
@@ -561,6 +637,21 @@ def main() -> None:
                         "snake's head is always at the window center. "
                         "Translation invariance by construction instead "
                         "of learned from data. Float obs modes only.")
+    p.add_argument("--canonical", action="store_true",
+                   help="fully canonicalized obs: egocentric AND rotated "
+                        "so the snake faces up (7 channels, no heading "
+                        "planes). Needs an odd square --canvas. Supersedes "
+                        "--egocentric/--extra-features.")
+    p.add_argument("--canonical-no-dist", action="store_true",
+                   help="drop the food-potential channel from the "
+                        "canonical obs (6 channels) — tests whether the "
+                        "iterator net learns distance propagation itself.")
+    p.add_argument("--arch", choices=["cnn", "iter"], default="cnn",
+                   help="`iter` = IterAgent: weight-tied conv iterator + "
+                        "head-local readout (requires --canonical).")
+    p.add_argument("--iter-channels", type=int, default=96)
+    p.add_argument("--iter-steps", type=int, default=16,
+                   help="tied-block applications; ~propagation radius.")
     p.add_argument("--canvas-cols", type=int, default=0,
                    help="rectangular canvas: columns (0 = square --canvas).")
     p.add_argument("--start-len-min", type=int, default=0,
@@ -629,9 +720,17 @@ def main() -> None:
                                                 args.start_len_max)
         vec = tiny_snake.TinySnakeVecEnv(
             env_kwargs=env_kwargs, add_distance=args.dist_feature,
-            full_features=args.extra_features, egocentric=args.egocentric)
+            full_features=args.extra_features, egocentric=args.egocentric,
+            canonical=args.canonical,
+            canonical_dist=not args.canonical_no_dist)
         obs_shape_grid = vec.OBS_SHAPE
-        if args.extra_features:
+        if args.canonical:
+            in_ch = tiny_snake.CANONICAL_OBS_CHANNELS - (
+                1 if args.canonical_no_dist else 0)
+            obs_shape = (in_ch, *obs_shape_grid)
+            to_obs_fn = _to_obs_dist
+            obs_dtype = np.uint8  # env emits quantized x255
+        elif args.extra_features:
             in_ch = tiny_snake.FULL_OBS_CHANNELS
             obs_shape = (in_ch, *obs_shape_grid)
             to_obs_fn = _to_obs_dist
@@ -670,10 +769,17 @@ def main() -> None:
         heuristic_fn = nibbles_heuristic_action
         num_actions = NibblesEnv.NUM_ACTIONS
 
-    agent = Agent(num_actions, in_channels=in_ch,
-                  obs_size=agent_obs_size,
-                  width=args.encoder_width,
-                  micro=args.micro_cnn).to(device)
+    if args.arch == "iter":
+        assert args.canonical, "--arch iter requires --canonical obs"
+        agent = IterAgent(num_actions, in_channels=in_ch,
+                          obs_size=agent_obs_size,
+                          channels=args.iter_channels,
+                          iters=args.iter_steps).to(device)
+    else:
+        agent = Agent(num_actions, in_channels=in_ch,
+                      obs_size=agent_obs_size,
+                      width=args.encoder_width,
+                      micro=args.micro_cnn).to(device)
     n_params = sum(p.numel() for p in agent.parameters())
     effective_obs_mode = "symbolic" if args.env_kind == "tiny" else args.obs_mode
     print(f"{tag}agent: env={args.env_kind}  obs={effective_obs_mode}  "
