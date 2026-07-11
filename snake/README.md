@@ -61,6 +61,7 @@ digger-rl. Until then, the Python sim lets us iterate fast.
 | Canvas-48 allocentric BC (bc_c48_01/02) | 5 / 7 | Canvas 48, fields 6-16 at **random offsets**, safe teacher (44.0 baseline), width 2.0 / 4.0. Both hit the same wall: train CE → 0 while holdout CE climbed to 2.5 — the flatten→FC head has to learn each of the ~1000 field placements as a separate case, and 400k samples can't cover placements × situations. Capacity (2→4×) didn't help: the missing piece was inductive bias, not parameters. |
 | **Canvas-48 egocentric BC (bc_c48_03)** | **23** | Identical to bc_c48_02 plus `--egocentric` (obs translated so the head is always at the window center — translation invariance by construction). Holdout CE stayed at 0.24-0.55 (tracking train) instead of diverging; final eval 21, fresh-seed 23 @ trained sizes 6-16. **On UNSEEN field sizes 17-24: mean 26 — better than on trained sizes, 71% of the teacher's 36.7 there. Size extrapolation for free.** 3× the allocentric twin from the obs change alone. |
 | **Canvas-48 egocentric PPO (ppo_c48_01)** ⭐ | **33** @ fields 6-16 | PPO on bc_c48_03 (anchor 0.3→0.05, 2M steps, 16 envs). Fresh-seed: **33** on trained sizes (75% of teacher 44), **28 on unseen 17-24 (76% of teacher 36.7 — the trained-size ratio, i.e. full one-class-up generalization)**. Collapses at stretch sizes 40-46 (2 vs 18.3) for a mechanical reason: exp(-d/4) under uint8 quantizes to 0 beyond d≈22, so the potential channel goes dark and the head-centered window clips the far board. Longer-range dist encoding or a learned-propagation architecture is the fix. |
+| **Canonical iterator BC (bc_c49_iter01)** ⭐ | **36** @ fields 6-16 | `--canonical` obs (egocentric + rotated to face up, 7ch, no heading planes) + `--arch iter`: weight-tied residual conv block × 16 (learned-BFS prior) + head-local readout, **240k params**. Same data budget as bc_c48_03. Holdout CE ≤ 0.19 the whole run (no memorization gap). Fresh-seed: 36 @ trained 6-16 (82% of teacher; beats the 3.3M CNN's post-**PPO** 33 from BC alone), **34 @ unseen 17-24 (93% of teacher)**. Stretch 40-46: 6 @ iters 16, **3 @ iters 48 — the dial doesn't help because the quantized exp(-d/4) channel is zero beyond d≈22: no input signal to propagate**. Hence the no-dist ablation below. |
 | **Field-randomized fine-tune (ppo_fields01)** | **28** @ fields 6-12 | From ppo_safe02 best, `--field-min 6 --field-max 12`, safe-teacher anchor 0.3→0.05, 2M steps. Fresh-seed 50-ep greedy on random fields: mean 28 (zero-shot: 14; teacher: 36.9). Retention on the fixed 12×12: **35 vs the base's 36 — no forgetting**. One net now plays every field size it has seen. |
 
 ## Findings so far
@@ -155,6 +156,19 @@ The story arc, condensed:
     translation invariance by data. (The strided encoder's stride-4 phase
     sensitivity and the 2×2 final spatial map were aggravators; egocentric
     sidesteps both since the head always lands in the same phase.)
+
+17. **The right inductive bias beats 14× the parameters.** The canonical
+    obs (translation invariance via egocentric centering + rotation
+    invariance via face-up canonicalization) plus a weight-tied conv
+    iterator (propagation prior) and head-local readout: 240k params
+    reach BC 36 / unseen-size 34 where the 3.3M egocentric CNN needed a
+    full PPO stage to reach 33 / 28. Holdout never diverged. Caveat that
+    sets up the next experiment: at stretch sizes the model still fails
+    because the *input's* potential channel quantizes to zero beyond
+    d≈22 — the architecture can propagate, but was never forced to (the
+    dist channel was present at training). Raising iters at inference
+    alone doesn't extrapolate; the propagation must be learned during
+    training (--canonical-no-dist).
 
 ## Layout
 
