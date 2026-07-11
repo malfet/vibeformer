@@ -892,6 +892,10 @@ def main() -> None:
         diagnose(agent, obs_store, act_store, holdout_obs, holdout_act,
                  vec, heuristic_fn, to_obs_fn, device,
                  args.diag_eps, tag=f"{tag}dagger{it+1}-")
+        # Crash-safe: persist after every round (the final save overwrites).
+        torch.save({"agent": agent.state_dict(), "config": vars(args)},
+                   ckpt_dir / "bc_nibbles.pt")
+        print(f"{tag}checkpointed after DAgger iter {it+1}", flush=True)
 
     mode = "greedy" if args.greedy_eval else "stochastic"
     print(f"{tag}final eval ({args.eval_eps} episodes, {mode})", flush=True)
