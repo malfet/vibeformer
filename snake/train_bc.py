@@ -406,10 +406,20 @@ def train_epochs(agent: Agent, optim: Adam,
         return
     use_weight = weight_store is not None
     rng = np.random.default_rng(seed)
+    n_batches = (K + bs - 1) // bs
+    # Intra-epoch heartbeat every ~25% (long epochs otherwise look hung).
+    report_every = max(1, n_batches // 4)
     for epoch in range(epochs):
+        t_ep = time.monotonic()
         perm = rng.permutation(K)
         ce_sum, acc_sum, nb = 0.0, 0.0, 0
         for start in range(0, K, bs):
+            if nb and nb % report_every == 0 and nb < n_batches - 1:
+                sps = nb * bs / (time.monotonic() - t_ep)
+                print(f"{tag}  epoch {epoch+1}/{epochs} "
+                      f"[{nb}/{n_batches}]  ce {ce_sum / nb:.3f}  "
+                      f"acc {acc_sum / nb:.3f}  {sps:.0f} samples/s",
+                      flush=True)
             mb = perm[start:start + bs]
             mb_obs = to_obs_fn(obs_store[mb], device)
             mb_act = torch.from_numpy(act_store[mb]).to(device)
