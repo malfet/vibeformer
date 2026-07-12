@@ -62,6 +62,7 @@ digger-rl. Until then, the Python sim lets us iterate fast.
 | **Canvas-48 egocentric BC (bc_c48_03)** | **23** | Identical to bc_c48_02 plus `--egocentric` (obs translated so the head is always at the window center — translation invariance by construction). Holdout CE stayed at 0.24-0.55 (tracking train) instead of diverging; final eval 21, fresh-seed 23 @ trained sizes 6-16. **On UNSEEN field sizes 17-24: mean 26 — better than on trained sizes, 71% of the teacher's 36.7 there. Size extrapolation for free.** 3× the allocentric twin from the obs change alone. |
 | **Canvas-48 egocentric PPO (ppo_c48_01)** ⭐ | **33** @ fields 6-16 | PPO on bc_c48_03 (anchor 0.3→0.05, 2M steps, 16 envs). Fresh-seed: **33** on trained sizes (75% of teacher 44), **28 on unseen 17-24 (76% of teacher 36.7 — the trained-size ratio, i.e. full one-class-up generalization)**. Collapses at stretch sizes 40-46 (2 vs 18.3) for a mechanical reason: exp(-d/4) under uint8 quantizes to 0 beyond d≈22, so the potential channel goes dark and the head-centered window clips the far board. Longer-range dist encoding or a learned-propagation architecture is the fix. |
 | **Canonical iterator BC (bc_c49_iter01)** ⭐ | **36** @ fields 6-16 | `--canonical` obs (egocentric + rotated to face up, 7ch, no heading planes) + `--arch iter`: weight-tied residual conv block × 16 (learned-BFS prior) + head-local readout, **240k params**. Same data budget as bc_c48_03. Holdout CE ≤ 0.19 the whole run (no memorization gap). Fresh-seed: 36 @ trained 6-16 (82% of teacher; beats the 3.3M CNN's post-**PPO** 33 from BC alone), **34 @ unseen 17-24 (93% of teacher)**. Stretch 40-46: 6 @ iters 16, **3 @ iters 48 — the dial doesn't help because the quantized exp(-d/4) channel is zero beyond d≈22: no input signal to propagate**. Hence the no-dist ablation below. |
+| **No-dist iterator BC (bc_c49_iter02_nodist)** ⭐ | **39** @ fields 6-16 | Same as bc_c49_iter01 but `--canonical-no-dist`: **no engineered distance channel at all** — 6 raw channels (one-hot + body-age). Fresh-seed: 39 @ trained 6-16 (89% of teacher; median 41, max 53), **34 @ unseen 17-24 (93% of teacher, min 26)**. Removing the dist channel *helped* (with-dist: 36) — the iterator computes its own routing from raw geometry. Stretch 40-46 still fails (4), and the reason is now **observability, not architecture**: with the head centered in a 49-window, an apple >24 cells away is outside the input entirely, and without a dist channel nothing represents it. More iterations can't propagate information that isn't there (48 iters: 2). Iterator PPO (ppo_c49_iter01) was stopped early at 16 sps — compute scales with iterations, not params; best 34.2 saved. |
 | **Field-randomized fine-tune (ppo_fields01)** | **28** @ fields 6-12 | From ppo_safe02 best, `--field-min 6 --field-max 12`, safe-teacher anchor 0.3→0.05, 2M steps. Fresh-seed 50-ep greedy on random fields: mean 28 (zero-shot: 14; teacher: 36.9). Retention on the fixed 12×12: **35 vs the base's 36 — no forgetting**. One net now plays every field size it has seen. |
 
 ## Findings so far
@@ -169,6 +170,27 @@ The story arc, condensed:
     dist channel was present at training). Raising iters at inference
     alone doesn't extrapolate; the propagation must be learned during
     training (--canonical-no-dist).
+
+18. **The network infers pathfinding on its own — and the remaining wall
+    is observability, not learning.** The no-dist ablation answers the
+    "why can't it infer features itself" question: given an architecture
+    that can iterate (weight-tied conv block), BC from raw one-hot
+    geometry beats BC with the engineered potential field (39 vs 36
+    fresh-seed; 93% of teacher on unseen sizes with a min of 26). The
+    hand-made dist channel was a crutch for a depth-limited CNN, and for
+    a capable architecture it is a mild *distractor*. What still fails is
+    stretch sizes (40-46): the egocentric 49-window simply cannot contain
+    an apple >24 cells away, and with no summary channel the target is
+    absent from the input — raising iterations at inference (16→48)
+    makes it worse, not better, because no computation recovers missing
+    input. Path to nibbles scale: a compact never-saturating global hint
+    (e.g. unit direction-to-apple planes + log-distance) alongside
+    learned local propagation, or a window ≥ 2× the field. Ops footnote:
+    the iterator trades params for FLOPs (240k params but 17 full-board
+    convs/sample) — it saturated the M4 Pro at ~5.2 nominal TFLOPS (68%
+    of FP32 peak; above the 4.1 measured matmul roofline, implying
+    Winograd inside MPS), so speedups must be algorithmic (fewer train
+    iterations, narrower channels, fp16, cropped windows).
 
 ## Layout
 

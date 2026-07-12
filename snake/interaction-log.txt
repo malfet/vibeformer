@@ -105,3 +105,9 @@ Commit this
 [2026-07-08] In the meantime any theories why it failed to generalize
 [2026-07-08] Can you propose a model architecture that is best suited for learning the rules of snake-like game which quickly learns position agnostic rules
 [2026-07-10] Let's try canonicalized architecture
+[2026-07-11] Is it done yet?
+[2026-07-11] Are you sure it's not stuck?
+[2026-07-11] I.e. does it emit some sort of progress while training is ongoing?
+[2026-07-11] How long has it been training for? (15h of CPU time sounds like a lot for 7 epochs)
+[2026-07-11] What FLOPs are we getting out of the GPU vs machine specs (Mac Mini M4 Pro)? Check metal-perf/metal-roofline table
+[2026-07-11] So half an hour ago you said 15 min remain, how much time remains now?
