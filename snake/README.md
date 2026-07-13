@@ -192,6 +192,17 @@ The story arc, condensed:
     Winograd inside MPS), so speedups must be algorithmic (fewer train
     iterations, narrower channels, fp16, cropped windows).
 
+### Illustrated: the three obs/architecture generations (findings #16-18)
+
+Boards below are real `tiny_snake` states pushed through the real
+transforms — regenerate with `python -m tools.make_arch_figs`.
+
+![Allocentric CNN — FC head must memorize every field placement](docs/allocentric_cnn.png)
+
+![Egocentric CNN — head pinned at the window center makes placements identical](docs/egocentric_cnn.png)
+
+![Canonical iterator — egocentric + rotated to face up, weight-tied conv iteration, head-local readout](docs/canonical_iterator.png)
+
 ## Layout
 
 | File | Purpose |

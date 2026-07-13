@@ -111,3 +111,4 @@ Commit this
 [2026-07-11] How long has it been training for? (15h of CPU time sounds like a lot for 7 epochs)
 [2026-07-11] What FLOPs are we getting out of the GPU vs machine specs (Mac Mini M4 Pro)? Check metal-perf/metal-roofline table
 [2026-07-11] So half an hour ago you said 15 min remain, how much time remains now?
+[2026-07-12] Generate a few PNGs illustrating allocentric CNN, egocentric CNN, and canonical iterator; commit and reference from README
