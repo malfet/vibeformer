@@ -798,6 +798,8 @@ def main() -> None:
           f"params={n_params:,}", flush=True)
 
     def _check_canvas(ckpt, path):
+        if args.arch == "iter":
+            return  # fully convolutional: weights are canvas-agnostic
         ckpt_canvas = int(ckpt.get("config", {}).get("canvas", 12))
         if args.env_kind == "tiny" and ckpt_canvas != args.canvas:
             raise SystemExit(

@@ -183,9 +183,18 @@ The story arc, condensed:
     an apple >24 cells away, and with no summary channel the target is
     absent from the input — raising iterations at inference (16→48)
     makes it worse, not better, because no computation recovers missing
-    input. Path to nibbles scale: a compact never-saturating global hint
-    (e.g. unit direction-to-apple planes + log-distance) alongside
-    learned local propagation, or a window ≥ 2× the field. Ops footnote:
+    input. **Follow-up: observability is necessary but not sufficient.**
+    The iterator is fully convolutional, so the same weights run at any
+    canvas: re-evaluated at canvas 95 (apple always visible on 40-46
+    fields) it still scores 4 @ iters 16 and 3 @ iters 48. The network
+    learned "propagate ~15 cells in 16 steps" — the longest routing its
+    training fields demanded — not a range-invariant BFS; extra
+    iterations push the tied block out of its trained regime. To make
+    the algorithm range-general: randomize iteration count during
+    training (Neural-GPU trick), use a gated/monotone update (closer to
+    a Bellman operator), or mix large fields into training. Path to
+    nibbles scale: one of those, or the compact global hint
+    (direction-to-apple planes + log-distance). Ops footnote:
     the iterator trades params for FLOPs (240k params but 17 full-board
     convs/sample) — it saturated the M4 Pro at ~5.2 nominal TFLOPS (68%
     of FP32 peak; above the 4.1 measured matmul roofline, implying

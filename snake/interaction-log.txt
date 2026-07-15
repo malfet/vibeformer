@@ -112,3 +112,4 @@ Commit this
 [2026-07-11] What FLOPs are we getting out of the GPU vs machine specs (Mac Mini M4 Pro)? Check metal-perf/metal-roofline table
 [2026-07-11] So half an hour ago you said 15 min remain, how much time remains now?
 [2026-07-12] Generate a few PNGs illustrating allocentric CNN, egocentric CNN, and canonical iterator; commit and reference from README
+[2026-07-14] Which checkpoints should I try and how can I test the same checkpoint with different field sizes? (--canvas does not seem to work)

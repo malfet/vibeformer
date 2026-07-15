@@ -139,10 +139,11 @@ def _query_agent(agent, obs, device, greedy: bool, to_obs_fn):
     return a, probs
 
 
-def load_agent_for_play(ckpt_path: Path, device):
+def load_agent_for_play(ckpt_path: Path, device, canvas_override: int = 0):
     """Build + load an Agent from a BC/PPO checkpoint, detecting the obs
-    mode (bare symbolic / 6-ch dist / 11-ch full) and the teacher it was
-    trained against.
+    mode (bare symbolic / 6-ch dist / 11-ch full / canonical) and the
+    teacher it was trained against. `canvas_override` only applies to the
+    fully-convolutional iterator arch (canvas-agnostic weights).
 
     Returns (agent, obs_fn, to_obs_fn, teacher_name).
     """
@@ -173,6 +174,8 @@ def load_agent_for_play(ckpt_path: Path, device):
         to_obs_fn = _to_obs_dist
         in_ch = tiny_snake.CANONICAL_OBS_CHANNELS - (0 if with_dist else 1)
         canvas = int(cfg.get("canvas", 49))
+        if canvas_override and cfg.get("arch", "cnn") == "iter":
+            canvas = canvas_override
         if cfg.get("arch", "cnn") == "iter":
             agent = IterAgent(tiny_snake.NUM_ACTIONS, in_channels=in_ch,
                               obs_size=(canvas, canvas),
@@ -254,7 +257,8 @@ def _loop(stdscr, ckpt_path: Path | None, total_eps: int,
         compare_fn = _teacher_fn(teacher_play)
     else:
         agent, obs_fn, to_obs_fn, ckpt_teacher = load_agent_for_play(
-            ckpt_path, device)
+            ckpt_path, device,
+            canvas_override=env_kwargs.get("canvas_rows", 0))
         # Play on the canvas the ckpt was trained for.
         ckpt = torch.load(str(ckpt_path), map_location="cpu",
                           weights_only=False)
@@ -376,13 +380,14 @@ def main() -> None:
             _cfg = torch.load(str(args.ckpt), map_location="cpu",
                               weights_only=False).get("config", {})
             _ck_canvas = int(_cfg.get("canvas", 12))
-            if args.canvas != _ck_canvas:
+            if args.canvas != _ck_canvas \
+                    and _cfg.get("arch", "cnn") != "iter":
                 raise SystemExit(
                     f"--canvas {args.canvas} but the checkpoint was trained "
                     f"at canvas {_ck_canvas}; the FC layer bakes the canvas "
-                    f"into the weights. Omit --canvas, or use "
-                    f"--field-min/--field-max to vary the playable area "
-                    f"inside the canvas instead.")
+                    f"into the weights (iterator-arch ckpts are exempt). "
+                    f"Omit --canvas, or use --field-min/--field-max to "
+                    f"vary the playable area inside the canvas instead.")
         env_kwargs["canvas_rows"] = args.canvas
         env_kwargs["canvas_cols"] = args.canvas
     if args.field_min > 0:
