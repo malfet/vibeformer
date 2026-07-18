@@ -316,3 +316,4 @@ User: What's the number?
 [2026-07-18] Commit changes and tell me which command I can use to observe how best checkpoints behaves
 [2026-07-18] Hmm, --live failed with AttributeError: 'NoneType' object has no attribute 'get_frame' (eval_checkpoint.py line 86, vec._env._core.get_frame() in main)
 [2026-07-18] Another question - how --greedy option can be applied to a checkpoint?
+[2026-07-18] Can you change greety to argmax or something, because greedy has a very different semantic for the teacher

@@ -13,7 +13,7 @@ Usage:
     python eval_checkpoint.py CHECKPOINT [--episodes 50]
 
 Watch the policy play in a matplotlib window (paced to game speed):
-    python eval_checkpoint.py CHECKPOINT --live [--greedy]
+    python eval_checkpoint.py CHECKPOINT --live [--argmax]
 """
 
 from __future__ import annotations
@@ -37,10 +37,12 @@ def main() -> None:
     p.add_argument("--live", action="store_true",
                    help="open a matplotlib window and watch the policy "
                         "play at game speed (close the window to stop)")
-    p.add_argument("--greedy", action="store_true",
+    p.add_argument("--argmax", action="store_true",
                    help="argmax actions instead of Categorical sampling "
                         "(deterministic; useful for observing the policy's "
-                        "modal behaviour)")
+                        "modal behaviour). Named --argmax, not --greedy, "
+                        "because 'greedy' already names the GreedyEmerald "
+                        "teacher policy elsewhere in this repo.")
     args = p.parse_args()
 
     ckpt = torch.load(args.checkpoint, weights_only=False, map_location="cpu")
@@ -103,7 +105,7 @@ def main() -> None:
         last_wall = time.monotonic()
     while len(scores) < args.episodes:
         with torch.no_grad():
-            if args.greedy:
+            if args.argmax:
                 logits = agent.actor(agent.encode(obs_t))
                 action = logits.argmax(-1)
             else:
