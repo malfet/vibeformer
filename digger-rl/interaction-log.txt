@@ -314,3 +314,5 @@ User: Any updates?
 User: What's the number?
 [2026-07-17] Can you ingest what is going on with this folder, readme as well as work in progress change, but also read the readme from ../snake-r/README.md and apply some lessons from snake to this game. I.e. I probably want you to write a better teacher for digger, and bootsrap ML model using dagger, and then try to improve it with PPO
 [2026-07-18] Commit changes and tell me which command I can use to observe how best checkpoints behaves
+[2026-07-18] Hmm, --live failed with AttributeError: 'NoneType' object has no attribute 'get_frame' (eval_checkpoint.py line 86, vec._env._core.get_frame() in main)
+[2026-07-18] Another question - how --greedy option can be applied to a checkpoint?

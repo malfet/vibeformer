@@ -78,11 +78,17 @@ def main() -> None:
     print()
 
     ACTION_NAMES = ["NOOP", "LEFT", "RIGHT", "UP", "DOWN", "FIRE"]
+    scores: list[int] = []
+    obs_np = vec.reset()
+    obs_t = torch.from_numpy(obs_np).to(device).float().mul_(1.0 / 255.0)
+
     fig = img = None
     if args.live:
         import time
 
         import matplotlib.pyplot as plt
+        # Must come after vec.reset(): the libretro core only exists
+        # once the underlying DiggerEnv has booted.
         raw = vec._env._core.get_frame()
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.set_axis_off()
@@ -95,10 +101,6 @@ def main() -> None:
         # One agent action spans frame_skip emulator frames at ~70 fps.
         target_dt = (1.0 / 70.087) * cfg["frame_skip"]
         last_wall = time.monotonic()
-
-    scores: list[int] = []
-    obs_np = vec.reset()
-    obs_t = torch.from_numpy(obs_np).to(device).float().mul_(1.0 / 255.0)
     while len(scores) < args.episodes:
         with torch.no_grad():
             if args.greedy:
