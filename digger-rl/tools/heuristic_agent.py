@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import heapq
 import sys
 import time
 from pathlib import Path
@@ -172,7 +173,18 @@ def greedy_emerald(state) -> int:
 
 
 class SmartHeuristic:
-    """Greedy emerald-chaser with monster dodging + opportunistic firing.
+    """Emerald-chaser with monster dodging + opportunistic firing (v6).
+
+    v6 changes (the "better teacher" pass, applying the snake-project
+    lesson that teacher quality is the biggest lever downstream):
+      - phantom-monster filter: detections on dirt tiles are CV
+        artifacts and are ignored (no fake dodges / wasted FIREs);
+      - don't-dig-under-bag: dirt directly below an intact bag is
+        treated as an obstacle (digging it releases the bag onto us);
+      - BFS emerald routing: moves are scored against a multi-source
+        Dijkstra distance field (dirt costs 2, bags block) instead of
+        straight-line Manhattan distance, so the agent routes *around*
+        bags and prefers existing tunnels.
 
     Keeps `prev_dir` so we know which way the digger is facing (needed
     for firing -- the bullet travels in the facing direction). Also
@@ -191,13 +203,36 @@ class SmartHeuristic:
     DEFAULT_FIRE_COOLDOWN_STEPS = 50
 
     def __init__(self, dodge_range: int = 2, fire_range: int = 5,
-                 fire_cooldown_steps: int = DEFAULT_FIRE_COOLDOWN_STEPS):
+                 fire_cooldown_steps: int = DEFAULT_FIRE_COOLDOWN_STEPS,
+                 phantom_filter: bool = True,
+                 underbag: str = "transit",
+                 routing: str = "dijkstra"):
         # `dodge_range` is retained for CLI backward-compat but no longer
         # used: the new lex-scored selection caps safety at distance 3 and
         # blends emerald-chase in continuously.
+        #
+        # The v6 knobs are independently toggleable for ablation:
+        #   phantom_filter -- drop monster detections on dirt tiles.
+        #     Caveat: hobbins DO dig through dirt, so this also blinds the
+        #     dodge logic to a hobbin mid-dirt; level 1 is nobbin-dominated
+        #     so the trade is usually worth it, but it's a knob.
+        #   underbag -- "off": v5 behaviour (under-bag dirt is diggable);
+        #     "strict": under-bag dirt is an obstacle (makes emeralds
+        #     directly beneath bags unreachable -- measured 622 vs 1010,
+        #     don't use); "transit": horizontal dig-through is allowed but
+        #     UP-entry from below and lingering (NOOP) under a bag are
+        #     forbidden, and routing pays a surcharge to prefer going
+        #     around.
+        #   routing -- "dijkstra": multi-source distance field with dirt
+        #     cost 2 and bag obstacles; "manhattan": v5 straight-line.
         self.dodge_range = dodge_range
         self.fire_range = fire_range
         self.fire_cooldown_steps = fire_cooldown_steps
+        assert underbag in ("off", "strict", "transit")
+        assert routing in ("dijkstra", "manhattan")
+        self.phantom_filter = phantom_filter
+        self.underbag = underbag
+        self.routing = routing
         self.prev_dir: int = DiggerEnv.NOOP
         self._fire_cd: int = 0
 
@@ -238,13 +273,25 @@ class SmartHeuristic:
         facing = (_DIR_TO_ACTION[cv_dir] if cv_dir in _DIR_TO_ACTION
                    else self.prev_dir)
 
+        # Phantom filter: nobbins traverse only cleared tiles, so a
+        # "monster" detected on a fully-dirt tile is a CV artifact (the
+        # border-tile phantoms from the known-problems list). Dropping
+        # them here matters twice over: a phantom triggers pointless
+        # dodges, and FIREing at one wastes the ~50-step turret cooldown
+        # while a real nobbin closes in.
+        monsters = state.monsters
+        if self.phantom_filter:
+            monsters = [m for m in monsters
+                        if not (0 <= m.row < MHEIGHT and 0 <= m.col < MWIDTH
+                                and state.dirt[m.row, m.col])]
+
         # ---- FIRE / turn-to-fire opportunity ----------------------------
         # Scan every direction for a line-of-sight monster, not just the
         # one we're facing. If a fireable target is in *some* direction,
         # turn toward it: today we move toward it (and face it as a side
         # effect), then next step the facing matches and we FIRE.
         if self._fire_cd == 0:
-            target_dir = self._best_fire_direction(state, dr, dc)
+            target_dir = self._best_fire_direction(state, dr, dc, monsters)
             if target_dir == facing:
                 return DiggerEnv.FIRE
             if target_dir != DiggerEnv.NOOP:
@@ -256,8 +303,8 @@ class SmartHeuristic:
                 # caused an oscillating LEFT-turn → FIRE → walk back RIGHT
                 # → repeat loop while the next nobbin closed in, with the
                 # digger never digging UP/DOWN to escape.
-                if self._move_is_legal(state, dr, dc, target_dir) \
-                        and self._turn_is_safe(state, dr, dc, target_dir):
+                if self._move_is_legal(state, dr, dc, target_dir, monsters) \
+                        and self._turn_is_safe(dr, dc, target_dir, monsters):
                     return target_dir
 
         # ---- Move selection: lex-scored single pass --------------------
@@ -267,21 +314,44 @@ class SmartHeuristic:
         # over-penalises moves toward emeralds along the digger's own
         # tunnel. The v2 used Manhattan, which conflated reachable and
         # blocked threats and made the agent reroute pointlessly.
-        tunnel_dist = self._compute_monster_tunnel_distance(state)
+        tunnel_dist = self._compute_monster_tunnel_distance(state, monsters)
         bag_tiles = {(b.row, b.col) for b in state.bags}
-        # Tiles directly under a falling bag will be occupied within
-        # a few frames; treat them as obstacles so we don't get crushed.
+        # Tiles directly below an intact bag: the "don't dig under a bag"
+        # zone. How they're treated depends on the underbag mode.
+        underbag_tiles: set[tuple[int, int]] = set()
         for b in state.bags:
-            if b.moving and b.row + 1 < MHEIGHT:
-                bag_tiles.add((b.row + 1, b.col))
-        monster_tiles = {(m.row, m.col) for m in state.monsters}
-        em_rows, em_cols = np.where(state.emeralds)
-        em_targets = (list(zip(em_rows.tolist(), em_cols.tolist()))
-                       if em_rows.size else [])
+            if b.moving:
+                # Tiles under a falling bag will be occupied within a few
+                # frames; a falling bag covers >1 tile per agent-step, so
+                # block two tiles of the drop path.
+                for k in (1, 2):
+                    if b.row + k < MHEIGHT:
+                        bag_tiles.add((b.row + k, b.col))
+            elif b.row + 1 < MHEIGHT:
+                underbag_tiles.add((b.row + 1, b.col))
+        if self.underbag == "strict":
+            # Hard obstacle. Measured to cost ~390 mean score: emeralds
+            # directly beneath bags become permanently unreachable.
+            bag_tiles |= {t for t in underbag_tiles if state.dirt[t]}
+        monster_tiles = {(m.row, m.col) for m in monsters}
+        # Distance-to-nearest-emerald over the real board replaces the
+        # v5 straight-line Manhattan distance when routing="dijkstra":
+        # bags block, dirt costs 2, and in "transit" mode under-bag dirt
+        # pays a surcharge so routes prefer going around a bag but can
+        # still dig through to an emerald beneath it.
+        surcharge = (underbag_tiles if self.underbag == "transit" else set())
+        em_dist = (self._emerald_dist_field(state, bag_tiles, surcharge)
+                   if self.routing == "dijkstra" else None)
+        no_emeralds = not bool(state.emeralds.any())
+        if em_dist is None:
+            em_rows, em_cols = np.where(state.emeralds)
+            em_targets = list(zip(em_rows.tolist(), em_cols.tolist()))
 
         def emerald_dist(r: int, c: int) -> int:
-            if not em_targets:
+            if no_emeralds:
                 return MWIDTH + MHEIGHT
+            if em_dist is not None:
+                return int(em_dist[r, c])
             return min(abs(er - r) + abs(ec - c) for er, ec in em_targets)
 
         best_score: tuple | None = None
@@ -295,6 +365,16 @@ class SmartHeuristic:
             if (nr, nc) in monster_tiles:
                 # Stepping onto a monster tile == instant death.
                 continue
+            if self.underbag == "transit":
+                # Horizontal dig-through under a bag is fine (the bag
+                # wobbles ~20 frames before falling; we'll be gone), but
+                # digging UP into the under-bag tile drops the bag into
+                # our own column, and standing still beneath one invites
+                # a crush.
+                if action == DiggerEnv.UP and (nr, nc) in underbag_tiles:
+                    continue
+                if action == DiggerEnv.NOOP and (dr, dc) in underbag_tiles:
+                    continue
             m_dist = int(tunnel_dist[nr, nc])
             e_dist = emerald_dist(nr, nc)
             # `safety` is capped at 2: only tiles where a monster could
@@ -317,7 +397,50 @@ class SmartHeuristic:
                 best_action = action
         return best_action
 
-    def _compute_monster_tunnel_distance(self, state) -> np.ndarray:
+    # Extra path cost for entering an under-bag tile in "transit" mode:
+    # high enough to route around a bag when a detour exists, low enough
+    # that an emerald directly beneath a bag is still worth digging to.
+    _UNDERBAG_SURCHARGE: int = 6
+
+    def _emerald_dist_field(self, state, blocked: set,
+                             surcharge: set = frozenset()) -> np.ndarray:
+        """(MHEIGHT, MWIDTH) int array: cheapest-path distance from each
+        tile to the nearest emerald. Multi-source Dijkstra from all
+        emerald tiles; `blocked` tiles (bags, falling-bag paths) are
+        impassable; entering a dirt tile costs 2 (digging is slower than
+        walking a tunnel), cleared tiles cost 1; `surcharge` tiles
+        (under-bag) add _UNDERBAG_SURCHARGE. Unreachable tiles get a
+        large sentinel so any reachable move dominates them.
+        """
+        H, W = state.dirt.shape
+        dist = np.full((H, W), 10 ** 6, dtype=np.int32)
+        er, ec = np.where(state.emeralds)
+        if er.size == 0:
+            return dist
+        heap: list[tuple[int, int, int]] = []
+        for r, c in zip(er.tolist(), ec.tolist()):
+            dist[r, c] = 0
+            heap.append((0, r, c))
+        heapq.heapify(heap)
+        while heap:
+            d, r, c = heapq.heappop(heap)
+            if d > dist[r, c]:
+                continue
+            for dr_, dc_ in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                nr, nc = r + dr_, c + dc_
+                if not (0 <= nr < H and 0 <= nc < W):
+                    continue
+                if (nr, nc) in blocked:
+                    continue
+                nd = d + (2 if state.dirt[nr, nc] else 1)
+                if (nr, nc) in surcharge:
+                    nd += self._UNDERBAG_SURCHARGE
+                if nd < dist[nr, nc]:
+                    dist[nr, nc] = nd
+                    heapq.heappush(heap, (nd, nr, nc))
+        return dist
+
+    def _compute_monster_tunnel_distance(self, state, monsters) -> np.ndarray:
         """(MHEIGHT, MWIDTH) int array of shortest tunnel-distance from
         any monster to that tile. Unreachable tiles get _MAX_TUNNEL_DIST.
 
@@ -328,10 +451,10 @@ class SmartHeuristic:
         """
         H, W = state.dirt.shape
         dist = np.full((H, W), self._MAX_TUNNEL_DIST, dtype=np.int32)
-        if not state.monsters:
+        if not monsters:
             return dist
         queue: collections.deque[tuple[int, int]] = collections.deque()
-        for m in state.monsters:
+        for m in monsters:
             if 0 <= m.row < H and 0 <= m.col < W:
                 dist[m.row, m.col] = 0
                 queue.append((m.row, m.col))
@@ -350,7 +473,8 @@ class SmartHeuristic:
                     queue.append((nr, nc))
         return dist
 
-    def _best_fire_direction(self, state, dr: int, dc: int) -> int:
+    def _best_fire_direction(self, state, dr: int, dc: int,
+                              monsters) -> int:
         """Return the action (LEFT/RIGHT/UP/DOWN) that points at the
         closest line-of-sight monster, or NOOP if none reachable.
 
@@ -362,7 +486,7 @@ class SmartHeuristic:
         best_dist: int | float = float("inf")
         for action in (DiggerEnv.LEFT, DiggerEnv.RIGHT,
                         DiggerEnv.UP, DiggerEnv.DOWN):
-            m = self._line_of_sight_monster(state, dr, dc, action)
+            m = self._line_of_sight_monster(state, dr, dc, action, monsters)
             if m is None:
                 continue
             d = abs(m.row - dr) + abs(m.col - dc)
@@ -371,7 +495,8 @@ class SmartHeuristic:
                 best_dir = action
         return best_dir
 
-    def _move_is_legal(self, state, dr: int, dc: int, action: int) -> bool:
+    def _move_is_legal(self, state, dr: int, dc: int, action: int,
+                        monsters) -> bool:
         deltas = {DiggerEnv.LEFT: (0, -1), DiggerEnv.RIGHT: (0, 1),
                    DiggerEnv.UP: (-1, 0), DiggerEnv.DOWN: (1, 0)}
         ddr, ddc = deltas.get(action, (0, 0))
@@ -380,11 +505,12 @@ class SmartHeuristic:
             return False
         if any(b.row == nr and b.col == nc for b in state.bags):
             return False
-        if any(m.row == nr and m.col == nc for m in state.monsters):
+        if any(m.row == nr and m.col == nc for m in monsters):
             return False
         return True
 
-    def _turn_is_safe(self, state, dr: int, dc: int, action: int) -> bool:
+    def _turn_is_safe(self, dr: int, dc: int, action: int,
+                       monsters) -> bool:
         """True if the tile we'd step onto for turn-to-fire is at least
         2 Manhattan tiles from every monster. Prevents walking directly
         into a nobbin while trying to face it.
@@ -393,12 +519,13 @@ class SmartHeuristic:
                    DiggerEnv.UP: (-1, 0), DiggerEnv.DOWN: (1, 0)}
         ddr, ddc = deltas.get(action, (0, 0))
         nr, nc = dr + ddr, dc + ddc
-        for m in state.monsters:
+        for m in monsters:
             if abs(m.row - nr) + abs(m.col - nc) < 2:
                 return False
         return True
 
-    def _line_of_sight_monster(self, state, dr: int, dc: int, facing: int):
+    def _line_of_sight_monster(self, state, dr: int, dc: int, facing: int,
+                                monsters):
         """Return the closest fireable monster, or None.
 
         "Fireable" means: collinear with the digger along `facing`, within
@@ -425,7 +552,7 @@ class SmartHeuristic:
             line = ((dr - i, dc) for i in range(1, dr + 1))
         else:  # DOWN
             line = ((dr + i, dc) for i in range(1, MHEIGHT - dr))
-        monsters_by_tile = {(m.row, m.col): m for m in state.monsters}
+        monsters_by_tile = {(m.row, m.col): m for m in monsters}
         bag_tiles = {(b.row, b.col) for b in state.bags if not b.broken}
         for i, (r, c) in enumerate(line, start=1):
             if i > self.fire_range:
@@ -524,9 +651,14 @@ def run_headless(args) -> None:
         pol_name = "dodge(survival)"
     elif args.smart:
         policy = SmartHeuristic(args.dodge_range, args.fire_range,
-                                args.fire_cooldown)
+                                args.fire_cooldown,
+                                phantom_filter=not args.no_phantom_filter,
+                                underbag=args.underbag,
+                                routing=args.routing)
         pol_name = (f"smart(dodge={args.dodge_range}, fire={args.fire_range}, "
-                    f"cd={args.fire_cooldown})")
+                    f"cd={args.fire_cooldown}, "
+                    f"phantom={not args.no_phantom_filter}, "
+                    f"underbag={args.underbag}, routing={args.routing})")
     else:
         policy = GreedyEmerald()
         pol_name = "greedy(anti-jitter)"
@@ -580,7 +712,10 @@ def run_live(args) -> None:
         policy = DodgeMonsters()
     elif args.smart:
         policy = SmartHeuristic(args.dodge_range, args.fire_range,
-                                args.fire_cooldown)
+                                args.fire_cooldown,
+                                phantom_filter=not args.no_phantom_filter,
+                                underbag=args.underbag,
+                                routing=args.routing)
     else:
         policy = GreedyEmerald()
 
@@ -671,6 +806,17 @@ def parse_args():
                    default=SmartHeuristic.DEFAULT_FIRE_COOLDOWN_STEPS,
                    help="agent-steps to wait between FIREs "
                         "(~200 game frames / frame_skip)")
+    p.add_argument("--no-phantom-filter", action="store_true",
+                   help="keep monster detections on dirt tiles (v5 behaviour)")
+    p.add_argument("--underbag", choices=("off", "strict", "transit"),
+                   default="transit",
+                   help="handling of dirt directly below a bag: off = v5 "
+                        "(freely diggable), strict = hard obstacle, "
+                        "transit = horizontal dig-through allowed, UP-entry "
+                        "and lingering forbidden (default)")
+    p.add_argument("--routing", choices=("manhattan", "dijkstra"),
+                   default="dijkstra",
+                   help="emerald distance metric for move scoring")
     p.add_argument("--live", action="store_true",
                    help="open a matplotlib window and watch the policy play")
     p.add_argument("--overlay", action="store_true",
