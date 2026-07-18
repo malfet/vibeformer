@@ -9,9 +9,13 @@ ultimately with a *pixel-only* deployable agent.
 
 | Approach | n | Mean (sem) | Max ep | Notes |
 |---|---:|---:|---:|---|
-| **SmartHeuristic v5 (teacher)** | — | **1475** | — | hand-coded BFS + LoS-fire + dir-aware + falling-bag avoidance |
-| Symbolic PPO + BC pretrain + per-step BC anchor + penalties | 20 | 891 | 1475 | **best ML so far**; beats teacher max on some episodes |
-| **Pixel BC-only (100k labels, 20 epochs), 50-ep eval** | 50 | **629.5 ±32** | **1175** | true pixel ceiling at 92.1% teacher acc |
+| **SmartHeuristic v6 (teacher)** | 10 | **1932** | **4600** | v5 + phantom filter + under-bag transit rule + Dijkstra emerald routing; min ep 1000 |
+| **Pixel BC + 3 DAGGER iters, v6 teacher, 50-ep eval** | 50 | **1042 ±50** | 1950 | **best ML so far**, pixel-only; same net/data budget as the old 629 recipe — the entire delta is the teacher |
+| Pixel PPO on the v6 BC ckpt (best ckpt; sep. critic + value warmup + anchor anneal + save-best) | 50 | 851 ±44 | 1700 | PPO still net-negative on pixels, but −18% now vs −55% in the old recipe |
+| Pixel PPO on the v6 BC ckpt (final ckpt) | 50 | 750 ±42 | 1425 | final < best: keep --save-best |
+| SmartHeuristic v5 (teacher) | 10 | 1010 | 2250 | fresh 10-ep re-bench; the historical "1475" was a 5-ep number |
+| Symbolic PPO + BC pretrain + per-step BC anchor + penalties | 20 | 891 | 1475 | best *symbolic* ML (v5-teacher era) |
+| Pixel BC-only (100k labels, 20 epochs, v5 teacher), 50-ep eval | 50 | 629.5 ±32 | 1175 | old pixel ceiling at 92.1% teacher acc |
 | Pixel DAGGER (50k warmup + 3×25k student-collected), 50-ep eval | 50 | 625.0 ±34 | 1275 | within noise of pure BC; DAGGER iters did not help |
 | Audit's pixel DAGGER (multi-iter, GreedyEmerald teacher) | — | 783 | — | the older audit number; not 50-ep checked |
 | Pixel PPO + warmup + live teacher anchor + penalties | 20 | 364 | 750 | PPO **degrades** the BC policy |
@@ -29,13 +33,16 @@ re-eval brought it to **629.5 ±32**. Treat 10-ep numbers as ±100;
 prefer the `eval_checkpoint.py` 50-ep numbers for any comparison
 worth acting on.
 
-Conclusion: the symbolic GameState extracted from the framebuffer is
-**fully sufficient** to play Digger level 1 well, but training-time
-pixels-to-action *can* be learned to ~80% of teacher quality via pure
-imitation. The bottleneck for the RL agents was never policy learning —
-it was always perception and the chicken-and-egg problem of needing
-good perception to get a reward signal. See **Lessons from PPO/DAGGER**
-below.
+Conclusion: the biggest lever, by far, is **teacher quality** (the
+same lesson the snake project learned): upgrading SmartHeuristic v5 →
+v6 (1010 → 1932, from an ablation-verified interaction of Dijkstra
+routing × the under-bag transit rule) lifted the *unchanged* pixel
+BC+DAGGER recipe from 629.5 to 1042 — and made DAGGER iterations
+productive for the first time. PPO on top of pixel BC remains
+net-negative (851 best vs 1042 BC) even with a separate critic,
+value-head warmup and an annealed teacher anchor; the residual pixel
+perception errors are not something reward-driven refinement can fix.
+See **Lessons from PPO/DAGGER** below.
 
 ## Layout
 
@@ -49,7 +56,7 @@ below.
 | `run_digger.py` | Manual play (matplotlib `--live`) + trace recording. **S / L** keys snapshot and restore emulator state (in-memory or disk via `--save-slot`). `--resume` boots straight into a saved scenario. |
 | `tools/game_state.py` | `GameState` dataclass + `extract_state_fast(frame)` — vectorised CV extractor, ~4 ms/frame. Now populates `digger.dir` and `BagPos.moving`. |
 | `tools/symbolic_env.py` | `SymbolicDiggerEnv` wraps `DiggerEnv`, emits `(6, 10, 15)` mask tensors. Supports `shaping_coef`, `time_penalty`, and `save_state` / `load_state`. |
-| `tools/heuristic_agent.py` | `SmartHeuristic v5`: BFS tunnel-distance for safety scoring, line-of-sight FIRE with dirt-tolerance, turn-to-fire, falling-bag avoidance, direction-aware. Mean 1475. |
+| `tools/heuristic_agent.py` | `SmartHeuristic v6`: v5 (BFS tunnel-distance safety, LoS FIRE, turn-to-fire, falling-bag avoidance) + phantom-monster filter, under-bag transit rule, Dijkstra emerald routing. Mean 1932. Ablation knobs: `--no-phantom-filter`, `--underbag {off,strict,transit}`, `--routing {manhattan,dijkstra}`. |
 | `tools/gen_symbolic_trace.py` | Generates BC traces from a chosen heuristic into `.npz` for offline BC. (Live teacher path in `train_ppo.py` makes this optional.) |
 | `probe_*.py` | One-off diagnostics: MPS-vs-CPU correctness, libretro state save/restore. |
 | `interaction-log.txt` | Full chronological log of every prompt; the journey. |
@@ -175,7 +182,65 @@ shaves ~40% off the warmup phase. For symbolic training (where DOSBox
 is the bottleneck), MPS is a wash. **No reason to use `--force-cpu`
 anymore unless reproducibility against a CPU baseline matters.**
 
-### 11. DOSBox save-state is gameplay-valid but not byte-exact
+### 11a. Teacher quality is the biggest lever (the snake lesson, confirmed)
+
+SmartHeuristic v6 = v5 + three changes: (a) *phantom filter* — monster
+detections on dirt tiles are CV artifacts (nobbins can't be inside
+dirt) and are ignored, so no more fake dodges or wasted 50-step FIRE
+cooldowns; (b) *under-bag transit rule* — dirt directly below an
+intact bag may be dug through horizontally but never entered from
+below (UP) and never lingered in (NOOP); (c) *Dijkstra emerald
+routing* — moves are scored against a multi-source distance field
+(dirt cost 2, bags block, under-bag dirt +6 surcharge) instead of
+straight-line Manhattan.
+
+The ablation grid (10 eps each) shows a strong interaction: neither
+(b) nor (c) helps alone — each is actively harmful — but together
+they double the teacher:
+
+| Config | Mean |
+|---|---:|
+| phantom + transit + Dijkstra (**v6, shipped default**) | **1932** |
+| v5 baseline (fresh re-bench) | 1010 |
+| phantom only | 945 |
+| phantom + transit + Manhattan | 832 |
+| strict under-bag block (emeralds under bags unreachable) | 622 |
+| Dijkstra only (routes into under-bag dirt) | 592 |
+
+The router is what *exploits* the transit rule: it plans multi-tile
+paths that dig under bags safely and detour around them; Manhattan
+can't look far enough ahead to use the rule, and Dijkstra without the
+rule plans paths that drop bags on the digger.
+
+Downstream, the same BC recipe (identical net, 100k+3×25k budget,
+92% train acc both times) went 629.5 → **1042** — the entire delta is
+teacher score at constant imitability.
+
+### 11b. DAGGER works once the teacher is worth imitating
+
+With the v5 teacher, DAGGER iterations were within noise of pure BC
+(Lesson 9). With v6, mid-evals climbed 755 → 965 → 1190 across three
+iterations, and rollout teacher-agreement rose 59.5% → 64.3%. The
+covariate-shift gap was always real; v5's labels on student-visited
+states were just not good enough to close it.
+
+### 11c. PPO on pixel BC: still net-negative, but the gap narrowed
+
+PPO from the 1042 BC checkpoint with every anti-degradation lever we
+now have — `--separate-critic` (value gradients can't touch the BC
+encoder), `--bc-value` MC-return critic warmup + head rescale (no
+initial value-loss shockwave), live v6 anchor annealed 0.3 → 0,
+`--save-best` — evals at 851 ±44 (best ckpt) / 750 ±42 (final).
+Training diagnostics were healthy the whole run (pg ≠ 0, clip
+0.05–0.35, entropy 0.5–1.3, tiny value loss, rolling score rising
+682 → 832), yet the stochastic-eval score is still ~3σ below BC.
+Compare the old recipe's 812 → 364 (−55%): the levers cut the
+degradation to −18% but didn't flip the sign. The pixel policy's 8%
+per-step perception errors remain something PPO refinement cannot
+fix — it can only trade teacher-shaped behaviour away against them.
+`--save-best` earned its keep: final < best by 100 points.
+
+### 12. DOSBox save-state is gameplay-valid but not byte-exact
 
 Added libretro `retro_serialize` / `retro_unserialize` to the pybind
 binding plus `DiggerEnv.save_state` / `load_state` on top. The visible
@@ -195,29 +260,32 @@ python -m tools.heuristic_agent --live --smart
 python -m tools.heuristic_agent --episodes 10 --no-episodic-life --smart   # ~1475 mean
 ```
 
-### Pure-BC pixel training (the best pixel recipe so far)
+### BC + DAGGER with the v6 teacher (the best pixel recipe: 1042 ±50)
 
 ```bash
 python train_ppo.py \
   --total-timesteps 0 \
   --warmup-steps 100000 --warmup-epochs 20 \
+  --dagger-iters 3 --dagger-collect-steps 25000 --dagger-epochs 5 \
   --teacher-policy smart --bc-batch-size 256 \
-  --episodic-life --run-name pixel_bc_only
+  --episodic-life --run-name pixel_bc_v6teacher
 
 # Then run a tighter eval (the in-trainer 10-ep number is too noisy):
 python eval_checkpoint.py \
-  data/checkpoints/pixel_bc_only/ppo_digger_bc_only.pt --episodes 50
+  data/checkpoints/pixel_bc_v6teacher/ppo_digger_bc_only.pt --episodes 50
 ```
 
-### DAGGER on top of BC warmup (within-noise of pure BC; see Lesson 9)
+### PPO on top of the BC checkpoint (evals below BC; see Lesson 11c)
 
 ```bash
 python train_ppo.py \
-  --total-timesteps 0 \
-  --warmup-steps 50000 --warmup-epochs 15 \
-  --dagger-iters 3 --dagger-collect-steps 25000 --dagger-epochs 5 \
-  --teacher-policy smart --bc-batch-size 256 \
-  --episodic-life --run-name pixel_dagger
+  --total-timesteps 600000 \
+  --load-agent data/checkpoints/pixel_bc_v6teacher/ppo_digger_bc_only.pt \
+  --separate-critic \
+  --warmup-steps 25000 --warmup-epochs 5 --bc-value \
+  --teacher-policy smart --bc-anchor-coef 0.3 --bc-anchor-final 0.0 \
+  --bc-batch-size 256 --episodic-life --save-best \
+  --run-name pixel_ppo_v6teacher
 ```
 
 ### Symbolic PPO with BC pretrain + anchor (the best symbolic recipe)
@@ -254,37 +322,36 @@ python train_ppo_symbolic.py --resume-from scenarios/right_edge.pkl --force-cpu 
 
 ## Open paths
 
-1. **DAGGER iterations on the BC-only pixel model** — the natural
-   covariate-shift fix. Run the BC student in the env, label its
-   visited states with the teacher, aggregate, retrain. With our 92%
-   starting point we'd plausibly reach 1000+.
-2. **Higher-resolution pixel obs** (`--obs-size 168`) — 4× more pixels
-   per tile; digger sprite goes from 1–2 px to 4 px. Audit suggests
-   this is where the 92% pixel BC ceiling could move.
-3. **Curriculum from saved scenarios** — capture "stuck at right edge"
+1. ~~DAGGER iterations on the BC-only pixel model~~ — done with the v6
+   teacher: 1042 ±50 ("plausibly reach 1000+" confirmed).
+2. **Symbolic BC + PPO with the v6 teacher** — the old symbolic recipe
+   (891) was built on v5 traces. Symbolic BC reaches 95.8% teacher
+   accuracy and PPO refinement is net-*positive* there (Lesson 5); with
+   a 1932-mean teacher the symbolic path could plausibly clear 1500.
+   Cheapest high-upside experiment left.
+3. **Higher-resolution pixel obs** (`--obs-size 168`) — 4× more pixels
+   per tile; digger sprite goes from 1–2 px to 4 px. The 92% pixel BC
+   accuracy ceiling (unchanged across both teachers) is where the next
+   pixel gain lives; more DAGGER rounds won't move it (rollout
+   agreement was still only 64% after three).
+4. **More / adaptive DAGGER rounds** — mid-evals were still climbing at
+   iter 3 (755 → 965 → 1190). Snake's rule applies: keep going while
+   rollout agreement rises, early-stop when it stalls.
+5. **Curriculum from saved scenarios** — capture "stuck at right edge"
    states via `--live S`, train from those. `--resume-from` already
    wired in `train_ppo_symbolic.py`.
-4. **Symbolic PPO past teacher mean** — current symbolic best (891) hits
-   teacher max (1475) on individual episodes but averages below. Longer
-   schedule with `--bc-anchor-final 0.0` (full PPO decoupling at end)
-   *might* let the value head learn multi-step planning the teacher's
-   greedy rule misses. Failed twice on pixels — symbolic might be
-   different.
 
 ## Known open problems (from the heuristic era)
 
-### Smart heuristic phantom monsters at borders
-
-CV occasionally tags col 0/14 / row 0/9 tiles as nobbin. Latent issue
-that triggers unnecessary dodges. Fix: exclude border tiles in
-`extract_state_fast` or raise `dgrn_c` threshold.
-
-### Bag-crushing avoidance
-
-`_greedy_step` treats intact bags as obstacles. Still missing: refusing
-to dig dirt directly below a bag (the dig opens a gap, bag falls,
-crushes digger). Falling-bag detection (`BagPos.moving`) lands but the
-"don't dig under" rule isn't wired.
+Both long-standing teacher problems were closed by SmartHeuristic v6
+(see Lesson 11a): phantom border monsters are filtered by the
+they-can't-be-in-dirt rule (teacher-side; `extract_state_fast` still
+emits them, so symbolic obs are unchanged), and the "don't dig under a
+bag" rule is wired as the under-bag transit rule. One caveat inherited
+by the phantom filter: *hobbins* genuinely dig through dirt, so the
+filter also blinds the teacher to a hobbin mid-dirt; level 1 is
+nobbin-dominated so this is currently a good trade
+(`--no-phantom-filter` to ablate).
 
 ## Key constants worth knowing
 

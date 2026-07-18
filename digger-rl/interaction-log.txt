@@ -299,3 +299,18 @@ Let's do 1
 And summarize what you've learned so far about attempts to train the PPO/DAGGER into README.md
 Sure, let's do (a) + (d)
 Commit and push this
+
+=== 2026-06-11 ===
+User: Can you look at README.md and analyze codebase in the current folder, suggest if there are any logical bugs that prevents PPO from training. Or suggest any other approaches for teaching ML model to play digger
+
+User: Ok, act on those findings, make reward clipping default, fix other bugs
+
+User: Do it
+
+User: Start the new training
+
+User: Any updates?
+
+User: What's the number?
+[2026-07-17] Can you ingest what is going on with this folder, readme as well as work in progress change, but also read the readme from ../snake-r/README.md and apply some lessons from snake to this game. I.e. I probably want you to write a better teacher for digger, and bootsrap ML model using dagger, and then try to improve it with PPO
+[2026-07-18] Commit changes and tell me which command I can use to observe how best checkpoints behaves
