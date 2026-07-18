@@ -64,7 +64,9 @@ class Config:
     update_epochs: int = 4
     norm_adv: bool = True
     clip_coef: float = 0.1
-    clip_vloss: bool = True
+    # See train_ppo.py for the rationale; clip_vloss at clip_coef=0.1
+    # caps per-update value movement and is mostly neutral when ablated.
+    clip_vloss: bool = False
     ent_coef: float = 0.01
     ent_coef_final: float | None = 0.005  # gentler anneal than pixel PPO
     vf_coef: float = 0.5
@@ -219,11 +221,22 @@ def main() -> None:
     tag = f"[{cfg.run_name}]"
     print(f"{tag} device={device}  cfg={cfg}", flush=True)
 
+    # SymbolicDiggerEnv.step applies time_penalty per *emulator* frame
+    # (env.step == one frame). env_step_skipped below calls env.step
+    # frame_skip times per agent step and sums rewards, so a naive
+    # --time-penalty 0.01 would actually subtract 0.04 per agent step.
+    # Divide here so the CLI value means "per agent step", matching the
+    # pixel trainer's semantics.
+    # The raw score signal is small relative to shaping_coef=0.5 deltas,
+    # and the symbolic best recipe relies on raw +25/+100/+250 events
+    # dominating shaping. Pass clip_reward=False explicitly so changing
+    # DiggerEnv's default doesn't quietly squash the score signal here.
     env = SymbolicDiggerEnv(max_steps=10**9,
+                             clip_reward=False,
                              episodic_life=cfg.episodic_life,
                              frame_stack=cfg.frame_stack,
                              shaping_coef=cfg.shaping_coef,
-                             time_penalty=cfg.time_penalty,
+                             time_penalty=cfg.time_penalty / max(cfg.frame_skip, 1),
                              death_penalty=cfg.death_penalty)
     in_ch = BASE_OBS_CHANNELS * cfg.frame_stack
     num_actions = env.NUM_ACTIONS

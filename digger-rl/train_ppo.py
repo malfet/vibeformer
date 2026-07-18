@@ -39,13 +39,22 @@ CKPT_DIR = REPO / "data" / "checkpoints"
 
 def _bc_collect_teacher(vec: DiggerVecEnv, teacher, K: int,
                          in_ch: int, obs_size: int, tag: str = ""
-                         ) -> tuple[np.ndarray, np.ndarray]:
-    """Drive env with teacher action; record (obs, teacher_action) per step.
+                         ) -> tuple[np.ndarray, np.ndarray,
+                                    np.ndarray, np.ndarray]:
+    """Drive env with teacher action; record per step:
 
-    Returns (obs_store: uint8 (K, in_ch, H, W), act_store: int64 (K,)).
+      - obs_store  : uint8 (K, in_ch, H, W) -- observation at step k
+      - act_store  : int64 (K,)             -- teacher's chosen action
+      - rew_store  : float32 (K,)           -- env reward emitted by that step
+      - done_store : bool (K,)              -- env done flag after that step
+
+    rew/done are needed when we want to fit the value head on MC returns
+    during warmup (--bc-value); they're zero-cost otherwise.
     """
     obs_store = np.zeros((K, in_ch, obs_size, obs_size), dtype=np.uint8)
     act_store = np.zeros((K,), dtype=np.int64)
+    rew_store = np.zeros((K,), dtype=np.float32)
+    done_store = np.zeros((K,), dtype=bool)
     obs_np = vec.reset()
     teacher.reset()
     t0 = time.monotonic()
@@ -55,7 +64,9 @@ def _bc_collect_teacher(vec: DiggerVecEnv, teacher, K: int,
         t_action = int(teacher(sym_state))
         obs_store[k] = obs_np[0]
         act_store[k] = t_action
-        obs_np, _, dones, _ = vec.step(np.array([t_action]))
+        obs_np, rewards, dones, _ = vec.step(np.array([t_action]))
+        rew_store[k] = float(rewards[0])
+        done_store[k] = bool(dones[0])
         if dones[0]:
             teacher.reset()
         if (k + 1) % 2000 == 0:
@@ -65,7 +76,32 @@ def _bc_collect_teacher(vec: DiggerVecEnv, teacher, K: int,
     print(f"{tag}  teacher-collected; action histogram: "
           + str(np.bincount(act_store, minlength=DiggerEnv.NUM_ACTIONS)
                 .tolist()), flush=True)
-    return obs_store, act_store
+    return obs_store, act_store, rew_store, done_store
+
+
+def _mc_returns(rewards: np.ndarray, dones: np.ndarray,
+                gamma: float) -> np.ndarray:
+    """Discounted MC returns, resetting the bootstrap at each done flag.
+
+    The last episode in the buffer is almost always unterminated; its
+    running return starts at 0, which underestimates the true return
+    for those tail states. That's acceptable: the value head only needs
+    to start "in the right zip code" for PPO to refine; it doesn't have
+    to be exact, and the standardise + rescale step downstream further
+    decouples scale from the per-state target.
+    """
+    n = len(rewards)
+    returns = np.zeros(n, dtype=np.float32)
+    running = 0.0
+    for t in range(n - 1, -1, -1):
+        # dones[t] flags an episode that ended *on step t*; the value at
+        # state t still includes reward t (last reward of the episode),
+        # but the bootstrap for any t' < t shouldn't see beyond it.
+        if t < n - 1 and dones[t]:
+            running = 0.0
+        running = float(rewards[t]) + gamma * running
+        returns[t] = running
+    return returns
 
 
 def _bc_collect_student(agent: "Agent", vec: DiggerVecEnv, teacher,
@@ -115,19 +151,35 @@ def _bc_train_epochs(agent: "Agent", optim: Adam,
                       obs_store: np.ndarray, act_store: np.ndarray,
                       epochs: int, batch_size: int,
                       max_grad_norm: float, device: torch.device,
-                      seed: int, tag: str = "") -> None:
+                      seed: int, tag: str = "",
+                      ret_store: np.ndarray | None = None,
+                      vf_coef: float = 0.5
+                      ) -> tuple[float, float] | None:
     """CE on (obs_store, act_store). Keeps uint8 dataset on CPU,
     transfers each minibatch to device as float32. Memory-safe for
     growing DAGGER datasets where preloading the full tensor as float
     on MPS would exceed unified-memory budget.
+
+    When `ret_store` is provided, also fits the value head with MSE
+    against the *standardised* returns (mean 0, std 1) and returns
+    (ret_mean, ret_std) so the caller can rescale the critic's last
+    linear back to raw-return units. Standardisation matters: raw
+    returns are O(50) with reward-clipped Digger, which dwarfs CE
+    (~1.0) and would have the optimiser ignore the actor entirely.
     """
     K = len(act_store)
     if K == 0:
-        return
+        return None
+    fit_value = ret_store is not None
+    if fit_value:
+        ret_mean = float(ret_store.mean())
+        ret_std = float(ret_store.std()) + 1e-6
+        norm_returns = (ret_store - ret_mean) / ret_std
     rng = np.random.default_rng(seed)
     for epoch in range(epochs):
         perm = rng.permutation(K)
         ce_sum = 0.0
+        v_sum = 0.0
         acc_sum = 0.0
         nb = 0
         for start in range(0, K, batch_size):
@@ -135,26 +187,52 @@ def _bc_train_epochs(agent: "Agent", optim: Adam,
             mb_obs = (torch.from_numpy(obs_store[mb]).to(device)
                       .float().mul_(1.0 / 255.0))
             mb_act = torch.from_numpy(act_store[mb]).to(device)
-            logits = agent.actor(agent.encode(mb_obs))
+            z = agent.encode(mb_obs)
+            logits = agent.actor(z)
             ce = F.cross_entropy(logits, mb_act)
+            loss = ce
+            v_val = 0.0
+            if fit_value:
+                # Critic encoder == actor encoder when separate_critic is
+                # off; either way reuse the right z to avoid a double
+                # forward through the conv stack.
+                z_c = agent._critic_encode(mb_obs) if agent.separate_critic else z
+                v = agent.critic(z_c).squeeze(-1)
+                mb_ret = torch.from_numpy(norm_returns[mb]).to(device)
+                v_loss = 0.5 * (v - mb_ret).pow(2).mean()
+                loss = loss + vf_coef * v_loss
+                v_val = v_loss.item()
             optim.zero_grad()
-            ce.backward()
+            loss.backward()
             nn.utils.clip_grad_norm_(agent.parameters(), max_grad_norm)
             optim.step()
             ce_sum += ce.item()
+            v_sum += v_val
             with torch.no_grad():
                 acc_sum += (logits.argmax(-1) == mb_act).float().mean().item()
             nb += 1
+        tail = f"  v_mse_norm {v_sum / nb:.3f}" if fit_value else ""
         print(f"{tag}  epoch {epoch + 1}/{epochs}  "
-              f"ce {ce_sum / nb:.3f}  acc {acc_sum / nb:.3f}",
+              f"ce {ce_sum / nb:.3f}  acc {acc_sum / nb:.3f}{tail}",
               flush=True)
+    if fit_value:
+        return ret_mean, ret_std
+    return None
 
 
 def _bc_eval(agent: "Agent", vec: DiggerVecEnv, num_episodes: int,
               device: torch.device, tag: str = "") -> list[int]:
     """Run N episodes with stochastic Categorical sampling (same path
     PPO would use during a rollout) and return the per-episode scores
-    read from libretro RAM at episode end.
+    read from libretro RAM at full game-over.
+
+    Counts only `real_done` (true game-over) so this is comparable to
+    the teacher's reported scores. With episodic_life=True every life
+    loss also raises done=True, but info["score"] is cumulative across
+    lives, so counting all dones would average partial cumulative
+    scores and deflate the reported mean (a 3-life game would log 3
+    increasing scores). The vec wrapper auto-resets between lives;
+    we keep stepping until real_done fires.
     """
     scores: list[int] = []
     obs_np = vec.reset()
@@ -164,7 +242,8 @@ def _bc_eval(agent: "Agent", vec: DiggerVecEnv, num_episodes: int,
             action, _, _, _ = agent.act(obs_t)
         obs_np, _, dones, infos = vec.step(action.cpu().numpy())
         obs_t = torch.from_numpy(obs_np).to(device).float().mul_(1.0 / 255.0)
-        if dones[0]:
+        ep_over = bool(infos[0].get("real_done", dones[0]))
+        if ep_over:
             score = int(infos[0].get("score", 0))
             scores.append(score)
             print(f"{tag}  eval {len(scores)}/{num_episodes}: "
@@ -176,13 +255,22 @@ def bc_warmup(agent: "Agent", optim: Adam, vec: DiggerVecEnv,
                teacher, cfg: Config, device: torch.device,
                tag: str = "") -> tuple[np.ndarray, np.ndarray] | tuple[None, None]:
     """Teacher-driven BC warmup. Thin wrapper around _bc_collect_teacher
-    + _bc_train_epochs. Returns the collected dataset so a downstream
+    + _bc_train_epochs. Returns the collected (obs, act) so a downstream
     DAGGER loop can append student-collected pairs to it.
 
-    Why: starting PPO + anchor jointly from a random encoder pits the
-    BC signal against PG / value / entropy noise from update 1 and the
-    encoder ends up half-trained. A clean pretrain phase lets the
-    encoder converge on the teacher's decision rule first.
+    When cfg.bc_value is set and we'll actually run PPO afterwards
+    (total_timesteps > 0), the value head is also fit on standardised
+    MC returns computed from the warmup rollout, then the critic's last
+    linear is rescaled so PPO sees raw-return predictions. Without this,
+    PPO starts with V ~= 0 against returns of magnitude ~10-50 and the
+    huge initial value loss dominates the shared encoder's gradients,
+    pulling the BC-trained features apart (README Lesson 5).
+
+    Why warmup at all: starting PPO + anchor jointly from a random
+    encoder pits the BC signal against PG / value / entropy noise from
+    update 1 and the encoder ends up half-trained. A clean pretrain
+    phase lets the encoder converge on the teacher's decision rule
+    first.
     """
     K = cfg.warmup_steps
     if K <= 0 or teacher is None:
@@ -190,12 +278,40 @@ def bc_warmup(agent: "Agent", optim: Adam, vec: DiggerVecEnv,
     print(f"{tag}warmup: teacher-driven collection of {K} steps",
           flush=True)
     in_ch = cfg.frame_stack * (3 if cfg.color else 1)
-    obs_store, act_store = _bc_collect_teacher(
+    obs_store, act_store, rew_store, done_store = _bc_collect_teacher(
         vec, teacher, K, in_ch, cfg.obs_size, tag=tag)
+
+    # Value warmup only makes sense if PPO is actually going to run
+    # afterwards (so the critic head has something to be useful *for*).
+    # In BC-only mode (total_timesteps <= 0) we skip it and save the
+    # forward/backward passes.
+    ret_store: np.ndarray | None = None
+    will_run_ppo = cfg.total_timesteps > 0
+    if cfg.bc_value and will_run_ppo:
+        ret_store = _mc_returns(rew_store, done_store, cfg.gamma)
+        n_eps = int(done_store.sum())
+        print(f"{tag}warmup: MC returns over {K} steps "
+              f"({n_eps} episode-ends): mean {ret_store.mean():.2f}  "
+              f"std {ret_store.std():.2f}  min/max "
+              f"{ret_store.min():.1f}/{ret_store.max():.1f}", flush=True)
+
     print(f"{tag}warmup: training {cfg.warmup_epochs} epochs", flush=True)
-    _bc_train_epochs(agent, optim, obs_store, act_store,
-                      cfg.warmup_epochs, cfg.bc_batch_size,
-                      cfg.max_grad_norm, device, cfg.seed, tag=tag)
+    stats = _bc_train_epochs(agent, optim, obs_store, act_store,
+                              cfg.warmup_epochs, cfg.bc_batch_size,
+                              cfg.max_grad_norm, device, cfg.seed, tag=tag,
+                              ret_store=ret_store, vf_coef=cfg.vf_coef)
+
+    if ret_store is not None and stats is not None:
+        ret_mean, ret_std = stats
+        # Absorb the standardisation into the critic's last linear so V
+        # outputs raw-scale returns from here on (mirrors bc_pretrain).
+        with torch.no_grad():
+            agent.critic.weight.mul_(ret_std)
+            agent.critic.bias.mul_(ret_std)
+            agent.critic.bias.add_(ret_mean)
+        print(f"{tag}warmup: rescaled critic head to raw return units "
+              f"(mul {ret_std:.2f}, add {ret_mean:.2f})", flush=True)
+
     return obs_store, act_store
 
 
@@ -231,7 +347,15 @@ class Config:
     update_epochs: int = 4
     norm_adv: bool = True
     clip_coef: float = 0.1
-    clip_vloss: bool = True
+    # clip_vloss reuses clip_coef as the value-update clip range, so with
+    # clip_coef=0.1 the critic can only move 0.1 units per epoch toward
+    # its target. That is fine when returns are O(1) (Atari sign rewards)
+    # but pathological when they aren't. Default off; recipes that want
+    # baselines-style value clipping can flip it on and tune clip_coef
+    # for both heads at once. See "What Matters in On-Policy RL"
+    # (Andrychowicz 2020) -- ablating clip_vloss is roughly neutral when
+    # tuned, so off is the safer default.
+    clip_vloss: bool = False
     ent_coef: float = 0.01
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
@@ -240,7 +364,10 @@ class Config:
     obs_size: int = 84
     color: bool = True                # RGB by default (3*frame_stack channels); --no-color falls back to grayscale
     encoder_width: int = 1            # NatureCNN width multiplier; 2 = ~4x params
-    clip_reward: bool = False
+    separate_critic: bool = False     # give the critic its own NatureCNN encoder
+    load_agent: str = ""              # init weights from a saved checkpoint (e.g. a BC-only run)
+    save_best: bool = False           # checkpoint whenever rolling mean game score improves
+    clip_reward: bool = True
     episodic_life: bool = False
     death_penalty: float = 0.0
     ent_coef_final: float | None = None  # if set, linearly anneal ent_coef -> this
@@ -313,41 +440,68 @@ def layer_init(layer: nn.Module, std: float = np.sqrt(2),
     return layer
 
 
+def _nature_cnn(in_channels: int, c1: int, c2: int, c3: int, fc: int) -> nn.Sequential:
+    return nn.Sequential(
+        layer_init(nn.Conv2d(in_channels, c1, 8, stride=4)), nn.ReLU(),
+        layer_init(nn.Conv2d(c1, c2, 4, stride=2)), nn.ReLU(),
+        layer_init(nn.Conv2d(c2, c3, 3, stride=1)), nn.ReLU(),
+        nn.Flatten(),
+        layer_init(nn.Linear(c3 * 7 * 7, fc)), nn.ReLU(),
+    )
+
+
 class Agent(nn.Module):
     """NatureCNN trunk + linear actor / critic heads.
 
     `width` linearly scales conv channels (32->32w, 64->64w) and the FC
     bottleneck (512->512w). width=1 is the classic NatureCNN (~1.7M params);
     width=2 is ~6M params and substantially more representation capacity.
+
+    `separate_critic`: when True, the critic gets its own NatureCNN copy
+    instead of sharing the actor's. ~2x params and slightly slower forward,
+    but value-loss gradients can no longer corrupt the BC-trained actor
+    encoder. Recommended when starting from a BC warmup (see README
+    Lesson 5 -- pixel BC+PPO regressed because PPO's value updates pulled
+    the shared encoder away from teacher features).
     """
 
-    def __init__(self, num_actions: int, in_channels: int = 4, width: int = 1):
+    def __init__(self, num_actions: int, in_channels: int = 4, width: int = 1,
+                 separate_critic: bool = False):
         super().__init__()
         c1, c2, c3, fc = 32 * width, 64 * width, 64 * width, 512 * width
         self.width = width
-        self.encoder = nn.Sequential(
-            layer_init(nn.Conv2d(in_channels, c1, 8, stride=4)), nn.ReLU(),
-            layer_init(nn.Conv2d(c1, c2, 4, stride=2)), nn.ReLU(),
-            layer_init(nn.Conv2d(c2, c3, 3, stride=1)), nn.ReLU(),
-            nn.Flatten(),
-            layer_init(nn.Linear(c3 * 7 * 7, fc)), nn.ReLU(),
-        )
+        self.separate_critic = separate_critic
+        self.encoder = _nature_cnn(in_channels, c1, c2, c3, fc)
+        if separate_critic:
+            self.critic_encoder = _nature_cnn(in_channels, c1, c2, c3, fc)
+        else:
+            # Alias attribute so .value()/.act() can read the same path
+            # regardless of mode; alias is a plain Python reference, not
+            # a submodule, so it isn't registered twice in state_dict.
+            self.critic_encoder = self.encoder
         self.actor = layer_init(nn.Linear(fc, num_actions), std=0.01)
         self.critic = layer_init(nn.Linear(fc, 1), std=1.0)
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Actor-side encoding. Use this for BC / DAGGER training so
+        only the actor encoder receives CE gradients."""
         return self.encoder(x)
 
+    def _critic_encode(self, x: torch.Tensor) -> torch.Tensor:
+        return self.critic_encoder(x)
+
     def value(self, x: torch.Tensor) -> torch.Tensor:
-        return self.critic(self.encode(x)).squeeze(-1)
+        return self.critic(self._critic_encode(x)).squeeze(-1)
 
     def act(self, x: torch.Tensor, action: torch.Tensor | None = None):
-        z = self.encode(x)
-        logits = self.actor(z)
+        z_a = self.encode(x)
+        logits = self.actor(z_a)
         dist = Categorical(logits=logits)
         if action is None:
             action = dist.sample()
-        return action, dist.log_prob(action), dist.entropy(), self.critic(z).squeeze(-1)
+        z_c = self._critic_encode(x) if self.separate_critic else z_a
+        return action, dist.log_prob(action), dist.entropy(), \
+            self.critic(z_c).squeeze(-1)
 
 
 def _decimate_trace(d: dict, factor: int) -> dict:
@@ -635,8 +789,13 @@ def parse_args() -> Config:
     p.add_argument("--frame-stack", type=int, default=Config.frame_stack)
     p.add_argument("--save-every", type=int, default=Config.save_every)
     p.add_argument("--no-anneal-lr", action="store_true")
-    p.add_argument("--clip-reward", action="store_true",
-                   help="report sign(reward) to the agent instead of raw score delta")
+    p.add_argument("--clip-reward", default=Config.clip_reward,
+                   action=argparse.BooleanOptionalAction,
+                   help="report sign(reward) to the agent (default on). "
+                        "Raw score deltas (+25 emerald / +250 kill) are O(100), "
+                        "which makes the value head dominate gradients with the "
+                        "default vf_coef and clip_coef. --no-clip-reward feeds "
+                        "raw deltas through.")
     p.add_argument("--episodic-life", action="store_true",
                    help="emit done=True on every life loss, not just game over")
     p.add_argument("--ent-coef", type=float, default=Config.ent_coef,
@@ -693,6 +852,23 @@ def parse_args() -> Config:
     p.add_argument("--encoder-width", type=int, default=Config.encoder_width,
                    help="NatureCNN channel/FC width multiplier (default 1 = "
                         "~1.7M params; 2 = ~6M params for richer encoder)")
+    p.add_argument("--load-agent", type=str, default=Config.load_agent,
+                   help="initialise the agent from a saved checkpoint "
+                        "(e.g. data/checkpoints/<run>/ppo_digger_bc_only.pt) "
+                        "before warmup/PPO. With --separate-critic the "
+                        "critic encoder is seeded from the checkpoint's "
+                        "actor encoder when the checkpoint has a shared "
+                        "trunk.")
+    p.add_argument("--save-best", action="store_true",
+                   help="whenever the rolling mean of the last 10 finished-"
+                        "game scores improves, save ppo_digger_best.pt "
+                        "(snake lesson: final != best under PPO noise)")
+    p.add_argument("--separate-critic", action="store_true",
+                   help="give the critic its own NatureCNN copy (~2x params) "
+                        "so value-loss gradients can't pull the BC-trained "
+                        "actor encoder away from teacher features. Recommended "
+                        "when running PPO on top of a BC warmup -- see "
+                        "README Lesson 5.")
     p.add_argument("--color", default=Config.color,
                    action=argparse.BooleanOptionalAction,
                    help="feed RGB to the encoder (3*frame_stack channels). "
@@ -710,7 +886,7 @@ def parse_args() -> Config:
         num_steps=a.num_steps, num_envs=a.num_envs,
         frame_skip=a.frame_skip, frame_stack=a.frame_stack,
         save_every=a.save_every, anneal_lr=not a.no_anneal_lr,
-        clip_reward=a.clip_reward, episodic_life=a.episodic_life,
+        clip_reward=bool(a.clip_reward), episodic_life=a.episodic_life,
         ent_coef=a.ent_coef, ent_coef_final=a.ent_coef_final,
         death_penalty=a.death_penalty,
         bc_traces=tuple(a.bc_traces), bc_epochs=a.bc_epochs,
@@ -723,7 +899,9 @@ def parse_args() -> Config:
         dagger_iters=a.dagger_iters,
         dagger_collect_steps=a.dagger_collect_steps,
         dagger_epochs=a.dagger_epochs,
-        color=a.color, encoder_width=a.encoder_width, run_name=a.run_name,
+        color=a.color, encoder_width=a.encoder_width,
+        separate_critic=a.separate_critic, load_agent=a.load_agent,
+        save_best=a.save_best, run_name=a.run_name,
     )
 
 
@@ -747,11 +925,35 @@ def main() -> None:
     in_ch = cfg.frame_stack * (3 if cfg.color else 1)
     agent = Agent(num_actions=DiggerEnv.NUM_ACTIONS,
                   in_channels=in_ch,
-                  width=cfg.encoder_width).to(device)
+                  width=cfg.encoder_width,
+                  separate_critic=cfg.separate_critic).to(device)
     n_params = sum(p.numel() for p in agent.parameters())
     print(f"{tag}agent: width={cfg.encoder_width}, in_ch={in_ch} "
           f"({'color' if cfg.color else 'gray'}), params={n_params:,}  "
           f"num_envs={cfg.num_envs}", flush=True)
+
+    if cfg.load_agent:
+        ckpt = torch.load(cfg.load_agent, map_location=device,
+                          weights_only=False)
+        sd = ckpt["agent"]
+        missing, unexpected = agent.load_state_dict(sd, strict=False)
+        if unexpected:
+            raise SystemExit(f"--load-agent: unexpected keys {unexpected}")
+        # A BC-only checkpoint trained without --separate-critic has no
+        # critic_encoder.*; seed the critic's encoder with the (BC-trained)
+        # actor encoder instead of leaving it at random init.
+        ce_missing = [k for k in missing if k.startswith("critic_encoder.")]
+        if ce_missing:
+            if len(ce_missing) != len(missing):
+                raise SystemExit(f"--load-agent: missing keys {missing}")
+            agent.critic_encoder.load_state_dict(agent.encoder.state_dict())
+            print(f"{tag}load-agent: critic_encoder seeded from actor "
+                  f"encoder (checkpoint had shared trunk)", flush=True)
+        elif missing:
+            raise SystemExit(f"--load-agent: missing keys {missing}")
+        print(f"{tag}load-agent: initialised from {cfg.load_agent} "
+              f"(saved at step {ckpt.get('step', '?')})", flush=True)
+
     optim = Adam(agent.parameters(), lr=cfg.learning_rate, eps=1e-5)
 
     bc_data = None
@@ -867,6 +1069,10 @@ def main() -> None:
     ep_returns_per_env = np.zeros(B, dtype=np.float32)
     ep_lengths_per_env = np.zeros(B, dtype=np.int64)
     ep_returns: collections.deque[float] = collections.deque(maxlen=20)
+    # Full-game scores (real_done only -- with episodic_life the per-life
+    # dones carry cumulative partial scores). Drives --save-best.
+    game_scores: collections.deque[float] = collections.deque(maxlen=10)
+    best_score_mean = -float("inf")
     t0 = time.monotonic()
 
     while global_step < cfg.total_timesteps:
@@ -924,6 +1130,8 @@ def main() -> None:
                           f"lives={infos[i].get('lives', 0)}", flush=True)
                     ep_returns_per_env[i] = 0.0
                     ep_lengths_per_env[i] = 0
+                    if bool(infos[i].get("real_done", d)):
+                        game_scores.append(float(infos[i].get("score", 0)))
                     if teacher is not None:
                         teacher.reset()
 
@@ -1062,6 +1270,17 @@ def main() -> None:
             if collapse_signals:
                 print(f"     ** collapse-warning: {' | '.join(collapse_signals)}",
                       flush=True)
+
+        if (cfg.save_best and len(game_scores) == game_scores.maxlen):
+            score_mean = float(np.mean(game_scores))
+            if score_mean > best_score_mean:
+                best_score_mean = score_mean
+                best = ckpt_dir / "ppo_digger_best.pt"
+                torch.save({"agent": agent.state_dict(), "step": global_step,
+                            "config": cfg.__dict__,
+                            "best_score_mean": best_score_mean}, best)
+                print(f"{tag}  new best rolling game-score mean "
+                      f"{best_score_mean:.0f} -> saved {best}", flush=True)
 
         if cfg.save_every and update % cfg.save_every == 0:
             ckpt = ckpt_dir / f"ppo_digger_step{global_step:08d}.pt"

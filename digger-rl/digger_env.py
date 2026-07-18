@@ -81,7 +81,7 @@ class DiggerEnv:
     }
 
     def __init__(self, max_steps: int = 36000,
-                 clip_reward: bool = False,
+                 clip_reward: bool = True,
                  episodic_life: bool = False,
                  death_penalty: float = 0.0):
         # 36000 frames ~= 8.5 minutes of in-game time at 70 fps. Plenty for
@@ -127,6 +127,15 @@ class DiggerEnv:
 
         if (self.episodic_life and not self._real_game_over
                 and self._core is not None):
+            # Release any key the dying life had held. If we just set
+            # _last_action=NOOP without releasing, the next agent action
+            # of NOOP early-returns in _apply_action and the prior key
+            # (e.g. RIGHT) keeps driving the emulator while the trainer
+            # records NOOP -- silent action mismatch every episodic
+            # death.
+            prior_key = self._ACTION_TO_KEY.get(self._last_action)
+            if prior_key is not None:
+                self._core.set_key(prior_key, False)
             self._last_action = self.NOOP
             self._last_score = self._read_score()
             self._prev_lives = self._read_lives()

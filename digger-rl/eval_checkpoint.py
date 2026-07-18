@@ -11,6 +11,9 @@ directly comparable to what the trainer printed.
 
 Usage:
     python eval_checkpoint.py CHECKPOINT [--episodes 50]
+
+Watch the policy play in a matplotlib window (paced to game speed):
+    python eval_checkpoint.py CHECKPOINT --live [--greedy]
 """
 
 from __future__ import annotations
@@ -31,6 +34,13 @@ def main() -> None:
     p.add_argument("--episodes", type=int, default=50)
     p.add_argument("--force-cpu", action="store_true")
     p.add_argument("--seed", type=int, default=1)
+    p.add_argument("--live", action="store_true",
+                   help="open a matplotlib window and watch the policy "
+                        "play at game speed (close the window to stop)")
+    p.add_argument("--greedy", action="store_true",
+                   help="argmax actions instead of Categorical sampling "
+                        "(deterministic; useful for observing the policy's "
+                        "modal behaviour)")
     args = p.parse_args()
 
     ckpt = torch.load(args.checkpoint, weights_only=False, map_location="cpu")
@@ -42,7 +52,8 @@ def main() -> None:
     in_ch = cfg["frame_stack"] * (3 if cfg["color"] else 1)
     agent = Agent(num_actions=DiggerEnv.NUM_ACTIONS,
                   in_channels=in_ch,
-                  width=cfg["encoder_width"]).to(device)
+                  width=cfg["encoder_width"],
+                  separate_critic=cfg.get("separate_critic", False)).to(device)
     agent.load_state_dict(ckpt["agent"])
     agent.eval()
 
@@ -66,20 +77,68 @@ def main() -> None:
     print(f"  evaluating {args.episodes} episodes...")
     print()
 
+    ACTION_NAMES = ["NOOP", "LEFT", "RIGHT", "UP", "DOWN", "FIRE"]
+    fig = img = None
+    if args.live:
+        import time
+
+        import matplotlib.pyplot as plt
+        raw = vec._env._core.get_frame()
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.set_axis_off()
+        img = ax.imshow(raw[..., :3])
+        fig.tight_layout(pad=0)
+        fig.canvas.manager.set_window_title(
+            f"DIGGER checkpoint (live) -- {args.checkpoint.parent.name}")
+        plt.ion()
+        plt.show()
+        # One agent action spans frame_skip emulator frames at ~70 fps.
+        target_dt = (1.0 / 70.087) * cfg["frame_skip"]
+        last_wall = time.monotonic()
+
     scores: list[int] = []
     obs_np = vec.reset()
     obs_t = torch.from_numpy(obs_np).to(device).float().mul_(1.0 / 255.0)
     while len(scores) < args.episodes:
         with torch.no_grad():
-            action, _, _, _ = agent.act(obs_t)
+            if args.greedy:
+                logits = agent.actor(agent.encode(obs_t))
+                action = logits.argmax(-1)
+            else:
+                action, _, _, _ = agent.act(obs_t)
         obs_np, _, dones, infos = vec.step(action.cpu().numpy())
         obs_t = torch.from_numpy(obs_np).to(device).float().mul_(1.0 / 255.0)
-        if dones[0]:
+        if args.live:
+            import matplotlib.pyplot as plt
+            if not plt.fignum_exists(fig.number):
+                print("window closed; stopping.")
+                break
+            img.set_data(vec._env._core.get_frame()[..., :3])
+            fig.canvas.manager.set_window_title(
+                f"DIGGER -- score {infos[0].get('score', 0):>6d} -- "
+                f"lives {infos[0].get('lives', 0)} -- "
+                f"a={ACTION_NAMES[int(action[0])]:<5s} -- "
+                f"ep {len(scores) + 1}/{args.episodes}")
+            fig.canvas.draw_idle()
+            fig.canvas.flush_events()
+            slack = target_dt - (time.monotonic() - last_wall)
+            if slack > 0:
+                time.sleep(slack)
+            last_wall = time.monotonic()
+        # With episodic_life=True (the trained config), `done` fires on
+        # every life loss and info["score"] is cumulative across lives.
+        # Count only true game-over so the reported number matches the
+        # teacher's full-game score; the vec env auto-resets between
+        # lives transparently.
+        if bool(infos[0].get("real_done", dones[0])):
             score = int(infos[0].get("score", 0))
             scores.append(score)
             print(f"  ep {len(scores):>3d}/{args.episodes}: score {score}",
                   flush=True)
 
+    if not scores:
+        vec.close()
+        return
     arr = np.array(scores, dtype=np.int32)
     n = len(arr)
     sem = float(arr.std() / np.sqrt(n))
