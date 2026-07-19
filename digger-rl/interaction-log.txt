@@ -320,3 +320,6 @@ User: What's the number?
 [2026-07-18] May be let's focus on heuristic model improvements, as it still dies under the bag of gold. Before making any changes propose a plan how to improve it, and do you remember that there is a full digger source code at ~/git/sobomax/digger
 [2026-07-18] Sorry, let's forget about ML part right now and just focus on a teacher
 [2026-07-18] If so yes please implement phase 0 and 1
+[2026-07-19] Do you have any logic for firing at monsters?
+[2026-07-19] Besides, even without firing, one should be able to finish 1st level on one life easily
+[2026-07-19] But give firing a try

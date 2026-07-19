@@ -173,7 +173,18 @@ def greedy_emerald(state) -> int:
 
 
 class SmartHeuristic:
-    """Emerald-chaser with monster dodging + opportunistic firing (v6.2).
+    """Emerald-chaser with monster dodging + opportunistic firing (v6.3).
+
+    v6.3: retreat-and-ambush firing is on by default
+    (fire_turn_min_dist=2). monai (monster.c) is a greedy chaser, so a
+    nobbin following us down our own tunnel sits in permanent LoS
+    behind us; flipping facing costs only ~4px of movement, so at
+    distance 2 the teacher turns and kills it instead of fleeing.
+    Same-session 3-arm A/B: ambush 1399 mean / 1325 median vs baseline
+    1242 / 1000; a wider safety horizon + monster prediction
+    (--safety-cap 3 --predict-monsters) measured WORSE (994/500, more
+    level-1 deaths) -- over-caution slows emerald collection and time
+    exposure is itself the dominant risk. Those knobs stay off.
 
     v6 changes (the "better teacher" pass, applying the snake-project
     lesson that teacher quality is the biggest lever downstream):
@@ -220,7 +231,10 @@ class SmartHeuristic:
                  fire_cooldown_steps: int = DEFAULT_FIRE_COOLDOWN_STEPS,
                  phantom_filter: bool = True,
                  underbag: str = "transit",
-                 routing: str = "dijkstra"):
+                 routing: str = "dijkstra",
+                 fire_turn_min_dist: int = 2,
+                 safety_cap: int = 2,
+                 predict_monsters: bool = False):
         # `dodge_range` is retained for CLI backward-compat but no longer
         # used: the new lex-scored selection caps safety at distance 3 and
         # blends emerald-chase in continuously.
@@ -247,6 +261,24 @@ class SmartHeuristic:
         self.phantom_filter = phantom_filter
         self.underbag = underbag
         self.routing = routing
+        # fire_turn_min_dist: minimum tunnel distance to the LoS target
+        # at which turn-to-fire engages. 3 reproduces the historical
+        # behaviour (post-turn tile >= 2 from the target). 2 enables the
+        # retreat-and-ambush kill: a nobbin chasing us down our own
+        # tunnel (monai in monster.c is a greedy chaser) sits in LoS
+        # behind us; the "turn" only holds the key for ~4px of a 20px
+        # tile, so flipping facing at d=2 and firing next step lands the
+        # kill before the monster closes.
+        self.fire_turn_min_dist = fire_turn_min_dist
+        # safety_cap: tunnel-distance at which monster proximity stops
+        # mattering in the move score. 2 = react only when a collision
+        # is one step away; 3 reacts a tile earlier.
+        self.safety_cap = safety_cap
+        # predict_monsters: also seed the monster-distance BFS with each
+        # monster's approach tiles (open neighbours strictly closer to
+        # the digger). monai chases greedily, so an approaching monster
+        # is effectively already a tile closer.
+        self.predict_monsters = predict_monsters
         self.prev_dir: int = DiggerEnv.NOOP
         self._fire_cd: int = 0
 
@@ -353,17 +385,30 @@ class SmartHeuristic:
             if target_dir != DiggerEnv.NOOP and target_dir == facing:
                 return DiggerEnv.FIRE
             if target_dir != DiggerEnv.NOOP:
-                # Only turn-to-fire when (a) the move is legal and (b) the
-                # post-turn tile is at least 2 tiles from the nearest
-                # monster. Without (b) the agent walks directly into a
-                # nearby monster trying to align its facing: at the right
-                # edge with a monster closing along the same row, this
-                # caused an oscillating LEFT-turn → FIRE → walk back RIGHT
-                # → repeat loop while the next nobbin closed in, with the
-                # digger never digging UP/DOWN to escape.
+                # Only turn-to-fire when (a) the move is legal, (b) the
+                # LoS target is at least fire_turn_min_dist away, and
+                # (c) the post-turn tile is >= 2 tiles from every OTHER
+                # monster. Without (b)/(c) the agent walks directly into
+                # a nearby monster trying to align its facing: at the
+                # right edge with a monster closing along the same row,
+                # this caused an oscillating LEFT-turn → FIRE → walk back
+                # RIGHT → repeat loop while the next nobbin closed in.
+                # The target itself is exempt from the post-turn-tile
+                # check: the turn press moves ~4px of a 20px tile, so at
+                # fire_turn_min_dist=2 the retreat-and-ambush (flip
+                # facing on a chaser, fire next step) is safe even
+                # though a full step toward it would not be.
+                target_m = self._line_of_sight_monster(
+                    state, dr, dc, target_dir, monsters)
+                others = [m for m in monsters if m is not target_m]
+                t_dist = (abs(target_m.row - dr) + abs(target_m.col - dc)
+                          if target_m is not None else 0)
                 ddr, ddc = _ACTION_DELTA[target_dir]
-                if self._move_is_legal(state, dr, dc, target_dir, monsters) \
-                        and self._turn_is_safe(dr, dc, target_dir, monsters) \
+                if target_m is not None \
+                        and t_dist >= self.fire_turn_min_dist \
+                        and self._move_is_legal(state, dr, dc, target_dir,
+                                                monsters) \
+                        and self._turn_is_safe(dr, dc, target_dir, others) \
                         and (dr + ddr, dc + ddc) not in hazard_tiles:
                     return target_dir
 
@@ -374,7 +419,8 @@ class SmartHeuristic:
         # over-penalises moves toward emeralds along the digger's own
         # tunnel. The v2 used Manhattan, which conflated reachable and
         # blocked threats and made the agent reroute pointlessly.
-        tunnel_dist = self._compute_monster_tunnel_distance(state, monsters)
+        tunnel_dist = self._compute_monster_tunnel_distance(
+            state, monsters, digger_rc=(dr, dc))
         monster_tiles = {(m.row, m.col) for m in monsters}
         # Distance-to-nearest-emerald over the real board replaces the
         # v5 straight-line Manhattan distance when routing="dijkstra":
@@ -435,12 +481,12 @@ class SmartHeuristic:
                     continue
             m_dist = int(tunnel_dist[nr, nc])
             e_dist = emerald_dist(nr, nc)
-            # `safety` is capped at 2: only tiles where a monster could
-            # collide next step (m_dist=1) get penalised. m_dist>=2 buckets
-            # together and emerald-chase takes over. Unreachable monsters
-            # produce m_dist=_MAX_TUNNEL_DIST which trivially clears the
-            # cap.
-            safety = min(m_dist, 2)
+            # `safety` is capped at `safety_cap` (default 2): tiles a
+            # monster could reach within cap steps get penalised
+            # proportionally; beyond it emerald-chase takes over.
+            # Unreachable monsters produce m_dist=_MAX_TUNNEL_DIST which
+            # trivially clears the cap.
+            safety = min(m_dist, self.safety_cap)
             sticky = (1 if action == self.prev_dir
                        and action != DiggerEnv.NOOP else 0)
             # `-is_noop` sits above `-e_dist` in the lex order so a NOOP
@@ -507,7 +553,9 @@ class SmartHeuristic:
                     heapq.heappush(heap, (nd, nr, nc))
         return dist
 
-    def _compute_monster_tunnel_distance(self, state, monsters) -> np.ndarray:
+    def _compute_monster_tunnel_distance(self, state, monsters,
+                                          digger_rc: tuple[int, int] | None
+                                          = None) -> np.ndarray:
         """(MHEIGHT, MWIDTH) int array of shortest tunnel-distance from
         any monster to that tile. Unreachable tiles get _MAX_TUNNEL_DIST.
 
@@ -515,6 +563,11 @@ class SmartHeuristic:
         any tile classified as dirt. A monster sitting in a different
         tunnel separated by an unbroken dirt wall registers as unreachable
         and stops contaminating the safety score.
+
+        With predict_monsters, each monster's open neighbour tiles that
+        are strictly closer (Manhattan) to the digger are seeded at
+        distance 0 too: monai (monster.c) chases greedily, so an
+        approaching monster is effectively already there.
         """
         H, W = state.dirt.shape
         dist = np.full((H, W), self._MAX_TUNNEL_DIST, dtype=np.int32)
@@ -525,6 +578,20 @@ class SmartHeuristic:
             if 0 <= m.row < H and 0 <= m.col < W:
                 dist[m.row, m.col] = 0
                 queue.append((m.row, m.col))
+        if self.predict_monsters and digger_rc is not None:
+            gr, gc = digger_rc
+            for m in monsters:
+                d0 = abs(m.row - gr) + abs(m.col - gc)
+                for dr_, dc_ in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                    nr, nc = m.row + dr_, m.col + dc_
+                    if not (0 <= nr < H and 0 <= nc < W):
+                        continue
+                    if state.dirt[nr, nc]:
+                        continue
+                    if abs(nr - gr) + abs(nc - gc) < d0 \
+                            and dist[nr, nc] > 0:
+                        dist[nr, nc] = 0
+                        queue.append((nr, nc))
         # 4-connected BFS over non-dirt tiles.
         while queue:
             r, c = queue.popleft()
@@ -748,6 +815,8 @@ class DeathBagLogger:
         self.ep = ep
         self.step = 0
         self.prev_lives = None
+        self._prev_emeralds: int | None = None
+        self._level = 1
         self._unsupported.clear()
         self._moving.clear()
         self._last_digger: tuple[int, int, int] | None = None
@@ -824,6 +893,15 @@ class DeathBagLogger:
         and the info dict returned by the env for that step."""
         self.step += 1
         self._track_bags(state)
+        # Level transitions: the emerald grid refills. CV occlusion
+        # (a nobbin covering an emerald) only flickers counts by 1-2,
+        # so a jump of >= 4 is unambiguous.
+        n_em = int(state.emeralds.sum())
+        if self._prev_emeralds is not None and n_em - self._prev_emeralds >= 4:
+            self._level += 1
+            self._emit({"ev": "level_up", "ep": self.ep,
+                        "step": self.step, "level": self._level})
+        self._prev_emeralds = n_em
         if state.digger is not None:
             self._last_digger = (int(state.digger.row),
                                  int(state.digger.col), self.step)
@@ -838,7 +916,7 @@ class DeathBagLogger:
     def _log_death(self, state, info: dict) -> None:
         self.deaths += 1
         rec: dict = {"ev": "death", "ep": self.ep, "step": self.step,
-                     "score": info.get("score", 0)}
+                     "level": self._level, "score": info.get("score", 0)}
         if state.digger is not None:
             dr, dc = int(state.digger.row), int(state.digger.col)
             rec["digger"] = [dr, dc]
@@ -883,7 +961,10 @@ def run_headless(args) -> None:
                                 args.fire_cooldown,
                                 phantom_filter=not args.no_phantom_filter,
                                 underbag=args.underbag,
-                                routing=args.routing)
+                                routing=args.routing,
+                                fire_turn_min_dist=args.fire_turn_min_dist,
+                                safety_cap=args.safety_cap,
+                                predict_monsters=args.predict_monsters)
         pol_name = (f"smart(dodge={args.dodge_range}, fire={args.fire_range}, "
                     f"cd={args.fire_cooldown}, "
                     f"phantom={not args.no_phantom_filter}, "
@@ -954,7 +1035,10 @@ def run_live(args) -> None:
                                 args.fire_cooldown,
                                 phantom_filter=not args.no_phantom_filter,
                                 underbag=args.underbag,
-                                routing=args.routing)
+                                routing=args.routing,
+                                fire_turn_min_dist=args.fire_turn_min_dist,
+                                safety_cap=args.safety_cap,
+                                predict_monsters=args.predict_monsters)
     else:
         policy = GreedyEmerald()
 
@@ -1056,6 +1140,17 @@ def parse_args():
     p.add_argument("--routing", choices=("manhattan", "dijkstra"),
                    default="dijkstra",
                    help="emerald distance metric for move scoring")
+    p.add_argument("--fire-turn-min-dist", type=int, default=2,
+                   help="min LoS-target distance for turn-to-fire. The "
+                        "default 2 enables the retreat-and-ambush kill on "
+                        "chasers (same-session A/B: 1399 vs 1242 mean, "
+                        "median 1325 vs 1000); 3 = pre-v6.3 behaviour")
+    p.add_argument("--safety-cap", type=int, default=2,
+                   help="monster tunnel-distance beyond which proximity "
+                        "stops affecting the move score (default 2)")
+    p.add_argument("--predict-monsters", action="store_true",
+                   help="seed the monster-distance BFS with approach "
+                        "tiles (monsters chase greedily per monster.c)")
     p.add_argument("--death-log", type=str, default="",
                    help="append JSONL death-forensics + bag-timing events "
                         "to this file (headless mode only)")
