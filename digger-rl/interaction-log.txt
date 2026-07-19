@@ -317,3 +317,6 @@ User: What's the number?
 [2026-07-18] Hmm, --live failed with AttributeError: 'NoneType' object has no attribute 'get_frame' (eval_checkpoint.py line 86, vec._env._core.get_frame() in main)
 [2026-07-18] Another question - how --greedy option can be applied to a checkpoint?
 [2026-07-18] Can you change greety to argmax or something, because greedy has a very different semantic for the teacher
+[2026-07-18] May be let's focus on heuristic model improvements, as it still dies under the bag of gold. Before making any changes propose a plan how to improve it, and do you remember that there is a full digger source code at ~/git/sobomax/digger
+[2026-07-18] Sorry, let's forget about ML part right now and just focus on a teacher
+[2026-07-18] If so yes please implement phase 0 and 1

@@ -9,7 +9,7 @@ ultimately with a *pixel-only* deployable agent.
 
 | Approach | n | Mean (sem) | Max ep | Notes |
 |---|---:|---:|---:|---|
-| **SmartHeuristic v6 (teacher)** | 10 | **1932** | **4600** | v5 + phantom filter + under-bag transit rule + Dijkstra emerald routing; min ep 1000 |
+| **SmartHeuristic v6 (teacher)** | 10 | **1932** | **4600** | v5 + phantom filter + under-bag transit rule + Dijkstra emerald routing; min ep 1000. Same-session vs v5's 1010; absolute level drifts ±400 between sessions (see caveat) |
 | **Pixel BC + 3 DAGGER iters, v6 teacher, 50-ep eval** | 50 | **1042 ±50** | 1950 | **best ML so far**, pixel-only; same net/data budget as the old 629 recipe — the entire delta is the teacher |
 | Pixel PPO on the v6 BC ckpt (best ckpt; sep. critic + value warmup + anchor anneal + save-best) | 50 | 851 ±44 | 1700 | PPO still net-negative on pixels, but −18% now vs −55% in the old recipe |
 | Pixel PPO on the v6 BC ckpt (final ckpt) | 50 | 750 ±42 | 1425 | final < best: keep --save-best |
@@ -32,6 +32,17 @@ result was reported as "812" from a 10-episode eval; a proper 50-ep
 re-eval brought it to **629.5 ±32**. Treat 10-ep numbers as ±100;
 prefer the `eval_checkpoint.py` 50-ep numbers for any comparison
 worth acting on.
+
+**Caveat on cross-session drift.** Worse: 20-episode teacher means
+measured on *identical code* moved from 1634/1932 one day to 1226 the
+next (three same-day runs of the new code clustered tightly at
+1149–1214 while the old code scored 1226 that same day). Whatever the
+mechanism (DOSBox timing/monster behaviour vs. system load), the
+between-session spread (~±400) dwarfs the within-session sem (~±150).
+**Only same-session A/B comparisons are valid**; never compare a
+today-number against a yesterday-number. A chunk of the "teacher v6
+doubled v5" delta above is real (same-session ablation grid), but the
+absolute teacher level varies by session.
 
 Conclusion: the biggest lever, by far, is **teacher quality** (the
 same lesson the snake project learned): upgrading SmartHeuristic v5 →

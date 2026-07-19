@@ -173,18 +173,32 @@ def greedy_emerald(state) -> int:
 
 
 class SmartHeuristic:
-    """Emerald-chaser with monster dodging + opportunistic firing (v6).
+    """Emerald-chaser with monster dodging + opportunistic firing (v6.2).
 
     v6 changes (the "better teacher" pass, applying the snake-project
     lesson that teacher quality is the biggest lever downstream):
       - phantom-monster filter: detections on dirt tiles are CV
         artifacts and are ignored (no fake dodges / wasted FIREs);
-      - don't-dig-under-bag: dirt directly below an intact bag is
-        treated as an obstacle (digging it releases the bag onto us);
+      - under-bag transit rule: dirt below an intact bag may be dug
+        through horizontally but never entered from below or lingered
+        in (digging it releases the bag onto us);
       - BFS emerald routing: moves are scored against a multi-source
         Dijkstra distance field (dirt costs 2, bags block) instead of
         straight-line Manhattan distance, so the agent routes *around*
         bags and prefers existing tunnels.
+
+    v6.2 adds the dynamic fall-column hazard model, grounded in the
+    Digger Remastered source (bags.c): an unsupported bag wobbles for
+    ~15 ticks then falls at 3 ticks/tile, and the digger only pauses
+    the fuse while directly beneath it moving vertically. Every
+    unsupported or falling bag projects a hazard column (contiguous
+    not-fully-dirt tiles below it): never entered from outside, never
+    FIREd from, never NOOPed in; when inside, sideways exits through
+    open tunnel are preferred (`fast_exit`) and DOWN is forbidden --
+    a falling bag is ~1.7x faster than the digger. Hazard avoidance
+    leads the lex score, above monster distance. Also fixes the
+    fire-at-nothing bug (FIRE when target_dir == facing == NOOP at
+    episode start).
 
     Keeps `prev_dir` so we know which way the digger is facing (needed
     for firing -- the bullet travels in the facing direction). Also
@@ -285,14 +299,58 @@ class SmartHeuristic:
                         if not (0 <= m.row < MHEIGHT and 0 <= m.col < MWIDTH
                                 and state.dirt[m.row, m.col])]
 
+        # ---- Bag geometry: obstacles + dynamic fall-column hazard ------
+        # Ground truth (bags.c, Digger Remastered source): a bag whose
+        # support tile is no longer fully solid starts a ~15-tick wobble
+        # fuse, then falls at 3 ticks/tile -- ~1.7x faster than the
+        # digger walks, killing anything at-or-below it in the column.
+        # The digger only pauses the fuse while directly beneath AND
+        # moving vertically; standing still or passing horizontally does
+        # not. CV can't see the wobble animation, but "support tile is
+        # not dirt" is exactly the fuse-lit condition, so we derive the
+        # hazard from the dirt grid: every unsupported or falling bag
+        # projects a fall column (contiguous not-fully-dirt tiles below
+        # it) that we must never enter, never linger in, and exit
+        # sideways if we're inside (digging DOWN can't outrun a bag).
+        bag_tiles = {(b.row, b.col) for b in state.bags}
+        underbag_tiles: set[tuple[int, int]] = set()
+        hazard_tiles: set[tuple[int, int]] = set()
+        for b in state.bags:
+            below = (b.row + 1, b.col)
+            supported = (b.row + 1 >= MHEIGHT or state.dirt[below]
+                         or below in bag_tiles)
+            if not b.moving and supported:
+                underbag_tiles.add(below)
+                continue
+            r = b.row + 1
+            while r < MHEIGHT and not state.dirt[r, b.col] \
+                    and (r, b.col) not in bag_tiles:
+                hazard_tiles.add((r, b.col))
+                r += 1
+        if self.underbag == "strict":
+            # Hard obstacle. Measured to cost ~390 mean score: emeralds
+            # directly beneath bags become permanently unreachable.
+            bag_tiles |= {t for t in underbag_tiles if state.dirt[t]}
+        in_hazard = (dr, dc) in hazard_tiles
+
         # ---- FIRE / turn-to-fire opportunity ----------------------------
         # Scan every direction for a line-of-sight monster, not just the
         # one we're facing. If a fireable target is in *some* direction,
         # turn toward it: today we move toward it (and face it as a side
         # effect), then next step the facing matches and we FIRE.
-        if self._fire_cd == 0:
+        # Never while inside a fall column: a lit fuse outranks any
+        # monster; keep moving.
+        if self._fire_cd == 0 and not in_hazard:
             target_dir = self._best_fire_direction(state, dr, dc, monsters)
-            if target_dir == facing:
+            # target_dir must be a real direction: at episode start both
+            # target_dir and facing are NOOP, and a bare `==` makes the
+            # agent FIRE at nothing, wasting the opening cooldown. (A
+            # cross-session comparison once suggested the wasted shot
+            # helped by suppressing early monster-hunting; a same-day
+            # control run showed that was benchmark drift -- 20-ep means
+            # move +/-400 between sessions on identical code. Same-
+            # session A/B only.)
+            if target_dir != DiggerEnv.NOOP and target_dir == facing:
                 return DiggerEnv.FIRE
             if target_dir != DiggerEnv.NOOP:
                 # Only turn-to-fire when (a) the move is legal and (b) the
@@ -303,8 +361,10 @@ class SmartHeuristic:
                 # caused an oscillating LEFT-turn → FIRE → walk back RIGHT
                 # → repeat loop while the next nobbin closed in, with the
                 # digger never digging UP/DOWN to escape.
+                ddr, ddc = _ACTION_DELTA[target_dir]
                 if self._move_is_legal(state, dr, dc, target_dir, monsters) \
-                        and self._turn_is_safe(dr, dc, target_dir, monsters):
+                        and self._turn_is_safe(dr, dc, target_dir, monsters) \
+                        and (dr + ddr, dc + ddc) not in hazard_tiles:
                     return target_dir
 
         # ---- Move selection: lex-scored single pass --------------------
@@ -315,32 +375,16 @@ class SmartHeuristic:
         # tunnel. The v2 used Manhattan, which conflated reachable and
         # blocked threats and made the agent reroute pointlessly.
         tunnel_dist = self._compute_monster_tunnel_distance(state, monsters)
-        bag_tiles = {(b.row, b.col) for b in state.bags}
-        # Tiles directly below an intact bag: the "don't dig under a bag"
-        # zone. How they're treated depends on the underbag mode.
-        underbag_tiles: set[tuple[int, int]] = set()
-        for b in state.bags:
-            if b.moving:
-                # Tiles under a falling bag will be occupied within a few
-                # frames; a falling bag covers >1 tile per agent-step, so
-                # block two tiles of the drop path.
-                for k in (1, 2):
-                    if b.row + k < MHEIGHT:
-                        bag_tiles.add((b.row + k, b.col))
-            elif b.row + 1 < MHEIGHT:
-                underbag_tiles.add((b.row + 1, b.col))
-        if self.underbag == "strict":
-            # Hard obstacle. Measured to cost ~390 mean score: emeralds
-            # directly beneath bags become permanently unreachable.
-            bag_tiles |= {t for t in underbag_tiles if state.dirt[t]}
         monster_tiles = {(m.row, m.col) for m in monsters}
         # Distance-to-nearest-emerald over the real board replaces the
         # v5 straight-line Manhattan distance when routing="dijkstra":
-        # bags block, dirt costs 2, and in "transit" mode under-bag dirt
-        # pays a surcharge so routes prefer going around a bag but can
-        # still dig through to an emerald beneath it.
+        # bags and active fall columns block, dirt costs 2, and in
+        # "transit" mode under-bag dirt pays a surcharge so routes
+        # prefer going around a bag but can still dig through to an
+        # emerald beneath it.
         surcharge = (underbag_tiles if self.underbag == "transit" else set())
-        em_dist = (self._emerald_dist_field(state, bag_tiles, surcharge)
+        em_dist = (self._emerald_dist_field(state, bag_tiles | hazard_tiles,
+                                            surcharge)
                    if self.routing == "dijkstra" else None)
         no_emeralds = not bool(state.emeralds.any())
         if em_dist is None:
@@ -365,9 +409,23 @@ class SmartHeuristic:
             if (nr, nc) in monster_tiles:
                 # Stepping onto a monster tile == instant death.
                 continue
+            tile_hazard = (nr, nc) in hazard_tiles
+            if tile_hazard and not in_hazard:
+                # Never step into an active fall column from outside.
+                continue
+            if in_hazard:
+                # Already inside one (e.g. mid dig-through when the
+                # support broke): keep moving and get out sideways.
+                # DOWN stays inside the column and a falling bag is
+                # ~1.7x faster than we are; NOOP burns fuse ticks.
+                if action == DiggerEnv.NOOP:
+                    continue
+                if action == DiggerEnv.DOWN and tile_hazard:
+                    continue
             if self.underbag == "transit":
-                # Horizontal dig-through under a bag is fine (the bag
-                # wobbles ~20 frames before falling; we'll be gone), but
+                # Horizontal dig-through under a bag is allowed (the
+                # wobble fuse gives us ~15 ticks; the hazard rules above
+                # take over the moment the support actually breaks), but
                 # digging UP into the under-bag tile drops the bag into
                 # our own column, and standing still beneath one invites
                 # a crush.
@@ -391,7 +449,16 @@ class SmartHeuristic:
             # any move that walks AWAY from an emerald (e.g. to dodge),
             # and the old ordering had NOOP win those ties.
             is_noop = 1 if action == DiggerEnv.NOOP else 0
-            score = (safety, -is_noop, -e_dist, sticky)
+            # `not_hazard` leads the lex order: leaving the fall column
+            # outranks monster distance -- a bag drop is near-certain
+            # death on its timer, a monster one tile away still has to
+            # choose to walk into us. While inside a column, `fast_exit`
+            # prefers open-tunnel exits over digging through dirt
+            # (digging is ~1.7x slower than the bag falls).
+            not_hazard = 0 if tile_hazard else 1
+            fast_exit = (1 if in_hazard and not state.dirt[nr, nc] else 0)
+            score = (not_hazard, fast_exit, safety, -is_noop, -e_dist,
+                     sticky)
             if best_score is None or score > best_score:
                 best_score = score
                 best_action = action
@@ -641,6 +708,168 @@ class DodgeMonsters:
         return best_action
 
 
+# ---- Death / bag-timing instrumentation -----------------------------------
+
+class DeathBagLogger:
+    """JSONL event logger for headless runs (--death-log PATH).
+
+    Two jobs:
+      1. Death forensics: on every life loss, dump the pre-death state
+         (digger tile, bags with support/moving flags, nearest-monster
+         distance) plus a classification: was the digger inside some
+         bag's *fall column* (contiguous not-fully-dirt tiles below an
+         unsupported or moving bag)?
+      2. Passive timing calibration: per bag, log the step when its
+         support tile stops being dirt ("unsupported"), the step its
+         sprite first goes vertically off-centre ("bag_moving"), and
+         when it stops ("bag_landed"). The unsupported->moving gap
+         measures the game's 15-tick wobble fuse in agent-steps; the
+         landing row delta measures fall speed. (Ground truth: bags.c
+         in the Digger Remastered source -- wt=15, 6px/tick, breaks
+         into gold on fallh>1.)
+    """
+
+    def __init__(self, path: str):
+        import json
+        self._json = json
+        self._f = open(path, "a")
+        self.deaths = 0
+        # col -> (row_when_support_lost, step)
+        self._unsupported: dict[int, tuple[int, int]] = {}
+        # col -> (row_first_moving, step)
+        self._moving: dict[int, tuple[int, int]] = {}
+        self.start_episode(0)
+
+    def _emit(self, obj: dict) -> None:
+        self._f.write(self._json.dumps(obj) + "\n")
+        self._f.flush()
+
+    def start_episode(self, ep: int) -> None:
+        self.ep = ep
+        self.step = 0
+        self.prev_lives = None
+        self._unsupported.clear()
+        self._moving.clear()
+        self._last_digger: tuple[int, int, int] | None = None
+        # (step, "unsupported"|"moving"|"landed", col, row) ring of
+        # recent bag activity for post-hoc death attribution.
+        self._recent: collections.deque = collections.deque(maxlen=40)
+
+    @staticmethod
+    def _bag_supported(state, b) -> bool:
+        if b.row + 1 >= MHEIGHT:
+            return True  # resting on the floor
+        return bool(state.dirt[b.row + 1, b.col])
+
+    @staticmethod
+    def _fall_columns(state) -> set[tuple[int, int]]:
+        """Tiles inside the fall column of any unsupported or moving
+        bag: contiguous run of not-fully-dirt tiles directly below it.
+        """
+        out: set[tuple[int, int]] = set()
+        for b in state.bags:
+            if not b.moving and DeathBagLogger._bag_supported(state, b):
+                continue
+            r = b.row + 1
+            while r < MHEIGHT and not state.dirt[r, b.col]:
+                out.add((r, b.col))
+                r += 1
+        return out
+
+    def on_frame(self, state) -> None:
+        """Call once per emulator frame (the env extracts a fresh state
+        every frame anyway). Bag falls are FAST -- a 1-tile drop takes
+        ~3 game ticks, less than one agent step at frame_skip=4 -- so
+        per-step sampling misses short falls entirely; per-frame
+        tracking is the only way to attribute those deaths.
+        """
+        self._track_bags(state)
+
+    def _track_bags(self, state) -> None:
+        for b in state.bags:
+            col = int(b.col)
+            if b.moving:
+                if col not in self._moving:
+                    self._moving[col] = (int(b.row), self.step)
+                    ev = {"ev": "bag_moving", "ep": self.ep,
+                          "step": self.step, "col": col, "row": int(b.row)}
+                    if col in self._unsupported:
+                        r0, s0 = self._unsupported[col]
+                        ev["fuse_steps"] = self.step - s0
+                        ev["row_at_support_loss"] = r0
+                    self._recent.append((self.step, "moving", col, int(b.row)))
+                    self._emit(ev)
+            else:
+                if col in self._moving:
+                    r0, s0 = self._moving.pop(col)
+                    self._recent.append((self.step, "landed", col, int(b.row)))
+                    self._emit({"ev": "bag_landed", "ep": self.ep,
+                                "step": self.step, "col": col,
+                                "row_from": r0, "row_to": int(b.row),
+                                "fall_steps": self.step - s0})
+                    self._unsupported.pop(col, None)
+                if not self._bag_supported(state, b):
+                    if col not in self._unsupported:
+                        self._unsupported[col] = (int(b.row), self.step)
+                        self._recent.append(
+                            (self.step, "unsupported", col, int(b.row)))
+                        self._emit({"ev": "unsupported", "ep": self.ep,
+                                    "step": self.step, "col": col,
+                                    "row": int(b.row)})
+                else:
+                    self._unsupported.pop(col, None)
+
+    def on_step(self, state, info: dict) -> None:
+        """Call once per agent step with the state the policy just saw
+        and the info dict returned by the env for that step."""
+        self.step += 1
+        self._track_bags(state)
+        if state.digger is not None:
+            self._last_digger = (int(state.digger.row),
+                                 int(state.digger.col), self.step)
+        # `state` is what the policy saw when it chose the action that
+        # got it killed this step -- the most useful forensic snapshot.
+        lives = info.get("lives")
+        if lives is not None:
+            if self.prev_lives is not None and lives < self.prev_lives:
+                self._log_death(state, info)
+            self.prev_lives = lives
+
+    def _log_death(self, state, info: dict) -> None:
+        self.deaths += 1
+        rec: dict = {"ev": "death", "ep": self.ep, "step": self.step,
+                     "score": info.get("score", 0)}
+        if state.digger is not None:
+            dr, dc = int(state.digger.row), int(state.digger.col)
+            rec["digger"] = [dr, dc]
+            cols = self._fall_columns(state)
+            rec["in_fall_column"] = (dr, dc) in cols
+            rec["moving_bag_above"] = any(
+                b.moving and b.col == dc and b.row < dr for b in state.bags)
+            if state.monsters:
+                rec["monster_min_dist"] = min(
+                    abs(m.row - dr) + abs(m.col - dc) for m in state.monsters)
+        if state.digger is None and self._last_digger is not None:
+            # CV loses the digger when a bag/gold sprite lands on top of
+            # it -- the signature of a crush. Fall back to the last seen
+            # tile for attribution.
+            lr, lc, ls = self._last_digger
+            rec["last_digger"] = [lr, lc]
+            rec["last_digger_age"] = self.step - ls
+            rec["last_in_fall_column"] = (lr, lc) in self._fall_columns(state)
+        ref = rec.get("digger") or rec.get("last_digger")
+        if ref is not None:
+            rec["recent_bag_activity"] = [
+                {"step": s, "ev": ev, "col": c, "row": r}
+                for (s, ev, c, r) in self._recent
+                if self.step - s <= 15 and abs(c - ref[1]) <= 1]
+        rec["bags"] = [{"r": int(b.row), "c": int(b.col),
+                        "moving": bool(b.moving),
+                        "supported": self._bag_supported(state, b)}
+                       for b in state.bags]
+        self._emit(rec)
+
+
 # ---- Runners --------------------------------------------------------------
 
 def run_headless(args) -> None:
@@ -665,21 +894,29 @@ def run_headless(args) -> None:
 
     scores: list[int] = []
     lengths: list[int] = []
+    dlog = DeathBagLogger(args.death_log) if args.death_log else None
     t0 = time.monotonic()
 
     for ep in range(args.episodes):
         env.reset()
         policy.reset()
+        if dlog is not None:
+            dlog.start_episode(ep)
         ep_score = 0
         ep_len = 0
         for step in range(args.max_steps):
-            action = policy(env._last_state)
+            state = env._last_state
+            action = policy(state)
             done = False
             for _ in range(args.frame_skip):
                 obs, r, done_, info = env.step(action)
+                if dlog is not None:
+                    dlog.on_frame(env._last_state)
                 if done_:
                     done = True
                     break
+            if dlog is not None:
+                dlog.on_step(state, info)
             ep_score = info.get("score", 0)
             ep_len = step + 1
             if done:
@@ -688,6 +925,8 @@ def run_headless(args) -> None:
         lengths.append(ep_len)
         print(f"  ep {ep + 1}/{args.episodes}: score={ep_score}  steps={ep_len}",
               flush=True)
+    if dlog is not None:
+        print(f"  death-log: {dlog.deaths} deaths logged to {args.death_log}")
 
     elapsed = time.monotonic() - t0
     arr = np.array(scores)
@@ -817,6 +1056,9 @@ def parse_args():
     p.add_argument("--routing", choices=("manhattan", "dijkstra"),
                    default="dijkstra",
                    help="emerald distance metric for move scoring")
+    p.add_argument("--death-log", type=str, default="",
+                   help="append JSONL death-forensics + bag-timing events "
+                        "to this file (headless mode only)")
     p.add_argument("--live", action="store_true",
                    help="open a matplotlib window and watch the policy play")
     p.add_argument("--overlay", action="store_true",
