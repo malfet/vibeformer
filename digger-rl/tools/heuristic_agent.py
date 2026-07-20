@@ -12,7 +12,8 @@ the nearest emerald, with a small overlay of threat-aware behaviour:
             via `prev_dir`), press FIRE. The bullet travels along the
             facing direction, so this hits the threat.
 
-Headless usage (compares to the previous baseline):
+Headless usage (SmartHeuristic is the default policy; --greedy /
+--dodge select the older baselines):
     python -m tools.heuristic_agent --episodes 5 --no-episodic-life
 
 Interactive viewer (matplotlib window showing live gameplay with
@@ -956,7 +957,10 @@ def run_headless(args) -> None:
     if args.dodge:
         policy = DodgeMonsters()
         pol_name = "dodge(survival)"
-    elif args.smart:
+    elif args.greedy:
+        policy = GreedyEmerald()
+        pol_name = "greedy(anti-jitter)"
+    else:
         policy = SmartHeuristic(args.dodge_range, args.fire_range,
                                 args.fire_cooldown,
                                 phantom_filter=not args.no_phantom_filter,
@@ -969,9 +973,6 @@ def run_headless(args) -> None:
                     f"cd={args.fire_cooldown}, "
                     f"phantom={not args.no_phantom_filter}, "
                     f"underbag={args.underbag}, routing={args.routing})")
-    else:
-        policy = GreedyEmerald()
-        pol_name = "greedy(anti-jitter)"
 
     scores: list[int] = []
     lengths: list[int] = []
@@ -1030,7 +1031,9 @@ def run_live(args) -> None:
                             episodic_life=not args.no_episodic_life)
     if args.dodge:
         policy = DodgeMonsters()
-    elif args.smart:
+    elif args.greedy:
+        policy = GreedyEmerald()
+    else:
         policy = SmartHeuristic(args.dodge_range, args.fire_range,
                                 args.fire_cooldown,
                                 phantom_filter=not args.no_phantom_filter,
@@ -1039,8 +1042,6 @@ def run_live(args) -> None:
                                 fire_turn_min_dist=args.fire_turn_min_dist,
                                 safety_cap=args.safety_cap,
                                 predict_monsters=args.predict_monsters)
-    else:
-        policy = GreedyEmerald()
 
     obs = env.reset()
     raw = env._env._core.get_frame()
@@ -1118,11 +1119,17 @@ def parse_args():
     p.add_argument("--frame-skip", type=int, default=4)
     p.add_argument("--no-episodic-life", action="store_true")
     p.add_argument("--smart", action="store_true",
-                   help="enable monster dodge + opportunistic FIRE")
+                   help="run SmartHeuristic (now the DEFAULT; flag kept "
+                        "for backward compatibility)")
+    p.add_argument("--greedy", action="store_true",
+                   help="run the old GreedyEmerald chaser instead of "
+                        "SmartHeuristic (no bag hazard model, no "
+                        "dodging -- dies deterministically under the "
+                        "level-1 bags at ~9 emeralds)")
     p.add_argument("--dodge", action="store_true",
                    help="survival-only policy: ignore emeralds, "
                         "maximise distance from monsters. Mutually "
-                        "exclusive with --smart.")
+                        "exclusive with --smart/--greedy.")
     p.add_argument("--dodge-range", type=int, default=2)
     p.add_argument("--fire-range", type=int, default=5)
     p.add_argument("--fire-cooldown", type=int,
@@ -1168,8 +1175,8 @@ def parse_args():
 
 def main() -> None:
     args = parse_args()
-    if args.dodge and args.smart:
-        raise SystemExit("--dodge and --smart are mutually exclusive")
+    if sum((args.dodge, args.smart, args.greedy)) > 1:
+        raise SystemExit("--dodge, --smart and --greedy are mutually exclusive")
     if args.live:
         run_live(args)
     else:

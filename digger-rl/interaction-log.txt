@@ -323,3 +323,4 @@ User: What's the number?
 [2026-07-19] Do you have any logic for firing at monsters?
 [2026-07-19] Besides, even without firing, one should be able to finish 1st level on one life easily
 [2026-07-19] But give firing a try
+[2026-07-19] Hmm, should I still use heuristic agent? Because it still dies the same way, being crashed by the pile of gold
