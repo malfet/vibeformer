@@ -310,6 +310,11 @@ class SmartHeuristic:
 
     _MAX_TUNNEL_DIST: int = MWIDTH * MHEIGHT + 1  # sentinel for "unreachable"
 
+    # A phantom-filtered monster this close to the digger is kept anyway:
+    # near the digger the dirt grid lags a real chaser's sub-tile motion,
+    # and dropping it blinds the agent to the enemy about to kill it.
+    _PHANTOM_KEEP_DIST: int = 2
+
     def _decide(self, state) -> int:
         if state.digger is None or not state.digger.present:
             return DiggerEnv.NOOP
@@ -326,11 +331,25 @@ class SmartHeuristic:
         # them here matters twice over: a phantom triggers pointless
         # dodges, and FIREing at one wastes the ~50-step turret cooldown
         # while a real nobbin closes in.
+        #
+        # BUT the dirt grid is a coarse 15x10 quantisation of a smoothly
+        # moving sprite: a real nobbin chasing the digger down its own
+        # tunnel constantly straddles two grid cells, and on the frames it
+        # is sampled to a not-yet-fully-cleared cell the naive filter drops
+        # it. Death forensics (30 eps) attributed 56/90 deaths to exactly
+        # this: the killing monster was <=1 tile away and phantom-filtered
+        # out, so the agent walked into an enemy it had erased from its own
+        # world model. Real border phantoms sit far from the action, so we
+        # exempt any detection within _PHANTOM_KEEP_DIST of the digger --
+        # near the digger the tile is freshly dug and the detection is
+        # overwhelmingly a real, lethal monster.
         monsters = state.monsters
         if self.phantom_filter:
             monsters = [m for m in monsters
                         if not (0 <= m.row < MHEIGHT and 0 <= m.col < MWIDTH
-                                and state.dirt[m.row, m.col])]
+                                and state.dirt[m.row, m.col])
+                        or (abs(m.row - dr) + abs(m.col - dc)
+                            <= self._PHANTOM_KEEP_DIST)]
 
         # ---- Bag geometry: obstacles + dynamic fall-column hazard ------
         # Ground truth (bags.c, Digger Remastered source): a bag whose
