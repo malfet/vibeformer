@@ -44,7 +44,7 @@ import torch.nn.functional as F
 from torch.optim import Adam
 
 from tools.game_state import MHEIGHT, MWIDTH
-from tools.symbolic_env import BASE_OBS_CHANNELS, SymbolicDiggerEnv
+from tools.symbolic_env import SymbolicDiggerEnv
 from train_dagger import env_step_skipped
 from train_ppo import layer_init, select_device
 
@@ -76,9 +76,22 @@ class Config:
     shaping_coef: float = 0.5
     time_penalty: float = 0.0
     death_penalty: float = 0.0
+    # Survival-only objective: pay `survival_reward` per agent step alive
+    # and set score_weight=0 so the game's score never reaches the agent.
+    survival_reward: float = 0.0
+    score_weight: float = 1.0
+    egocentric: bool = False
+    # Truncate an episode after this many agent steps (0 = never). Needed
+    # once survival is the objective: a policy that finds a safe corner
+    # would otherwise run one episode for the whole training job.
+    max_episode_steps: int = 0
     episodic_life: bool = True
     force_cpu: bool = False
     resume_from: Path | None = None
+    resume_prob: float = 1.0
+    load_agent: Path | None = None
+    save_best: bool = False
+    best_metric: str = "score"            # score | length | return
     # Behavioural-cloning warmup + per-PPO-minibatch anchor. If bc_traces
     # is non-empty, pretrain the actor on (obs, action) pairs from those
     # .npz files for bc_epochs epochs *before* PPO starts. While PPO is
@@ -94,6 +107,10 @@ class Config:
     log_every: int = 1
     save_every: int = 100
     seed: int = 1
+    arch: str = "cnn"                     # cnn | iter
+    iter_channels: int = 32
+    iter_steps: int = 10
+    readout: int = 7
     run_name: str = "ppo_sym"
 
 
@@ -105,9 +122,9 @@ class SymbolicAgent(nn.Module):
     keeps value-error gradients from re-learning the same features.
     """
 
-    def __init__(self, in_channels: int, num_actions: int):
+    def __init__(self, in_channels: int, num_actions: int,
+                 h: int = MHEIGHT, w: int = MWIDTH):
         super().__init__()
-        h, w = MHEIGHT, MWIDTH
         self.body = nn.Sequential(
             layer_init(nn.Conv2d(in_channels, 32, 3, padding=1)), nn.ReLU(),
             layer_init(nn.Conv2d(32, 64, 3, padding=1)), nn.ReLU(),
@@ -134,6 +151,64 @@ class SymbolicAgent(nn.Module):
             self.critic(z).squeeze(-1)
 
 
+class IterAgent(SymbolicAgent):
+    """Weight-tied conv iterator + head-local readout (snake finding #17).
+
+    Two problems with the 3-conv trunk on this board. (a) Its receptive
+    field is 7 tiles, but the grid is 15 wide, so nothing in the network
+    can relate the digger to an emerald on the far side. Stacking more
+    distinct conv layers buys range at a linear cost in parameters.
+    (b) `Flatten -> Linear` assigns a private weight to every board
+    position, which is exactly the memorisation failure the egocentric
+    obs was introduced to remove — and on the 19x29 egocentric canvas
+    that layer is 4.5M of the 4.6M parameters.
+
+    Instead: one shared residual block applied `iter_steps` times (an
+    unrolled propagation operator, so range grows with *iterations*, not
+    parameters) and a readout that only looks at a `readout`x`readout`
+    window around the canvas centre — where the digger always is under
+    egocentric obs — plus a global mean-pool summary. Range and
+    parameter count are decoupled.
+
+    Requires egocentric obs: the readout crop is meaningless otherwise.
+    """
+
+    def __init__(self, in_channels: int, num_actions: int,
+                 h: int, w: int, ch: int = 32, iters: int = 10,
+                 readout: int = 7):
+        nn.Module.__init__(self)
+        self.iters = iters
+        self.stem = nn.Sequential(
+            layer_init(nn.Conv2d(in_channels, ch, 3, padding=1)), nn.ReLU())
+        # Applied `iters` times with the same weights. GroupNorm inside
+        # the block and a small-gain init on its output conv are both
+        # load-bearing: with the trunk's default orthogonal(sqrt(2)) init
+        # on both convs, ten residual applications compound into a value
+        # loss of 5e4 and instant entropy collapse (observed).
+        self.block = nn.Sequential(
+            layer_init(nn.Conv2d(ch, ch, 3, padding=1)),
+            nn.GroupNorm(8, ch), nn.ReLU(),
+            layer_init(nn.Conv2d(ch, ch, 3, padding=1), std=0.1))
+        r = readout
+        self.r0, self.c0 = h // 2 - r // 2, w // 2 - r // 2
+        if self.r0 < 0 or self.c0 < 0 or self.r0 + r > h or self.c0 + r > w:
+            raise SystemExit(f"--readout {r} does not fit in {h}x{w}")
+        self.r = r
+        self.proj = nn.Sequential(
+            layer_init(nn.Linear(ch * r * r + ch, 128)), nn.ReLU())
+        self.actor = layer_init(nn.Linear(128, num_actions), std=0.01)
+        self.critic = layer_init(nn.Linear(128, 1), std=1.0)
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        z = self.stem(x)
+        for _ in range(self.iters):
+            z = F.relu(z + self.block(z))
+        local = z[:, :, self.r0:self.r0 + self.r,
+                  self.c0:self.c0 + self.r].flatten(1)
+        glob = z.mean(dim=(2, 3))
+        return self.proj(torch.cat([local, glob], dim=1))
+
+
 def parse_args() -> Config:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--total-timesteps", type=int, default=Config.total_timesteps)
@@ -156,6 +231,44 @@ def parse_args() -> Config:
     p.add_argument("--death-penalty", type=float, default=Config.death_penalty,
                    help="constant subtracted from reward on any life loss. "
                         "0 disables. Try 100-200.")
+    p.add_argument("--survival-reward", type=float,
+                   default=Config.survival_reward,
+                   help="constant ADDED to reward for every agent step the "
+                        "digger stays alive. With --score-weight 0 and "
+                        "--shaping-coef 0 this is the pure 'maximise frames "
+                        "survived' objective. Try 0.01.")
+    p.add_argument("--score-weight", type=float, default=Config.score_weight,
+                   help="multiplier on the game's own score delta. 0 makes "
+                        "the agent blind to score.")
+    p.add_argument("--egocentric", action="store_true",
+                   help="re-centre the tile grid on the digger (19x29 canvas "
+                        "+ off-board plane). Translation invariance by "
+                        "construction; see snake finding #16.")
+    p.add_argument("--max-episode-steps", type=int,
+                   default=Config.max_episode_steps,
+                   help="truncate an episode after this many agent steps "
+                        "(0 = never). GAE bootstraps V(s') on truncation, so "
+                        "this costs nothing but bounds episode length.")
+    p.add_argument("--load-agent", type=Path, default=None,
+                   help="initialise weights from a previous symbolic "
+                        "checkpoint (BC or PPO) before training.")
+    p.add_argument("--save-best", action="store_true",
+                   help="checkpoint whenever the 20-episode rolling mean of "
+                        "--best-metric hits a new high.")
+    p.add_argument("--best-metric", choices=("score", "length", "return"),
+                   default=Config.best_metric)
+    p.add_argument("--arch", choices=("cnn", "iter"), default=Config.arch,
+                   help="cnn = 3-conv trunk + flatten-FC (default); "
+                        "iter = weight-tied residual conv iterator with a "
+                        "head-local readout (requires --egocentric).")
+    p.add_argument("--iter-channels", type=int, default=Config.iter_channels)
+    p.add_argument("--iter-steps", type=int, default=Config.iter_steps,
+                   help="how many times the tied block is applied. Each "
+                        "application extends the propagation range by 2 "
+                        "tiles; the board is 15 wide.")
+    p.add_argument("--readout", type=int, default=Config.readout,
+                   help="side of the digger-centred window the --arch iter "
+                        "readout reads.")
     p.add_argument("--bc-traces", type=str, nargs="*", default=(),
                    help="one or more .npz files produced by "
                         "tools/gen_symbolic_trace.py. BC pretrains the actor "
@@ -180,6 +293,11 @@ def parse_args() -> Config:
                         "than the level-1 attract screen. Useful for "
                         "curriculum-from-checkpoint and for debugging "
                         "specific positions (e.g. 'stuck at right edge').")
+    p.add_argument("--resume-prob", type=float, default=Config.resume_prob,
+                   help="probability that a reset restores a --resume-from "
+                        "scenario instead of starting a normal episode. "
+                        "1.0 = always (default); 0.5 mixes ordinary play "
+                        "back in to prevent forgetting.")
     p.add_argument("--save-every", type=int, default=Config.save_every)
     p.add_argument("--seed", type=int, default=Config.seed)
     p.add_argument("--force-cpu", action="store_true")
@@ -195,6 +313,15 @@ def parse_args() -> Config:
         shaping_coef=a.shaping_coef,
         time_penalty=a.time_penalty,
         death_penalty=a.death_penalty,
+        survival_reward=a.survival_reward,
+        score_weight=a.score_weight,
+        egocentric=a.egocentric,
+        max_episode_steps=a.max_episode_steps,
+        load_agent=a.load_agent,
+        save_best=a.save_best,
+        best_metric=a.best_metric,
+        arch=a.arch, iter_channels=a.iter_channels,
+        iter_steps=a.iter_steps, readout=a.readout,
         bc_traces=tuple(a.bc_traces),
         bc_epochs=a.bc_epochs,
         bc_batch_size=a.bc_batch_size,
@@ -202,7 +329,7 @@ def parse_args() -> Config:
         bc_anchor_final=a.bc_anchor_final,
         episodic_life=a.episodic_life,
         force_cpu=a.force_cpu,
-        resume_from=a.resume_from,
+        resume_from=a.resume_from, resume_prob=a.resume_prob,
         save_every=a.save_every, seed=a.seed,
         run_name=a.run_name,
     )
@@ -235,39 +362,79 @@ def main() -> None:
                              clip_reward=False,
                              episodic_life=cfg.episodic_life,
                              frame_stack=cfg.frame_stack,
+                             egocentric=cfg.egocentric,
                              shaping_coef=cfg.shaping_coef,
                              time_penalty=cfg.time_penalty / max(cfg.frame_skip, 1),
+                             survival_reward=cfg.survival_reward / max(cfg.frame_skip, 1),
+                             score_weight=cfg.score_weight,
                              death_penalty=cfg.death_penalty)
-    in_ch = BASE_OBS_CHANNELS * cfg.frame_stack
+    in_ch, obs_h, obs_w = env.obs_shape
     num_actions = env.NUM_ACTIONS
 
     # If --resume-from was given, load the pickle once. We re-apply it
     # after every env.reset() so each "episode" starts from that
     # scenario rather than the level-1 attract screen.
-    resume_state: dict | None = None
+    resume_states: list[dict] | None = None
+    resume_rng = np.random.default_rng(cfg.seed)
     if cfg.resume_from is not None:
         with cfg.resume_from.open("rb") as fh:
-            resume_state = pickle.load(fh)
-        # Tolerate either format -- DiggerEnv.save_state() returns a
-        # dict with "core"; run_digger.py --live S returns a dict with
-        # "core" too but no python wrapper fields. SymbolicDiggerEnv
-        # wraps it with an extra layer ({"env": {...}, "prev_dist": ...}).
-        # Lift bare DiggerEnv dicts so load_state finds the expected shape.
-        if "core" in resume_state and "env" not in resume_state:
-            resume_state = {"env": resume_state, "prev_dist": None}
-        print(f"{tag} --resume-from {cfg.resume_from} loaded; "
-              f"every reset() will restore this scenario", flush=True)
+            loaded = pickle.load(fh)
+        if isinstance(loaded, dict) and "scenarios" in loaded:
+            # A scenario *set* from tools/collect_death_states.py: sample
+            # one uniformly per reset so the policy sees the whole
+            # distribution of dangerous states rather than memorising one.
+            resume_states = list(loaded["scenarios"])
+            print(f"{tag} --resume-from {cfg.resume_from}: "
+                  f"{len(resume_states)} scenarios "
+                  f"(lookback {loaded.get('lookback', '?')} steps, "
+                  f"collected with {loaded.get('policy', '?')}); "
+                  f"each reset() samples one", flush=True)
+        else:
+            # Tolerate either single-state format -- DiggerEnv.save_state()
+            # returns a dict with "core"; run_digger.py --live S returns a
+            # dict with "core" too but no python wrapper fields.
+            # SymbolicDiggerEnv wraps it with an extra layer
+            # ({"env": {...}, "prev_dist": ...}). Lift bare DiggerEnv dicts
+            # so load_state finds the expected shape.
+            if "core" in loaded and "env" not in loaded:
+                loaded = {"env": loaded, "prev_dist": None}
+            resume_states = [loaded]
+            print(f"{tag} --resume-from {cfg.resume_from} loaded; "
+                  f"every reset() will restore this scenario", flush=True)
 
     def reset_env():
         env.reset()
-        if resume_state is not None:
-            return env.load_state(resume_state)
+        # resume_prob < 1 mixes ordinary level-start episodes back in.
+        # Training purely on near-death scenarios teaches escape at the
+        # cost of forgetting how to play the rest of the game; the mix is
+        # the cheap guard against that.
+        if resume_states is not None and (
+                cfg.resume_prob >= 1.0
+                or resume_rng.random() < cfg.resume_prob):
+            i = int(resume_rng.integers(len(resume_states)))
+            return env.load_state(resume_states[i])
         return env.current_obs()
 
-    agent = SymbolicAgent(in_channels=in_ch, num_actions=num_actions).to(device)
+    if cfg.arch == "iter":
+        if not cfg.egocentric:
+            raise SystemExit("--arch iter needs --egocentric: its readout "
+                             "crop assumes the digger is at the canvas "
+                             "centre")
+        agent = IterAgent(in_channels=in_ch, num_actions=num_actions,
+                          h=obs_h, w=obs_w, ch=cfg.iter_channels,
+                          iters=cfg.iter_steps, readout=cfg.readout).to(device)
+    else:
+        agent = SymbolicAgent(in_channels=in_ch, num_actions=num_actions,
+                              h=obs_h, w=obs_w).to(device)
     n_params = sum(p.numel() for p in agent.parameters())
-    print(f"{tag} agent params={n_params:,}  in_ch={in_ch}  "
-          f"H={MHEIGHT} W={MWIDTH}", flush=True)
+    print(f"{tag} agent params={n_params:,}  arch={cfg.arch}  in_ch={in_ch}  "
+          f"H={obs_h} W={obs_w}  egocentric={cfg.egocentric}", flush=True)
+    if cfg.load_agent is not None:
+        prev = torch.load(cfg.load_agent, weights_only=False,
+                          map_location="cpu")
+        agent.load_state_dict(prev["agent"])
+        print(f"{tag} initialised weights from {cfg.load_agent} "
+              f"(step {prev.get('step', '?')})", flush=True)
     optim = Adam(agent.parameters(), lr=cfg.learning_rate, eps=1e-5)
 
     # ---- BC data + pretrain ------------------------------------------------
@@ -280,12 +447,13 @@ def main() -> None:
             d = np.load(tp)
             obs_arr = d["obs"]
             act_arr = d["actions"].astype(np.int64)
-            if obs_arr.shape[1] != in_ch:
+            if obs_arr.shape[1:] != (in_ch, obs_h, obs_w):
                 raise SystemExit(
-                    f"trace {tp} has {obs_arr.shape[1]} channels but "
-                    f"trainer expects {in_ch} "
-                    f"(frame_stack mismatch?). Re-record with "
-                    f"--frame-stack {cfg.frame_stack}.")
+                    f"trace {tp} has obs shape {obs_arr.shape[1:]} but "
+                    f"trainer expects {(in_ch, obs_h, obs_w)} "
+                    f"(frame_stack / egocentric mismatch?). Re-record with "
+                    f"--frame-stack {cfg.frame_stack}"
+                    + (" --egocentric" if cfg.egocentric else "") + ".")
             bc_obs_arrs.append(obs_arr)
             bc_act_arrs.append(act_arr)
             print(f"{tag} loaded BC trace {tp}: {len(act_arr):,} samples",
@@ -322,7 +490,7 @@ def main() -> None:
                       flush=True)
 
     N = cfg.num_steps
-    obs_buf = torch.zeros(N, in_ch, MHEIGHT, MWIDTH, device=device)
+    obs_buf = torch.zeros(N, in_ch, obs_h, obs_w, device=device)
     act_buf = torch.zeros(N, dtype=torch.long, device=device)
     logp_buf = torch.zeros(N, device=device)
     rew_buf = torch.zeros(N, device=device)
@@ -342,6 +510,9 @@ def main() -> None:
     # from libretro). Summing per-step info["score_reward"] would
     # under-count because env_step_skipped overwrites info each sub-step.
     ep_scores: collections.deque[float] = collections.deque(maxlen=20)
+    ep_lengths: collections.deque[float] = collections.deque(maxlen=20)
+    ep_agent_steps = 0          # agent steps in the current episode
+    best_metric_value = float("-inf")
     t0 = time.monotonic()
 
     while global_step < cfg.total_timesteps:
@@ -375,19 +546,35 @@ def main() -> None:
             next_obs, total_r, done, info = env_step_skipped(
                 env, a, cfg.frame_skip)
             global_step += cfg.frame_skip
-            rew_buf[step] = float(total_r)
             ep_return += float(total_r)
             ep_length += cfg.frame_skip
+            ep_agent_steps += 1
 
-            if done:
+            truncated = (not done and cfg.max_episode_steps > 0
+                         and ep_agent_steps >= cfg.max_episode_steps)
+            if truncated:
+                # Bootstrapped, not terminal: fold gamma*V(s') into the
+                # reward so the cut-off doesn't read as "the world ended
+                # here". Without this a survival-reward policy is taught
+                # that surviving to the cap is as bad as dying there.
+                with torch.no_grad():
+                    boot = agent.value(
+                        torch.from_numpy(next_obs).to(device).unsqueeze(0))
+                total_r = float(total_r) + cfg.gamma * float(boot.item())
+            rew_buf[step] = float(total_r)
+
+            if done or truncated:
                 final_score = float(info.get("score", 0))
                 ep_returns.append(ep_return)
                 ep_scores.append(final_score)
+                ep_lengths.append(float(ep_length))
                 print(f"{tag}   ep_end return={ep_return:.1f} "
                       f"score={int(final_score)} length={ep_length} "
-                      f"lives={info.get('lives', 0)}", flush=True)
+                      f"lives={info.get('lives', 0)}"
+                      + ("  [truncated]" if truncated else ""), flush=True)
                 ep_return = 0.0
                 ep_length = 0
+                ep_agent_steps = 0
                 next_obs = reset_env()
                 done_t = torch.ones((), device=device)
             else:
@@ -481,6 +668,7 @@ def main() -> None:
         if update % cfg.log_every == 0:
             avg_ret = (sum(ep_returns) / len(ep_returns)) if ep_returns else float("nan")
             avg_score = (sum(ep_scores) / len(ep_scores)) if ep_scores else float("nan")
+            avg_len = (sum(ep_lengths) / len(ep_lengths)) if ep_lengths else float("nan")
             elapsed = time.monotonic() - t0
             sps = global_step / max(elapsed, 1e-6)
             lr_now = optim.param_groups[0]["lr"]
@@ -489,12 +677,31 @@ def main() -> None:
                   f"ent {ent.item():.3f}  clip {np.mean(clipfracs):.3f}  "
                   f"kl {np.mean(approx_kls):+.4f}  "
                   f"avg_ret {avg_ret:.1f}  score {avg_score:.0f}  "
+                  f"len {avg_len:.0f}  "
                   f"lr {lr_now:.2e}  entc {current_ent_coef:.3f}  "
                   + (f"anc {current_anchor:.2f}  " if anchor_active else "")
                   + f"sps {sps:.0f}", flush=True)
             print(f"      buf: ent_mean {ent_buf_mean:.2f}  "
                   f"ent_p10 {ent_buf_p10:.2f}  spread {spread_mean:5.2f}  "
                   f"top_a {top_act_idx}@{top_act_frac:.0%}", flush=True)
+
+        # ---- Best-so-far checkpoint ----
+        # Rolling 20-episode mean, not a dedicated eval: an eval pass costs
+        # another DOSBox run. Requires a full window so early luck on 2-3
+        # episodes can't claim "best".
+        if cfg.save_best and len(ep_lengths) == ep_lengths.maxlen:
+            pool = {"score": ep_scores, "length": ep_lengths,
+                    "return": ep_returns}[cfg.best_metric]
+            current = sum(pool) / len(pool)
+            if current > best_metric_value:
+                best_metric_value = current
+                torch.save({"agent": agent.state_dict(), "step": global_step,
+                            "config": cfg.__dict__,
+                            "best_metric": cfg.best_metric,
+                            "best_value": current},
+                           ckpt_dir / "ppo_sym_best.pt")
+                print(f"{tag}   new best {cfg.best_metric} "
+                      f"{current:.1f} -> ppo_sym_best.pt", flush=True)
 
         if cfg.save_every and update % cfg.save_every == 0:
             ckpt = ckpt_dir / f"ppo_sym_step{global_step:08d}.pt"

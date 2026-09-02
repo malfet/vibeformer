@@ -326,3 +326,7 @@ User: What's the number?
 [2026-07-19] Hmm, should I still use heuristic agent? Because it still dies the same way, being crashed by the pile of gold
 [2026-07-20] Look at the recent changes, you are working on improving heuristic agent, but it still dies due to the bag of gold falling on it
 [2026-07-29] Commit this
+[2026-08-31] Let's continue with RL training for digger. First of all I want you to read README.md from ../snake-rl and see if any of the learnings (specifically about model architecture) are applicable here. Also I want you to try a few different strategies with the learning. For example can you start a new RL training that just maximizes lifetime in the game. I.e. ignore all other factors, just reward it on total number of frames it survived
+[2026-08-31] Any updates?
+[2026-08-31] Can you try to advance the game to a 3-5 steps until player dies and start from it?
+[2026-09-02] Can you capture a few screenshots from your experiments and post them to a report?

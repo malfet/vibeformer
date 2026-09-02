@@ -10,6 +10,7 @@ ultimately with a *pixel-only* deployable agent.
 | Approach | n | Mean (sem) | Max ep | Notes |
 |---|---:|---:|---:|---|
 | **SmartHeuristic v6 (teacher)** | 10 | **1932** | **4600** | v5 + phantom filter + under-bag transit rule + Dijkstra emerald routing; min ep 1000. Same-session vs v5's 1010; absolute level drifts ±400 between sessions (see caveat) |
+| **Symbolic BC clone of v6.4 teacher** | 20 | **1175 ±84** | 2050 | **best ML result so far.** 60k samples, 10 epochs, no PPO / no DAgger; 95.4% teacher action accuracy. Same-session teacher 1362 → 86% of teacher. See "the actual headline" below |
 | **Pixel BC + 3 DAGGER iters, v6 teacher, 50-ep eval** | 50 | **1042 ±50** | 1950 | **best ML so far**, pixel-only; same net/data budget as the old 629 recipe — the entire delta is the teacher |
 | Pixel PPO on the v6 BC ckpt (best ckpt; sep. critic + value warmup + anchor anneal + save-best) | 50 | 851 ±44 | 1700 | PPO still net-negative on pixels, but −18% now vs −55% in the old recipe |
 | Pixel PPO on the v6 BC ckpt (final ckpt) | 50 | 750 ±42 | 1425 | final < best: keep --save-best |
@@ -62,6 +63,8 @@ See **Lessons from PPO/DAGGER** below.
 | `digger_env.py` | `DiggerEnv` (single env, RGBA frames, score/lives via RAM at 0x282E0/0x259F2) and `DiggerVecEnv` (in-proc for `num_envs=1`, subprocess workers for >1). Now also exposes `save_state` / `load_state` via libretro `retro_serialize`. |
 | `train_ppo.py` | Pixel PPO (NatureCNN). Supports BC from `.npz` traces *and* live teacher labeling (`--teacher-policy {smart,greedy,dodge}`), warmup phase (`--warmup-steps`), and BC-only mode (`--total-timesteps 0`). |
 | `train_ppo_symbolic.py` | Symbolic-obs PPO with the same recipe: BC traces + per-minibatch anchor + death/time penalty + resume-from-state. |
+| `tools/collect_death_states.py` | Harvests emulator save-states from N agent steps *before* each death (ring buffer of `retro_serialize` snapshots, ~1 ms / 678 KB each). Captures several lookbacks per death in one pass since collection is dominated by the ~25 s it takes the driver policy to die. `--probe` measures what fraction of the collected states a policy can escape — the ceiling for any curriculum built on them. |
+| `eval_symbolic.py` | Symbolic counterpart to `eval_checkpoint.py` (which only rebuilds the pixel NatureCNN). Runs N full 3-life games and reports **both** game score and per-life length in agent steps — the survival experiments need the second, every earlier scoreboard row quotes the first. `--policy random` / `--policy teacher` give same-session baselines. |
 | `train_dagger.py` / `train_dagger_pixel.py` | Earlier DAGGER trainers (multi-iter aggregating teacher rollouts). Superseded by the live-teacher anchor path in `train_ppo.py`. |
 | `train_dreamer*.py` | Dreamer V3-ish online and symbolic-obs world models. Plateaued; see lessons. |
 | `run_digger.py` | Manual play (matplotlib `--live`) + trace recording. **S / L** keys snapshot and restore emulator state (in-memory or disk via `--save-slot`). `--resume` boots straight into a saved scenario. |
@@ -262,6 +265,187 @@ But two back-to-back restores + the same next action diverge after
 JIT state isn't fully serialized. So Go-Explore-style restart works;
 deterministic policy A/B from a saved frame does not.
 
+### 12b. Restore is input-live in gameplay states, dead inside the death sequence
+
+Building the near-death curriculum turned up a sharp qualifier on the
+above. Restoring an ordinary mid-play state and then pressing a key
+works exactly as it should — controlled against a no-restore baseline
+from the same position:
+
+```
+no-restore, LEFT (control)   [(1,4) ... (1,3), (1,3), (1,3)]
+restore + LEFT               [(1,4) ... (1,3), (1,3), (1,3)]   matches control
+restore + RIGHT              [(1,4), (1,5), (1,5) ... (1,6)]   diverges as it should
+```
+
+But a state captured a few agent steps before the `lives` counter
+decrements is **frozen**: LEFT, RIGHT and NOOP produce identical
+trajectories and the life is lost at exactly the same step. Those
+states are inside Digger's death sequence — the outcome is already
+sealed and input is ignored until the respawn.
+
+The trap is that this is invisible from the RAM side. `lives` only
+decrements when the sequence *finishes*, and the death animation still
+renders a digger-coloured sprite, so `GameState.digger.present` stays
+true throughout. Trying to measure the animation length by watching for
+the sprite to vanish returns a median gap of **0** and tells you
+nothing. Only replaying a restored state under different actions
+exposes it.
+
+Practical rule: **any curriculum built on save-states must validate
+escapability by replaying under at least two different action
+sequences.** A scenario set where every policy dies at an identical
+fixed step is a set of corpses, not a set of hard problems — and it
+looks exactly like a set of hard problems in every metric that doesn't
+involve replaying it.
+
+## Lessons ported from ../snake (2026-08-31)
+
+The snake project ran the same recipe on a much cheaper simulator and
+got 40× the experiment count out of it. Its README's findings #16-18 are
+about *architecture*; here is which of them transfer to Digger and which
+do not.
+
+| Snake finding | Transfers? | Why / what it becomes here |
+|---|---|---|
+| #16 egocentric (head-centred) obs beats allocentric | **yes** | Same failure mode is latent in `SymbolicAgent`: `Flatten -> Linear(64*10*15, 128)` gives every board position private weights, so "monster one tile to my left" has to be relearned at each of the 150 positions. `--egocentric` pastes the 10×15 board into a 19×29 canvas with the digger pinned at the centre, plus an off-board plane. |
+| #17 weight-tied conv iterator + head-local readout | **yes** | The 3-conv trunk has a 7-tile receptive field on a 15-wide board — it physically cannot relate the digger to an emerald across the map. `--arch iter` applies one shared residual block `--iter-steps` times (range grows with iterations, not parameters) and reads out a 7×7 window around the centre + a global mean-pool. **232k params vs 4.58M** for the egocentric CNN. |
+| #17/#18 canonical (rotate-to-face-up) obs | **no** | Snake is rotation-symmetric; Digger is not. Gravity is real here — bags fall *down*, the under-bag transit rule is a statement about the vertical axis. Rotating the board would destroy the single most safety-relevant structure. Egocentric translation invariance is the part that survives. |
+| #18 drop the engineered distance channel, let the net infer routing | **untested here, plausible** | Digger's symbolic obs has no distance channel to drop, but the analogue is `--shaping-coef` (Manhattan-to-emerald reward shaping). If the iterator can route by itself, the shaping term is a crutch at best and a distractor at worst. |
+| #9 BC capacity wall — 15k too small, 300k-1.2M memorises, 4.78M generalises | **caution** | Read together with our own Lesson 7 (width-2 NatureCNN scored 483 vs width-1's 783) the resolution is *samples per parameter*, not parameter count: snake's 4.78M win came with 600k samples. Our pixel runs had 30k. Scale the net only alongside the DAgger budget. |
+| #11 DAgger overtrains past a saturation point | **yes** | Matches our Lesson 11b, where mid-evals were still climbing at iter 3. The rule is the same: watch rollout agreement, early-stop when it stalls, don't fix the iteration count in advance. |
+| #12/#15 `--save-best`, γ=0.997 for long horizons, vectorised envs | **yes** | `--save-best` was already worth 100 points on the pixel PPO run. γ=0.997 matters as soon as the objective is survival (see below). Vectorised symbolic envs are still not wired — one DOSBox process per env makes it the expensive one. |
+| #14 eval seeds must be disjoint from collection seeds | **N/A but watch it** | Digger has no seed stream we control; DOSBox timing supplies the variation. Our equivalent hazard is the cross-session drift caveat above. |
+| #15 pure reward learns new behaviour *once a navigation core exists* | **the load-bearing one** | Snake's from-scratch PPO never learned to play (ppo04: 1.4), but reward-only *fine-tunes* from a competent base learned genuinely new behaviour (2-apple routing 37 → 53; death rate 82% → 12%). That is exactly the shape of the survival experiment below, and the reason it is run both from scratch and from a BC init. |
+
+## Reward strategies: what is the agent actually being paid for?
+
+Every run before this one was paid in game score (plus emerald-distance
+shaping). `SymbolicDiggerEnv` now decomposes the reward so the objective
+itself is an experimental variable:
+
+```
+reward = score_weight * (game score delta)
+       + shaping_coef * (Manhattan distance closed toward an emerald)
+       + survival_reward     (per agent step that didn't end a life)
+       - time_penalty
+       - death_penalty       (on any life loss)
+```
+
+`--score-weight 0 --shaping-coef 0 --survival-reward 0.01` is the pure
+**"maximise frames survived"** objective: the game's score is invisible
+to the agent and the only thing that matters is not dying.
+
+Two mechanics make this work:
+
+- **γ=0.997, not 0.99.** With a constant per-step reward the return *is*
+  the (discounted) episode length, so the discount horizon is the
+  objective. At γ=0.99 the agent cannot see past ~100 steps — shorter
+  than a single teacher life.
+- **`--max-episode-steps` + truncation-aware GAE.** A survival-paid
+  policy that finds a safe corner would otherwise run one episode for
+  the whole job. The cap bounds it, and GAE bootstraps `V(s')` at the
+  cut instead of treating it as death — without that the agent is taught
+  that surviving to the cap is exactly as bad as dying there.
+
+**The number to beat:** the v6 teacher survives a mean of **280 agent
+steps per life** (median 267, max 488, n=60 from
+`logs/deathlog_v6_baseline.jsonl`) — and it is *trying* to die, in the
+sense that it walks into risk to collect emeralds. A random policy
+already survives ~195. Survival-only training that lands between those
+has learned nothing; the interesting question is whether it clears the
+teacher, and whether it does so by playing well or by hiding.
+
+### Result: survival-only reward is strictly dominated (2026-08-31)
+
+Six 500k-step arms, all launched the same session, evaluated the same
+session with `eval_symbolic.py` over 20 full 3-life games each
+(stochastic sampling). Life length is agent steps between deaths, n=60
+lives per row.
+
+| Policy | Game score | Life length | Notes |
+|---|---:|---:|---|
+| SmartHeuristic v6.4 (teacher) | **1362 ±133** | **266.6 ±8.8** | same-session reference |
+| **Symbolic BC clone, v6.4 teacher** | **1175 ±84** | **259.2 ±8.9** | 95.4% teacher acc, **no PPO at all** |
+| `score_ctrl` (old recipe, no BC) | 712 ±21 | 230.6 ±1.1 | see the degenerate-loop note below |
+| `surv_ego` (survival only, egocentric) | 312 ±52 | 237.2 ±6.2 | best survival arm |
+| `surv_score` (survival + score×0.02) | 282 ±44 | 227.8 ±3.2 | |
+| `surv_bcinit` (survival only, **from the BC clone**) | 239 ±65 | 210.8 ±7.0 | started at 1175/259 |
+| `surv_iter` (survival only, iterator) | 155 ±28 | 203.3 ±2.9 | collapsed to NOOP @55% |
+| `surv_alloc` (survival only, allocentric) | 146 ±29 | 215.8 ±3.8 | never left uniform policy |
+| Random policy | 124 ±44 | 194.4 ±4.8 | same-session floor |
+
+Reading the life-length column: **the arms trained to maximise lifetime
+are worse at lifetime than the arms that were never trained for it.**
+The BC clone, which only ever imitated an emerald-collecting teacher,
+survives 259 steps; the best pure-survival arm manages 237, and the
+allocentric one 216 against a random floor of 194.
+
+`surv_bcinit` is the decisive run. It *started* from the 1175-score /
+259-life BC clone and 500k steps of anchor-free survival PPO took it to
+239 / 211 — it made the policy worse at the exact quantity it was being
+paid for.
+
+**Why: standing still is the degenerate optimum, and Digger punishes it
+only weakly.** A constant `+c` per step is identical across all six
+actions, so the only thing that distinguishes them is the truncated tail
+at death — a tiny, heavily delayed advantage. Tracking the modal action
+across training tells the story:
+
+| Arm | first 20 updates | last 20 updates |
+|---|---|---|
+| `surv_alloc` | UP @23% | DOWN @24% (still uniform) |
+| `surv_ego` | UP @21% | LEFT @27% |
+| `surv_iter` | RIGHT @23% | **NOOP @55%** |
+| `surv_bcinit` | UP @44% | **NOOP @38%** |
+| `score_ctrl` | NOOP @22% | **FIRE @61%** |
+
+The two survival arms that never committed stayed at entropy 1.72-1.74
+against a 1.79 maximum — a barely-perturbed uniform policy. The two that
+did commit, committed to NOOP. `--max-episode-steps 2000` was never hit
+in any of the six runs, so hiding never even survived long enough to be
+truncated.
+
+**Snake's finding #15 was mis-ported, and that is the lesson.** Snake's
+death-averse fine-tune was `--reward-eat 1 --reward-die -5
+--reward-step 0.005` — it *kept the task reward*, and the step bonus was
+~8% of the food reward. Snake never ran a zero-task-reward arm. Survival
+is a useful *auxiliary* term on top of a task reward; as the sole
+objective it selects for inaction.
+
+Two side-findings worth recording:
+
+- **`score_ctrl` is a degenerate loop, not a policy.** Its best-by-score
+  checkpoint evals at 712 — respectable next to the README's 250-290 for
+  the same recipe — but its life length is 230.6 **±1.1**, median 232,
+  max 239. Sixty lives all ending within nine steps of each other is a
+  fixed action cycle (FIRE @61%) that dies on a timer, not a policy that
+  reacts. In-trainer game score also regressed 175 → 51 over the run;
+  `--save-best` is the only reason there is a usable checkpoint at all.
+- **The architecture A/B is inconclusive *from these runs*.** Under
+  identical survival reward, egocentric CNN (237.2 life) beat
+  allocentric (215.8) beat iterator (203.3), which is the predicted
+  ordering for the first two — but all three sit in the
+  "learned-almost-nothing" band, so the comparison is measuring which
+  net degrades most gracefully under a no-signal objective, not which
+  encodes Digger better. The architecture question has to be re-asked in
+  the BC setting, where there is real signal (in flight).
+
+### The actual headline: symbolic BC on the v6.4 teacher
+
+The control run buried in the table above is the best symbolic result
+this project has produced. **A plain BC clone of SmartHeuristic v6.4 —
+60k samples, 10 epochs, no PPO, no DAgger — evaluates at 1175 ±84 game
+score, 86% of the same-session teacher's 1362.** For comparison the
+previous symbolic best was 891 (BC + PPO + anchor, v5-teacher era) and
+the best pixel result is 1042.
+
+This confirms Lesson 11a from the other direction: the teacher upgrade
+propagates straight through to the student, and on symbolic obs the
+imitability is high enough (95.4% action accuracy) that BC alone gets
+most of the way. It also re-frames every PPO result here — the bar for
+"PPO helped" is now 1175, not 891.
+
 ## How to run
 
 ### Watch the heuristic play
@@ -299,6 +483,39 @@ python train_ppo.py \
   --run-name pixel_ppo_v6teacher
 ```
 
+### Symbolic BC clone of the teacher (best ML result: 1175 ±84)
+
+```bash
+python -m tools.gen_symbolic_trace --out data/traces/sym_smart_v64_60k.npz \
+    --steps 60000 --teacher smart --frame-stack 4
+
+# --total-timesteps 0 runs BC and skips PPO entirely.
+python train_ppo_symbolic.py --total-timesteps 0 \
+  --bc-traces data/traces/sym_smart_v64_60k.npz --bc-epochs 10 \
+  --run-name ppo_sym_bc_v64
+
+python eval_symbolic.py data/checkpoints/ppo_sym_bc_v64/ppo_sym_final.pt \
+    --episodes 20 --label bc_only
+# Always collect same-session baselines alongside it -- cross-session
+# numbers are not comparable (see the drift caveat above):
+python eval_symbolic.py --policy teacher --episodes 20
+python eval_symbolic.py --policy random  --episodes 20
+```
+
+### Survival-only symbolic PPO (score-blind) — negative result, see above
+
+```bash
+python train_ppo_symbolic.py --total-timesteps 500000 \
+  --score-weight 0 --shaping-coef 0 --survival-reward 0.01 \
+  --gamma 0.997 --max-episode-steps 2000 \
+  --save-best --best-metric length --run-name ppo_sym_surv_alloc
+
+# Same objective, egocentric obs (19x29 digger-centred canvas):
+#   ... --egocentric --run-name ppo_sym_surv_ego
+# Same again on the 232k-param weight-tied iterator:
+#   ... --egocentric --arch iter --run-name ppo_sym_surv_iter
+```
+
 ### Symbolic PPO with BC pretrain + anchor (the best symbolic recipe)
 
 ```bash
@@ -316,6 +533,57 @@ python train_ppo_symbolic.py \
   --shaping-coef 0.5 --frame-stack 4 \
   --force-cpu --run-name ppo_sym_bc_v1
 ```
+
+### Capture near-death scenarios and replay/train from them
+
+The capture side harvests emulator save-states from N agent steps
+*before* each death; the replay side either probes them or trains from
+them. `--lookbacks` takes a list because all of them come out of one
+ring buffer — collection is dominated by the ~25 s it takes the driver
+policy to die, so extra lookbacks are free.
+
+```bash
+# 1. CAPTURE. 80 deaths x 4 lookbacks = 320 scenarios (~217 MB).
+#    --policy ckpt collects states the *student* dies in (on-distribution);
+#    --policy teacher / random also work.
+python -m tools.collect_death_states \
+  --out data/scenarios/death_bcclone_far.pkl \
+  --deaths 80 --lookbacks 15,25,40,60 \
+  --policy ckpt --checkpoint data/checkpoints/ppo_sym_bc_v64/ppo_sym_final.pt
+
+# 2. PROBE -- ALWAYS DO THIS BEFORE TRAINING. Replays each scenario and
+#    reports, per lookback, what fraction the policy escapes.
+python -m tools.collect_death_states \
+  --out data/scenarios/death_bcclone_far.pkl --probe \
+  --policy ckpt --checkpoint data/checkpoints/ppo_sym_bc_v64/ppo_sym_final.pt \
+  --probe-steps 30 --probe-limit 120
+
+# 3. TRAIN from the scenario set. Each reset() samples one uniformly.
+python train_ppo_symbolic.py --total-timesteps 400000 \
+  --resume-from data/scenarios/death_bcclone_far.pkl \
+  --resume-prob 0.5 \
+  --load-agent data/checkpoints/ppo_sym_bc_v64/ppo_sym_final.pt \
+  --score-weight 0 --shaping-coef 0 --survival-reward 0.01 \
+  --gamma 0.99 --max-episode-steps 40 \
+  --save-best --best-metric length --run-name ppo_sym_deathcur
+```
+
+**Read the probe output before training on the set.** A survival rate of
+0% at *every* lookback with *identical* steps-to-death across policies
+means the states are inside the death sequence and no action can change
+the outcome (Lesson 12b) — training on them produces a guaranteed null.
+Raise `--lookbacks` until the rate goes above zero, and use the shortest
+lookback that does.
+
+Two knobs that matter:
+
+- `--resume-prob 0.5` mixes ordinary level-start episodes back in.
+  Training purely on near-death states teaches escape at the cost of
+  forgetting the rest of the game.
+- **Do not add a BC anchor here.** These are precisely the states where
+  the driver policy's action was wrong; anchoring to it re-teaches the
+  mistake. Use `--load-agent` for the init and leave
+  `--bc-anchor-coef` at 0.
 
 ### Save / restore game state
 

@@ -33,9 +33,10 @@ from train_dagger import env_step_skipped
 
 
 def collect(num_steps: int, frame_skip: int, frame_stack: int,
-             teacher_name: str) -> dict:
+             teacher_name: str, egocentric: bool = False) -> dict:
     env = SymbolicDiggerEnv(max_steps=10**9, episodic_life=True,
-                             frame_stack=frame_stack)
+                             frame_stack=frame_stack,
+                             egocentric=egocentric)
     teachers = {
         "smart":  SmartHeuristic,
         "greedy": GreedyEmerald,
@@ -45,9 +46,9 @@ def collect(num_steps: int, frame_skip: int, frame_stack: int,
         raise SystemExit(f"unknown teacher {teacher_name!r}; "
                          f"choose from {sorted(teachers)}")
     teacher = teachers[teacher_name]()
-    in_ch = BASE_OBS_CHANNELS * frame_stack
+    in_ch, obs_h, obs_w = env.obs_shape
 
-    obs_buf = np.zeros((num_steps, in_ch, 10, 15), dtype=np.float32)
+    obs_buf = np.zeros((num_steps, in_ch, obs_h, obs_w), dtype=np.float32)
     act_buf = np.zeros((num_steps,), dtype=np.int64)
     rew_buf = np.zeros((num_steps,), dtype=np.float32)
     done_buf = np.zeros((num_steps,), dtype=bool)
@@ -95,6 +96,7 @@ def collect(num_steps: int, frame_skip: int, frame_stack: int,
                  frame_skip=np.int32(frame_skip),
                  frame_stack=np.int32(frame_stack),
                  obs_channels=np.int32(in_ch),
+                 egocentric=np.bool_(egocentric),
                  teacher=np.array(teacher_name, dtype=object))
 
 
@@ -110,11 +112,14 @@ def main() -> None:
                    help="must match the trainer's --frame-stack")
     p.add_argument("--teacher", type=str, default="smart",
                    choices=["smart", "greedy", "dodge"],
-                   help="which heuristic to record (smart = SmartHeuristic v5)")
+                   help="which heuristic to record (smart = SmartHeuristic)")
+    p.add_argument("--egocentric", action="store_true",
+                   help="record the digger-centred obs; must match the "
+                        "trainer's --egocentric")
     args = p.parse_args()
     args.out.parent.mkdir(parents=True, exist_ok=True)
     data = collect(args.steps, args.frame_skip, args.frame_stack,
-                   args.teacher)
+                   args.teacher, args.egocentric)
     np.savez_compressed(args.out, **data)
     size_mb = args.out.stat().st_size / 1e6
     print(f"Wrote {size_mb:.1f} MB to {args.out}")

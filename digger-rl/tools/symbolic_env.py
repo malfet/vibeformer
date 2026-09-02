@@ -25,6 +25,16 @@ Plus a small per-step scalar tail (concatenated by the trainer if
 desired): score, lives, frames_since_last_event, etc. For now we ship
 just the masks; the agent can infer urgency from the digger/monster
 spatial relationship.
+
+Egocentric mode (`egocentric=True`) re-centres the whole stack on the
+digger: the board is pasted into a (2*MHEIGHT-1, 2*MWIDTH-1) canvas so
+the digger always sits at the middle cell, plus one extra plane marking
+the off-board region. This is the snake project's finding #16 — a
+flatten->FC head over an allocentric grid has to learn every board
+position as a separate case, while head-centred obs makes translation
+invariance structural. All stacked frames are re-centred on the
+*current* digger tile (not each frame's own), so self-motion stays
+visible in the inter-frame differences.
 """
 
 from __future__ import annotations
@@ -48,8 +58,36 @@ OBS_CHANNELS = BASE_OBS_CHANNELS
 OBS_SHAPE = BASE_OBS_SHAPE
 
 
-def stacked_obs_shape(frame_stack: int) -> tuple[int, int, int]:
+# Egocentric canvas: the board pasted anywhere from "digger at (0,0)" to
+# "digger at (MHEIGHT-1, MWIDTH-1)" still fits, with the digger pinned at
+# the centre cell (MHEIGHT-1, MWIDTH-1).
+EGO_HEIGHT = 2 * MHEIGHT - 1
+EGO_WIDTH = 2 * MWIDTH - 1
+
+
+def stacked_obs_shape(frame_stack: int,
+                      egocentric: bool = False) -> tuple[int, int, int]:
+    if egocentric:
+        # +1 plane: 1 outside the board, 0 on it.
+        return (BASE_OBS_CHANNELS * frame_stack + 1, EGO_HEIGHT, EGO_WIDTH)
     return (BASE_OBS_CHANNELS * frame_stack, MHEIGHT, MWIDTH)
+
+
+def egocentric_view(board: np.ndarray, row: int, col: int) -> np.ndarray:
+    """(C, MHEIGHT, MWIDTH) -> (C+1, EGO_HEIGHT, EGO_WIDTH), digger centred.
+
+    `row`/`col` is the digger tile that should land on the centre cell.
+    The appended plane is 1 outside the board and 0 on it, so the agent
+    can tell "wall" from "empty" at the canvas edges.
+    """
+    c = board.shape[0]
+    out = np.zeros((c + 1, EGO_HEIGHT, EGO_WIDTH), dtype=np.float32)
+    out[c] = 1.0
+    r0 = MHEIGHT - 1 - int(row)
+    c0 = MWIDTH - 1 - int(col)
+    out[:c, r0:r0 + MHEIGHT, c0:c0 + MWIDTH] = board
+    out[c, r0:r0 + MHEIGHT, c0:c0 + MWIDTH] = 0.0
+    return out
 
 
 def state_to_tensor(state) -> np.ndarray:
@@ -99,15 +137,34 @@ class SymbolicDiggerEnv:
     emerald. Classic potential-based shaping: rewards getting closer,
     penalises moving away, sums to zero over a complete trajectory so it
     doesn't bias the optimal policy.
+
+    Reward composition, per emulator frame:
+
+        score_weight * (game score delta)
+      + shaping_coef * (manhattan distance closed toward an emerald)
+      + survival_reward          (only on frames that didn't end a life)
+      - time_penalty
+      - death_penalty            (on any life loss)
+
+    `score_weight=0, survival_reward>0, shaping_coef=0` gives the pure
+    "maximise frames alive" objective: the game's own score is invisible
+    to the agent and the only thing that matters is not dying.
     """
 
     NUM_ACTIONS = DiggerEnv.NUM_ACTIONS
 
     def __init__(self, shaping_coef: float = 0.0,
                  time_penalty: float = 0.0,
-                 frame_stack: int = 1, **digger_kwargs):
+                 survival_reward: float = 0.0,
+                 score_weight: float = 1.0,
+                 death_penalty: float = 0.0,
+                 frame_stack: int = 1,
+                 egocentric: bool = False, **digger_kwargs):
         if frame_stack < 1:
             raise ValueError(f"frame_stack must be >=1, got {frame_stack}")
+        # death_penalty is applied here, not inside DiggerEnv, so that
+        # score_weight=0 doesn't silently scale it away along with the
+        # score signal.
         self._env = DiggerEnv(**digger_kwargs)
         self._last_state = None
         self.shaping_coef = shaping_coef
@@ -116,18 +173,28 @@ class SymbolicDiggerEnv:
         # "wander forever without scoring" basin: every step has a
         # small opportunity cost, so hiding is no longer a free lunch.
         self.time_penalty = time_penalty
+        # The mirror image: paid for every frame the digger stays alive.
+        self.survival_reward = survival_reward
+        self.score_weight = score_weight
+        self.death_penalty = death_penalty
         self.frame_stack = frame_stack
+        self.egocentric = egocentric
         self._stack: collections.deque[np.ndarray] = collections.deque(
             maxlen=frame_stack)
         self._prev_dist: float | None = None
+        self._prev_lives: int = -1
+        # Last tile the digger was seen on; the egocentric transform needs
+        # a centre even on frames where the CV extractor loses the sprite
+        # (mid-death animation, level transition).
+        self._digger_rc: tuple[int, int] = (MHEIGHT // 2, MWIDTH // 2)
 
     @property
     def obs_channels(self) -> int:
-        return BASE_OBS_CHANNELS * self.frame_stack
+        return self.obs_shape[0]
 
     @property
     def obs_shape(self) -> tuple[int, int, int]:
-        return stacked_obs_shape(self.frame_stack)
+        return stacked_obs_shape(self.frame_stack, self.egocentric)
 
     def _push_frame(self, state) -> np.ndarray:
         """Append a fresh single-frame obs and return the stacked obs."""
@@ -143,14 +210,26 @@ class SymbolicDiggerEnv:
         if len(self._stack) == 0:
             raise RuntimeError("env.reset() must be called before current_obs()")
         if self.frame_stack == 1:
-            return self._stack[0].copy()
-        return np.concatenate(self._stack, axis=0)
+            board = self._stack[0].copy()
+        else:
+            board = np.concatenate(self._stack, axis=0)
+        if not self.egocentric:
+            return board
+        return egocentric_view(board, *self._digger_rc)
+
+    def _note_digger(self, state) -> None:
+        if state.digger is not None and state.digger.present:
+            r, c = state.digger.row, state.digger.col
+            if 0 <= r < MHEIGHT and 0 <= c < MWIDTH:
+                self._digger_rc = (r, c)
 
     def reset(self) -> np.ndarray:
         raw = self._env.reset()
         state = extract_state(raw)
         self._last_state = state
         self._prev_dist = _nearest_emerald_distance(state)
+        self._prev_lives = -1
+        self._note_digger(state)
         # Fill the stack with copies of the initial frame so the very
         # first action sees a (C*N, H, W) tensor of consistent shape.
         frame0 = state_to_tensor(state)
@@ -163,17 +242,26 @@ class SymbolicDiggerEnv:
         s = self._env.step(action)
         state = extract_state(s.obs)
         self._last_state = state
-        reward = float(s.reward)
+        self._note_digger(state)
+        reward = self.score_weight * float(s.reward)
         if self.shaping_coef > 0:
             cur_dist = _nearest_emerald_distance(state)
             if self._prev_dist is not None and cur_dist is not None:
                 # Positive when distance decreased (we got closer).
                 reward += self.shaping_coef * (self._prev_dist - cur_dist)
             self._prev_dist = cur_dist
+        lives = int(s.info.get("lives", 0))
+        died = self._prev_lives > 0 and lives < self._prev_lives
+        self._prev_lives = lives
+        if self.survival_reward and not died:
+            reward += self.survival_reward
+        if self.death_penalty and died:
+            reward -= self.death_penalty
         if self.time_penalty > 0:
             reward -= self.time_penalty
         info = dict(s.info)
         info["score_reward"] = float(s.reward)  # original raw signal
+        info["death"] = bool(died)
         return self._push_frame(state), reward, s.done, info
 
     def save_state(self) -> dict:
@@ -199,6 +287,8 @@ class SymbolicDiggerEnv:
         raw = self._env.load_state(state["env"])
         parsed = extract_state(raw)
         self._last_state = parsed
+        self._prev_lives = -1
+        self._note_digger(parsed)
         # Prefer the saved shaping baseline so the very next step's
         # delta is consistent with the state that was saved. Fall back to
         # recomputing if the field is missing (e.g. old pickles).
