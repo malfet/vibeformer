@@ -284,7 +284,7 @@ trajectories and the life is lost at exactly the same step. Those
 states are inside Digger's death sequence — the outcome is already
 sealed and input is ignored until the respawn.
 
-The trap is that this is invisible from the RAM side. `lives` only
+The trap is that this is invisible from the `lives` counter. (It is *not* invisible in RAM: the death-stage word at `0x259E4` flips the moment the death starts; see 12c.) `lives` only
 decrements when the sequence *finishes*, and the death animation still
 renders a digger-coloured sprite, so `GameState.digger.present` stays
 true throughout. Trying to measure the animation length by watching for
@@ -299,42 +299,57 @@ fixed step is a set of corpses, not a set of hard problems — and it
 looks exactly like a set of hard problems in every metric that doesn't
 involve replaying it.
 
-### 12c. Save-states do not carry the digger's position across processes
+### 12c. ~~Save-states lose the digger's position across processes~~ — retracted: it was a stale framebuffer plus a late death anchor
 
-Chasing 12b to the bottom produced the actual mechanism, and it is worse
-than "captured too late". Save a state, then restore it three ways:
+An earlier version of this section claimed a `retro_serialize` blob
+loaded into a freshly booted DOSBox brings the digger back at the spawn
+point. **That was wrong.** Reading the game's own RAM settles it:
 
-| restore | digger | score | lives |
-|---|---|---|---|
-| saved value | (1, 4) | 150 | 3 |
-| same process, clean | (1, 4) | 150 | 3 |
-| same process, after 20 more steps | (1, 4) | 150 | 3 |
-| **freshly booted process** | **(9, 7)** | 150 | 3 |
+- **Game RAM round-trips byte-exactly across processes** (0 of 649,120
+  bytes differ after `load_state` in a new process), and LEFT/RIGHT from a
+  cross-process restore produce exactly the trajectories they produce
+  in-process.
+- **The framebuffer is not part of the state.** For ~3 emulator frames
+  after `unserialize`, `get_frame()` still returns whatever the core last
+  drew: the spawn screen in a fresh process (the "(9, 7)" in the old
+  table), or the pre-restore screen in-process. `DiggerEnv.load_state`
+  now runs 3 frames before returning, so the first observation after a
+  restore matches the restored game.
+- **The CV extractor sometimes reads a nobbin as the digger** (a frame
+  with the digger visibly at (1, 4) parsed as (6, 10), where a nobbin
+  was). Checking positions through CV made the confusion worse.
+- **What actually sealed every scenario (12b) is the death anchor.**
+  The digger's record lives right next to `lives` in RAM (`0x259C8` x,
+  `0x259CA` y, `0x259CC` column, `0x259CE` row, `0x259E4` death stage:
+  1 = alive). A death *starts* ~100 agent steps (~6 s) before `lives`
+  goes down: bag or monster hit, death animation, then a 60-tick
+  tombstone countdown, all with input ignored. Anchored on the lives
+  decrement, lookbacks of 15/25/40/60 were all inside that window:
+  **320 of 320** scenarios in `death_bcclone_far.pkl` load with the
+  death stage already off "alive".
 
-Score, lives, dirt and monsters round-trip across a `retro_serialize`
-pickle into a new DOSBox instance. **The digger's position does not** —
-it comes back at the spawn point. The result is a hybrid: the game
-replays the recorded death on its original schedule while the digger the
-policy is steering stands somewhere else, so the life is lost at exactly
-`lookback + 1` steps no matter what any policy does. That is precisely
-the 0%-at-every-lookback table the probe produced, and it is why random,
-teacher and student all scored byte-identically.
+`DiggerEnv.step` now returns `digger_rc`, `digger_xy`, `death_stage` and
+`dying` in `info`, read straight from RAM. `collect_death_states` anchors
+on death onset. Re-collected that way (teacher driving, 12 deaths), the
+scenarios respond to input, and escapability rises with lookback as a
+real curriculum should:
 
-Consequences:
+| lookback before onset | teacher survives 50 steps | random survives |
+|---:|---:|---:|
+| 3 | 0/12 | 0/12 |
+| 5 | 1/12 | 1/12 |
+| 10 | 2/12 | 1/12 |
+| 20 | **6/12** | 3/12 |
 
-- **`--resume-from` reading a pickle written by another process is not
-  trustworthy**, which includes the documented `run_digger.py --live S`
-  → train workflow and Lesson 12's claim that "we can train from saved
-  scenarios via `--resume-from`". Same-process save/restore is faithful;
-  cross-process is not.
-- The near-death curriculum needs an **in-process** design: collect the
-  ring buffer and train from it inside one env instance, never through
-  a pickle. `tools/collect_death_states.py` is correct as an instrument
-  but its output cannot be shipped to another process as-is.
-- Anything that survives serialization but is *not* re-derived on load
-  is suspect. The digger's position is presumably kept somewhere the
-  serializer misses, or is re-initialised by the code path that runs
-  after `unserialize`.
+Same-process and cross-process save/restore both work, so a scenario
+recorded by hand in `run_digger.py --live` (S with `--save-slot`) is a
+valid `--resume-from` start again.
+
+**Still open:** `episodic_life` ends the episode on the lives decrement,
+so every PPO episode that ends in a death carries ~100 steps of
+input-ignored "dying" transitions, and the death penalty lands ~100
+steps after the action that caused it. Ending the episode at
+`info["dying"]` would put the penalty on the fatal action.
 
 ## Lessons ported from ../snake (2026-08-31)
 

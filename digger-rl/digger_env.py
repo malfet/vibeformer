@@ -41,6 +41,23 @@ SAVE_DIR = REPO / "data" / "save"
 SCORE_OFFSET = 0x282E0  # int32 LE
 LIVES_OFFSET = 0x259F2  # uint8
 
+# The digger's own record sits right next to LIVES_OFFSET (same struct).
+# Located by scanning for the spawn values (x=152, y=180, col=7, row=9)
+# and keeping the words that tracked controlled moves; the death fields by
+# logging the struct through a monster kill. All int16 LE.
+DIGGER_X_OFFSET = 0x259C8      # pixel x (col * 20 + 12 when tile-aligned)
+DIGGER_Y_OFFSET = 0x259CA      # pixel y (row * 18 + 18 when tile-aligned)
+DIGGER_COL_OFFSET = 0x259CC    # tile column h, 0..14
+DIGGER_ROW_OFFSET = 0x259CE    # tile row v, 0..9
+DEATH_STAGE_OFFSET = 0x259E4   # 1 = alive; 3/5/2/4 = death sequence
+DEATH_TIMER_OFFSET = 0x259EA   # tombstone countdown (59 -> 0)
+DEATH_STAGE_ALIVE = 1
+# A death begins ~100 agent steps (frame_skip=4) before `lives` drops:
+# bag/monster hit, animation, then the tombstone countdown. Input is
+# ignored for that whole stretch, so anything that keys off the lives
+# decrement (episodic-life dones, near-death snapshots) is late by that
+# much. Key off DEATH_STAGE leaving DEATH_STAGE_ALIVE instead.
+
 
 @dataclass
 class StepResult:
@@ -210,6 +227,7 @@ class DiggerEnv:
             reward=reward,
             done=done,
             info={"score": score, "lives": int(lives),
+                  **self.read_digger(),
                   "truncated": truncated, "real_done": real_game_over,
                   "raw_reward": raw_reward},
         )
@@ -291,6 +309,13 @@ class DiggerEnv:
         # internal state was reverted by unserialize, so the polled input
         # now agrees with what the core remembers.
         self._core.set_held_keys_raw(state["held_keys"])
+        # The framebuffer is not part of the serialized state: right after
+        # unserialize, get_frame() still returns whatever the core last
+        # drew (the pre-restore screen, or the spawn screen in a freshly
+        # booted process), and the game needs ~3 frames to redraw. Run
+        # them so the returned observation matches the restored game.
+        for _ in range(3):
+            self._core.run()
         # Wrapper fields are tolerated as missing: a state snapshot from
         # run_digger.py --live S only contains {core, held_keys} because
         # the live viewer talks to the raw libretro core, not DiggerEnv.
@@ -305,6 +330,15 @@ class DiggerEnv:
         self._prev_lives = int(state.get("prev_lives", live_lives))
         self._real_game_over = bool(state.get("real_game_over", False))
         return self._core.get_frame()
+
+    def read_digger(self) -> dict:
+        """Ground-truth digger state straight from game RAM (no CV)."""
+        m = self._core.read_memory_region(0)
+        x, y, col, row = struct.unpack_from("<4h", m, DIGGER_X_OFFSET)
+        stage = struct.unpack_from("<h", m, DEATH_STAGE_OFFSET)[0]
+        return {"digger_xy": (x, y), "digger_rc": (row, col),
+                "death_stage": stage,
+                "dying": stage != DEATH_STAGE_ALIVE}
 
     def _read_score(self) -> int:
         m = self._core.read_memory_region(0)

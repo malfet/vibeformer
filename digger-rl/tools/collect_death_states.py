@@ -10,8 +10,8 @@ decided by what it does *now*.
 
 Mechanically: drive the game with some policy, keep a ring buffer of the
 last `lookback+1` save-states (one per agent step, ~1 ms and 678 KB
-each), and when a life is lost write out the state from `lookback` steps
-earlier. Repeat.
+each), and when a death *starts* (RAM death stage leaves "alive") write
+out the state from `lookback` steps earlier. Repeat.
 
 Two caveats worth knowing before trusting the output:
 
@@ -113,11 +113,21 @@ def collect(out: Path, n_deaths: int, lookbacks: list[int], policy: str,
         a = act_fn(obs)
         obs, _, done, info = env_step_skipped(env, a, frame_skip)
 
-        if done:
+        # Anchor on death *onset* (RAM death stage leaving "alive"), not on
+        # the `lives` decrement: the death sequence runs ~100 agent steps
+        # with input ignored, so lives-anchored lookbacks of up to 60 all
+        # landed inside it (README lesson 12b). Then let the sequence play
+        # out without snapshotting until the life is actually gone.
+        onset = info.get("dying", False)
+        if onset:
+            while not done:
+                obs, _, done, info = env_step_skipped(env, 0, frame_skip)
+
+        if onset or done:
             deaths += 1
             if len(ring) == ring.maxlen:
-                # ring[-1] is the state at the step that died, so the
-                # snapshot k steps earlier is ring[-1 - k].
+                # ring[-1] is the state at the step that started the
+                # death, so the snapshot k steps earlier is ring[-1 - k].
                 kept = False
                 for k in lookbacks:
                     cand = ring[-1 - k]
@@ -228,8 +238,9 @@ def probe(path: Path, policy: str, checkpoint: Path | None, probe_steps: int,
         outcome: int | None = None      # steps to death, or None = survived
         for t in range(probe_steps):
             a = act_fn(obs)
-            obs, _, done, _ = env_step_skipped(env, a, frame_skip)
-            if done:
+            obs, _, done, info = env_step_skipped(env, a, frame_skip)
+            # Death onset, not the lives decrement ~100 steps later.
+            if done or info.get("dying", False):
                 outcome = t + 1
                 break
         by_lookback.setdefault(sc["meta"]["lookback"], []).append(outcome)
