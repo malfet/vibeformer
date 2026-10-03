@@ -125,6 +125,79 @@ def fig_play_strips(out: Path, offsets: list[int]) -> None:
     print(f"wrote {out}")
 
 
+def fig_live_vs_sealed(out: Path, scenarios: Path, steps: int = 4) -> None:
+    """The corpse detector: a live restore vs a death-sequence restore.
+
+    Top pair is a state saved during ordinary play, replayed under LEFT
+    and under RIGHT -- the trajectories diverge, so restore is
+    input-live. Bottom pair is a state captured a few agent steps before
+    the `lives` counter dropped, replayed the same two ways -- the
+    frames come back pixel-identical, because the outcome is already
+    sealed and input is ignored until the respawn.
+
+    This is Lesson 12b in one picture, and the reason a save-state
+    curriculum has to be probed before it is trained on.
+    """
+    env = SymbolicDiggerEnv(max_steps=10**9, clip_reward=False,
+                            episodic_life=True, frame_stack=4)
+    env.reset()
+    teach = SmartHeuristic(); teach.reset()
+    for _ in range(60):
+        env_step_skipped(env, int(teach(env._last_state)), 4)
+    live = env.save_state()
+
+    blob = pickle.load(scenarios.open("rb"))
+    sealed = min(blob["scenarios"], key=lambda s: s["meta"]["lookback"])
+
+    def replay(state, act):
+        env.load_state(state)
+        fr, pos = [], []
+        for _ in range(steps):
+            _, _, done, _ = env_step_skipped(env, act, 4)
+            fr.append(rgb(env._env._core.get_frame()))
+            d = env._last_state.digger
+            pos.append(None if d is None or not d.present else (d.row, d.col))
+            if done:
+                break
+        return fr, pos
+
+    panels, ident = [], {}
+    for tag, st in (("live play", live),
+                    (f"{sealed['meta']['lookback']} steps pre-death", sealed)):
+        runs = {n: replay(st, a) for a, n in ((1, "LEFT"), (2, "RIGHT"))}
+        k = min(len(runs["LEFT"][0]), len(runs["RIGHT"][0]))
+        ident[tag] = all(np.array_equal(runs["LEFT"][0][i],
+                                        runs["RIGHT"][0][i]) for i in range(k))
+        for name in ("LEFT", "RIGHT"):
+            panels.append((f"{tag}\nrestore + {name}", runs[name]))
+    env.close()
+
+    cols = max(len(p[1][0]) for p in panels)
+    fig, axes = plt.subplots(len(panels), cols,
+                             figsize=(4.0 * cols, 2.9 * len(panels)))
+    for r, (label, (fr, pos)) in enumerate(panels):
+        for c in range(cols):
+            ax = axes[r, c]
+            if c < len(fr):
+                ax.imshow(fr[c])
+                ax.set_title(f"after step {c + 1}  digger "
+                             f"{pos[c] if pos[c] else '-'}", fontsize=8)
+            else:
+                ax.axis("off")
+            ax.set_xticks([]); ax.set_yticks([])
+            if c == 0:
+                ax.set_ylabel(label, fontsize=9)
+    verdicts = "     ".join(
+        f"{k}: LEFT vs RIGHT {'IDENTICAL - sealed' if v else 'DIVERGE - live'}"
+        for k, v in ident.items())
+    fig.suptitle("One save-state, two action sequences.\n" + verdicts,
+                 fontsize=12)
+    fig.tight_layout()
+    fig.savefig(out, dpi=110, bbox_inches="tight")
+    plt.close(fig)
+    print(f"wrote {out}  ({verdicts})")
+
+
 def fig_restore_divergence(out: Path, scenarios: Path, steps: int) -> None:
     """Replay one restored state under LEFT and under RIGHT."""
     blob = pickle.load(scenarios.open("rb"))
@@ -254,8 +327,8 @@ def main() -> None:
     if a.only in ("all", "strips"):
         fig_play_strips(a.out / "play_strips.png", offsets)
     if a.only in ("all", "restore") and a.scenarios.exists():
-        fig_restore_divergence(a.out / "restore_divergence.png",
-                               a.scenarios, steps=6)
+        fig_live_vs_sealed(a.out / "restore_live_vs_sealed.png",
+                           a.scenarios, steps=4)
 
 
 if __name__ == "__main__":

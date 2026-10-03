@@ -299,6 +299,43 @@ fixed step is a set of corpses, not a set of hard problems — and it
 looks exactly like a set of hard problems in every metric that doesn't
 involve replaying it.
 
+### 12c. Save-states do not carry the digger's position across processes
+
+Chasing 12b to the bottom produced the actual mechanism, and it is worse
+than "captured too late". Save a state, then restore it three ways:
+
+| restore | digger | score | lives |
+|---|---|---|---|
+| saved value | (1, 4) | 150 | 3 |
+| same process, clean | (1, 4) | 150 | 3 |
+| same process, after 20 more steps | (1, 4) | 150 | 3 |
+| **freshly booted process** | **(9, 7)** | 150 | 3 |
+
+Score, lives, dirt and monsters round-trip across a `retro_serialize`
+pickle into a new DOSBox instance. **The digger's position does not** —
+it comes back at the spawn point. The result is a hybrid: the game
+replays the recorded death on its original schedule while the digger the
+policy is steering stands somewhere else, so the life is lost at exactly
+`lookback + 1` steps no matter what any policy does. That is precisely
+the 0%-at-every-lookback table the probe produced, and it is why random,
+teacher and student all scored byte-identically.
+
+Consequences:
+
+- **`--resume-from` reading a pickle written by another process is not
+  trustworthy**, which includes the documented `run_digger.py --live S`
+  → train workflow and Lesson 12's claim that "we can train from saved
+  scenarios via `--resume-from`". Same-process save/restore is faithful;
+  cross-process is not.
+- The near-death curriculum needs an **in-process** design: collect the
+  ring buffer and train from it inside one env instance, never through
+  a pickle. `tools/collect_death_states.py` is correct as an instrument
+  but its output cannot be shipped to another process as-is.
+- Anything that survives serialization but is *not* re-derived on load
+  is suspect. The digger's position is presumably kept somewhere the
+  serializer misses, or is re-initialised by the code path that runs
+  after `unserialize`.
+
 ## Lessons ported from ../snake (2026-08-31)
 
 The snake project ran the same recipe on a much cheaper simulator and

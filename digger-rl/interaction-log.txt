@@ -330,3 +330,8 @@ User: What's the number?
 [2026-08-31] Any updates?
 [2026-08-31] Can you try to advance the game to a 3-5 steps until player dies and start from it?
 [2026-09-02] Can you capture a few screenshots from your experiments and post them to a report?
+
+---
+Can you look at the repo history and perhaps suggests next steps for improving the model training pipeline. Once again, the goal is to train a model that can finish at least first level of digger without loosing lives using pixel data and perhaps such reward functions as death and points (which one already can extract from the game, can't they?)
+[2026-10-02] Start by committing the writeups.
+Perhaps can you get back to basics, and tell me if you can resume a training/simulation from particular step in the game. Say I drive digger under the bag of gold, which is about ot fall on it and you train model to avoid it. Similarly with monsters - wait for a monster in varios parts of the map, and you train to avoid it
