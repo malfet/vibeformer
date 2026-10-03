@@ -11,7 +11,7 @@ the survival experiments care about, which are not the same metric:
     the number to compare against the v6 teacher's 280.
 
 Runs with episodic_life=False so one episode is one whole game; lives
-are segmented by watching info["lives"] tick down.
+are segmented at each death onset (info["death_event"]).
 
     python eval_symbolic.py data/checkpoints/RUN/ppo_sym_best.pt --episodes 20
     python eval_symbolic.py --policy random  --episodes 20
@@ -103,7 +103,6 @@ def main() -> None:
         obs = env.reset()
         if teacher is not None:
             teacher.reset()
-        prev_lives = None
         steps_this_life = 0
         score = 0
         while True:
@@ -121,11 +120,15 @@ def main() -> None:
             obs, _, done, info = env_step_skipped(env, a, args.frame_skip)
             steps_this_life += 1
             score = int(info.get("score", score))
-            lives = int(info.get("lives", 0))
-            if prev_lives is not None and lives < prev_lives:
+            # Lives are segmented at death onset (RAM death stage), so a
+            # life's length excludes the ~100 input-ignored steps of the
+            # death sequence. Lengths measured before 2026-10 counted
+            # lives-drop to lives-drop and included them.
+            if info.get("death_event", False):
                 life_lengths.append(steps_this_life)
                 steps_this_life = 0
-            prev_lives = lives
+            elif steps_this_life and info.get("dying", False):
+                steps_this_life -= 1   # don't count dead time
             if done:
                 break
         game_scores.append(score)

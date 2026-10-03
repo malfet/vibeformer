@@ -345,11 +345,24 @@ Same-process and cross-process save/restore both work, so a scenario
 recorded by hand in `run_digger.py --live` (S with `--save-slot`) is a
 valid `--resume-from` start again.
 
-**Still open:** `episodic_life` ends the episode on the lives decrement,
-so every PPO episode that ends in a death carries ~100 steps of
-input-ignored "dying" transitions, and the death penalty lands ~100
-steps after the action that caused it. Ending the episode at
-`info["dying"]` would put the penalty on the fatal action.
+### 12d. Deaths are now detected at onset, not at the lives decrement
+
+`DiggerEnv` reports `death_event` on the frame the RAM death stage
+leaves "alive". With `episodic_life` the episode ends there, the death
+penalty lands on that step, and `reset()` plays the ~100 input-ignored
+steps of the death sequence out before handing back the respawned
+digger. A death onset on the last life sets `real_done` at once, since the
+game's outcome is already sealed. Both frame-skip helpers OR the one-frame
+flag across sub-frames. Without that, 3 deaths in 4 were dropped.
+Measured with NOOP: an episodic life went from ~730 to ~350 emulator
+frames, and the difference is all dead time.
+
+**Life lengths before this change are inflated.** `eval_symbolic.py`
+used to measure from one lives drop to the next, which counts the
+previous death sequence. Measured at onset, a random policy's life is
+**~96 agent steps** (was 194). The "life length" column in the
+survival-reward table below is in the old units: subtract ~100 for
+comparison. The ordering is unaffected.
 
 ## Lessons ported from ../snake (2026-08-31)
 

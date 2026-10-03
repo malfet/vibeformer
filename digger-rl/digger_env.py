@@ -125,6 +125,8 @@ class DiggerEnv:
         self._seen_alive = False
         self._steps = 0
         self._prev_lives = -1
+        self._prev_dying = False
+        self._death_counted = False  # onset already reported for this life
         self._real_game_over = True  # forces a hard reset on first call
 
     # -- lifecycle ---------------------------------------------------------
@@ -154,8 +156,16 @@ class DiggerEnv:
             if prior_key is not None:
                 self._core.set_key(prior_key, False)
             self._last_action = self.NOOP
+            # The episode ended at death *onset*; play the input-ignored
+            # death sequence out here so the next episode starts at the
+            # respawn instead of inside ~100 steps of dead time.
+            self._skip_death_sequence()
+        if (self.episodic_life and not self._real_game_over
+                and self._core is not None):
             self._last_score = self._read_score()
             self._prev_lives = self._read_lives()
+            self._prev_dying = False
+            self._death_counted = False
             self._steps = 0
             return self._core.get_frame()
 
@@ -174,6 +184,8 @@ class DiggerEnv:
         self._last_score = self._read_score()
         self._seen_alive = self._read_lives() > 0
         self._prev_lives = self._read_lives()
+        self._prev_dying = False
+        self._death_counted = False
         self._real_game_over = False
         self._steps = 0
         return self._core.get_frame()
@@ -202,10 +214,26 @@ class DiggerEnv:
         if real_game_over:
             self._real_game_over = True
 
-        # Death = lives went down this step (covers both intermediate deaths
-        # and the final game-over death).
-        death_event = self._prev_lives > 0 and lives < self._prev_lives
+        # Death = the RAM death stage leaving "alive" (onset), ~100 agent
+        # steps before `lives` drops. The lives drop still counts as a death
+        # when no onset was seen for this life (e.g. a state restored from
+        # inside the death sequence), so every life loss is reported once.
+        dig = self.read_digger()
+        onset = dig["dying"] and not self._prev_dying
+        self._prev_dying = dig["dying"]
+        lives_dropped = self._prev_lives > 0 and lives < self._prev_lives
         self._prev_lives = lives
+        onset_event = onset and not self._death_counted
+        death_event = onset_event or (
+            lives_dropped and not self._death_counted)
+        if death_event:
+            self._death_counted = True
+        if lives_dropped:
+            self._death_counted = False
+        # Onset on the last life seals the game: report game over now
+        # rather than ~100 steps later when `lives` reaches 0.
+        if onset_event and lives <= 1:
+            real_game_over = self._real_game_over = True
 
         if death_event and self.death_penalty != 0.0:
             reward -= self.death_penalty
@@ -227,7 +255,8 @@ class DiggerEnv:
             reward=reward,
             done=done,
             info={"score": score, "lives": int(lives),
-                  **self.read_digger(),
+                  "death_event": bool(death_event),
+                  **dig,
                   "truncated": truncated, "real_done": real_game_over,
                   "raw_reward": raw_reward},
         )
@@ -286,6 +315,7 @@ class DiggerEnv:
             "steps": int(self._steps),
             "prev_lives": int(self._prev_lives),
             "real_game_over": bool(self._real_game_over),
+            "death_counted": bool(self._death_counted),
         }
 
     def load_state(self, state: dict) -> np.ndarray:
@@ -329,7 +359,29 @@ class DiggerEnv:
         self._steps = int(state.get("steps", 0))
         self._prev_lives = int(state.get("prev_lives", live_lives))
         self._real_game_over = bool(state.get("real_game_over", False))
+        self._prev_dying = self.read_digger()["dying"]
+        self._death_counted = bool(state.get("death_counted",
+                                             self._prev_dying))
         return self._core.get_frame()
+
+    def _skip_death_sequence(self, max_frames: int = 3000) -> None:
+        """Run the core with no input until the death sequence finishes:
+        the digger respawns (stage back to alive, held for a few frames so
+        a one-frame blip mid-sequence can't end it early) or the game is
+        over. No-op when the digger isn't dying."""
+        if not self.read_digger()["dying"]:
+            return
+        alive_run = 0
+        for _ in range(max_frames):
+            if self._read_lives() == 0:
+                self._real_game_over = True
+                return
+            alive_run = 0 if self.read_digger()["dying"] else alive_run + 1
+            if alive_run >= 8:
+                return
+            self._core.run()
+        raise RuntimeError("death sequence did not finish in "
+                           f"{max_frames} frames")
 
     def read_digger(self) -> dict:
         """Ground-truth digger state straight from game RAM (no CV)."""
@@ -416,11 +468,15 @@ def _env_step_skipped(env: DiggerEnv, action: int, skip: int):
     info: dict = {}
     obs = None
     done = False
+    death = False
     for _ in range(skip):
         s = env.step(action)
         total_r += s.reward
         obs = s.obs
-        info = s.info
+        # death_event is a one-frame flag; keep it if it fired on any
+        # sub-frame, not just the last one.
+        death = death or bool(s.info.get("death_event", False))
+        info = dict(s.info, death_event=death)
         if s.done:
             done = True
             break

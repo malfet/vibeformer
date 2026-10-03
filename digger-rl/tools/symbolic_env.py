@@ -250,9 +250,10 @@ class SymbolicDiggerEnv:
                 # Positive when distance decreased (we got closer).
                 reward += self.shaping_coef * (self._prev_dist - cur_dist)
             self._prev_dist = cur_dist
-        lives = int(s.info.get("lives", 0))
-        died = self._prev_lives > 0 and lives < self._prev_lives
-        self._prev_lives = lives
+        # Death onset from RAM (DiggerEnv), not the lives decrement that
+        # lands ~100 steps later after the input-ignored death sequence.
+        died = bool(s.info.get("death_event", False))
+        self._prev_lives = int(s.info.get("lives", 0))
         if self.survival_reward and not died:
             reward += self.survival_reward
         if self.death_penalty and died:
