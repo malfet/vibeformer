@@ -98,6 +98,11 @@ def main() -> None:
                            else str(args.checkpoint))
     game_scores: list[int] = []
     life_lengths: list[int] = []
+    # The project goal: clear level 1 without losing a life. A level-up
+    # shows as the emerald grid refilling (a jump of >= 4; CV occlusion
+    # only flickers the count by 1-2) -- same rule as DeathBagLogger.
+    clean_l1 = 0
+    any_l1 = 0
 
     for ep in range(args.episodes):
         obs = env.reset()
@@ -105,6 +110,10 @@ def main() -> None:
             teacher.reset()
         steps_this_life = 0
         score = 0
+        died_yet = False
+        levelled = False
+        clean_game = False
+        prev_em = None
         while True:
             if args.policy == "random":
                 a = int(rng.integers(env.NUM_ACTIONS))
@@ -124,7 +133,15 @@ def main() -> None:
             # life's length excludes the ~100 input-ignored steps of the
             # death sequence. Lengths measured before 2026-10 counted
             # lives-drop to lives-drop and included them.
+            n_em = int(env._last_state.emeralds.sum())
+            if prev_em is not None and n_em - prev_em >= 4 and not levelled:
+                levelled = True
+                any_l1 += 1
+                clean_game = not died_yet
+                clean_l1 += clean_game
+            prev_em = n_em
             if info.get("death_event", False):
+                died_yet = True
                 life_lengths.append(steps_this_life)
                 steps_this_life = 0
             elif steps_this_life and info.get("dying", False):
@@ -133,7 +150,9 @@ def main() -> None:
                 break
         game_scores.append(score)
         print(f"  [{label}] game {ep + 1}/{args.episodes} "
-              f"score={score} lives_recorded={len(life_lengths)}", flush=True)
+              f"score={score} lives_recorded={len(life_lengths)} "
+              f"L1={'clean' if clean_game else ('yes' if levelled else 'no')}",
+              flush=True)
 
     env.close()
 
@@ -150,6 +169,8 @@ def main() -> None:
               f"+-{sem(life_lengths):5.1f}  median "
               f"{statistics.median(life_lengths):6.0f}  "
               f"max {max(life_lengths)}  n={len(life_lengths)} agent steps")
+    print(f"level 1    : cleared without dying {clean_l1}/{args.episodes}  "
+          f"cleared at all {any_l1}/{args.episodes}")
 
 
 if __name__ == "__main__":

@@ -364,6 +364,44 @@ previous death sequence. Measured at onset, a random policy's life is
 survival-reward table below is in the old units: subtract ~100 for
 comparison. The ordering is unaffected.
 
+### 12e. PPO with the onset death marker (2026-10-04)
+
+Three 400k-step PPO fine-tunes of the symbolic BC clone, same session,
+all with onset-terminated episodes, score x 0.02 (emerald = +0.5),
+shaping off, and a v6.4 teacher anchor annealed 0.3 -> 0.05. Near-death
+scenarios were collected with the BC clone driving and anchored on death
+onset: 320 for training (`onset_bc_train.pkl`) and 120 held out
+(`onset_bc_heldout.pkl`, different run). Full games: `eval_symbolic.py`,
+30 games (teacher 20). Held-out: survive 60 steps from each scenario.
+
+| Policy | Score | Life (steps) | L1 cleared without dying | L1 cleared | Held-out escapes |
+|---|---:|---:|---:|---:|---:|
+| Teacher v6.4 | 1304 +-132 | 161 +-11 | 1/20 | 6/20 | 29/120 |
+| BC clone | 1229 +-115 | 167 +-10 | 0/30 | 9/30 | 24/120 |
+| `onset_ctrl` (no death penalty) | **1341 +-76** | **188 +-11** | 0/30 | 13/30 | 25/120 |
+| `onset_death` (-5 at onset) | 1293 +-75 | 187 +-9 | 0/30 | **16/30** | 31/120 |
+| `onset_death_scen` (+50% scenario resets) | 943 +-86 | 178 +-10 | 0/30 | 5/30 | **32/120** |
+| Random | - | ~96 | - | - | 17/120 |
+
+- **PPO on the BC clone is no longer net-negative.** Both game-start arms
+  beat BC by ~1 sem on score and ~1.5-2 sem on life length, and clear
+  level 1 more often (13-16/30 vs 9/30). The earlier `bcppo_score` run
+  tied BC. Onset-terminated episodes are the main change between the two,
+  but one seed each is suggestive, not proof.
+- **The -5 onset penalty did little.** Same score and life length as the
+  control; held-out escapes 31 vs 25 out of 120 is inside binomial noise
+  (+-~5).
+- **Scenario resets teach escapes but cost the game.** `onset_death_scen`
+  is best on the held-out set at long lookbacks (16/30 at 30 steps vs 9/30
+  for BC), but its full-game score fell 30%. With half the episodes
+  starting in a death trap with a penalty attached, the policy turns
+  timid elsewhere. A lower `--resume-prob` (0.1-0.2) is the obvious next
+  knob.
+- **The goal metric didn't move: 0/120 clean level-1 clears across the
+  ML policies.** Clearing level 1 takes several hundred agent steps on one
+  life. The best policy averages 188. A +12% gain in life length doesn't
+  close a ~3x gap.
+
 ## Lessons ported from ../snake (2026-08-31)
 
 The snake project ran the same recipe on a much cheaper simulator and
