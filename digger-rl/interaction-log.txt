@@ -338,3 +338,4 @@ Perhaps can you get back to basics, and tell me if you can resume a training/sim
 [2026-10-03] First of all, let's commit what you've found and also try detecting death state rather than death counter. But would it make sense to reduce time resolution. And perhaps alternatively, we can detect death by music being played, if you can capture this one
 [2026-10-04] Sure, let's try training using  abetter death marker
 [2026-10-04] Sure (start on the search teacher)
+[2026-10-04] Let's train a pixel model to imitat teacher

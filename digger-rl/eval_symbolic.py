@@ -56,7 +56,7 @@ def build_agent(ckpt_path: Path, device) -> tuple[torch.nn.Module, dict]:
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("checkpoint", type=Path, nargs="?")
-    p.add_argument("--policy", choices=("ckpt", "random", "teacher", "search"),
+    p.add_argument("--policy", choices=("ckpt", "random", "teacher", "search", "pixel"),
                    default="ckpt",
                    help="random / teacher give same-session baselines; "
                         "cross-session numbers are not comparable (see "
@@ -98,6 +98,20 @@ def main() -> None:
     env = SymbolicDiggerEnv(max_steps=10**9, clip_reward=False,
                             episodic_life=False, frame_stack=frame_stack,
                             egocentric=egocentric)
+    pixel = None
+    if args.policy == "pixel":
+        # Pixel student (train_ppo.Agent). Same score/life/level-1 metrics
+        # as the symbolic policies; frames come from the same emulator.
+        import collections
+        from digger_env import preprocess_uint8
+        from tools.gen_search_trace import _load_student
+        pixel, pcfg = _load_student(args.checkpoint)
+        pixel.to(device)
+        pstack = collections.deque(maxlen=pcfg["frame_stack"])
+
+        def pixel_frame():
+            return preprocess_uint8(env._env._core.get_frame(),
+                                    pcfg["obs_size"], pcfg["color"])
     if args.policy == "search":
         from tools.search_teacher import SearchTeacher
         teacher = SearchTeacher(env, horizon=args.search_horizon,
@@ -126,8 +140,24 @@ def main() -> None:
         levelled = False
         clean_game = False
         prev_em = None
+        refill = True   # (re)fill the pixel stack, as DiggerVecEnv.reset does
         while True:
-            if args.policy == "random":
+            if pixel is not None:
+                fr = pixel_frame()
+                if refill:
+                    pstack.clear()
+                    pstack.extend([fr] * pstack.maxlen)
+                    refill = False
+                else:
+                    pstack.append(fr)
+                x = np.concatenate([f.transpose(2, 0, 1) for f in pstack], 0)
+                with torch.no_grad():
+                    xt = torch.from_numpy(x).to(device).float().div_(255.0)
+                    logits = pixel.actor(pixel.encode(xt.unsqueeze(0)))
+                    a = int(logits.argmax(-1).item() if args.argmax else
+                            torch.distributions.Categorical(
+                                logits=logits).sample().item())
+            elif args.policy == "random":
                 a = int(rng.integers(env.NUM_ACTIONS))
             elif teacher is not None:
                 a = int(teacher(env._last_state))
@@ -158,6 +188,10 @@ def main() -> None:
                 steps_this_life = 0
             elif steps_this_life and info.get("dying", False):
                 steps_this_life -= 1   # don't count dead time
+            if info.get("dying", False):
+                # The deployed env skips the death sequence and refills the
+                # stack on reset; refill once the digger is back.
+                refill = True
             if done:
                 break
         game_scores.append(score)

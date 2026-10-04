@@ -996,8 +996,9 @@ def main() -> None:
     # training." Quick-eval the resulting policy under the same
     # stochastic sampling PPO would use, then save and exit.
     if cfg.total_timesteps <= 0:
-        if cfg.warmup_steps <= 0:
+        if cfg.warmup_steps <= 0 and not (cfg.bc_traces and cfg.bc_epochs > 0):
             raise SystemExit("--total-timesteps 0 requires --warmup-steps > 0 "
+                             "or --bc-traces with --bc-epochs > 0 "
                              "(otherwise the agent is untrained)")
 
         # DAGGER iterations: student visits states, teacher labels them,
