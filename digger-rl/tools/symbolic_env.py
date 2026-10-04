@@ -187,6 +187,10 @@ class SymbolicDiggerEnv:
         # a centre even on frames where the CV extractor loses the sprite
         # (mid-death animation, level transition).
         self._digger_rc: tuple[int, int] = (MHEIGHT // 2, MWIDTH // 2)
+        # Frames left before the framebuffer catches up after a no-refresh
+        # restore (see restore_snapshot); step() reuses the last good state
+        # for them instead of parsing a stale screen.
+        self._stale_frames = 0
 
     @property
     def obs_channels(self) -> int:
@@ -225,6 +229,7 @@ class SymbolicDiggerEnv:
 
     def reset(self) -> np.ndarray:
         raw = self._env.reset()
+        self._stale_frames = 0
         state = extract_state(raw)
         self._last_state = state
         self._prev_dist = _nearest_emerald_distance(state)
@@ -240,7 +245,11 @@ class SymbolicDiggerEnv:
 
     def step(self, action: int):
         s = self._env.step(action)
-        state = extract_state(s.obs)
+        if self._stale_frames > 0:
+            self._stale_frames -= 1
+            state = self._last_state
+        else:
+            state = extract_state(s.obs)
         self._last_state = state
         self._note_digger(state)
         reward = self.score_weight * float(s.reward)
@@ -286,6 +295,7 @@ class SymbolicDiggerEnv:
         the restore point.
         """
         raw = self._env.load_state(state["env"])
+        self._stale_frames = 0
         parsed = extract_state(raw)
         self._last_state = parsed
         self._prev_lives = -1
@@ -300,6 +310,22 @@ class SymbolicDiggerEnv:
         for _ in range(self.frame_stack):
             self._stack.append(frame0.copy())
         return self.current_obs()
+
+    def snapshot(self) -> tuple:
+        """Cheap in-process snapshot (emulator + wrapper fields) for search.
+        Unlike save_state(), restoring it does not advance game time."""
+        return (self._env.save_state(), self._last_state, list(self._stack),
+                self._prev_dist, self._prev_lives, self._digger_rc)
+
+    def restore_snapshot(self, snap: tuple) -> None:
+        env_state, last, stack, pd, pl, rc = snap
+        self._env.load_state(env_state, refresh=False)
+        self._last_state, self._prev_dist = last, pd
+        self._prev_lives, self._digger_rc = pl, rc
+        self._stack.clear()
+        self._stack.extend(stack)
+        # The framebuffer lags unserialize by ~3 frames (README 12c).
+        self._stale_frames = 3
 
     def close(self) -> None:
         self._env.close()

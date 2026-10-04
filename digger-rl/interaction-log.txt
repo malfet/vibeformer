@@ -337,3 +337,4 @@ Can you look at the repo history and perhaps suggests next steps for improving t
 Perhaps can you get back to basics, and tell me if you can resume a training/simulation from particular step in the game. Say I drive digger under the bag of gold, which is about ot fall on it and you train model to avoid it. Similarly with monsters - wait for a monster in varios parts of the map, and you train to avoid it
 [2026-10-03] First of all, let's commit what you've found and also try detecting death state rather than death counter. But would it make sense to reduce time resolution. And perhaps alternatively, we can detect death by music being played, if you can capture this one
 [2026-10-04] Sure, let's try training using  abetter death marker
+[2026-10-04] Sure (start on the search teacher)

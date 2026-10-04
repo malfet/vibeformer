@@ -100,7 +100,8 @@ class DiggerEnv:
     def __init__(self, max_steps: int = 36000,
                  clip_reward: bool = True,
                  episodic_life: bool = False,
-                 death_penalty: float = 0.0):
+                 death_penalty: float = 0.0,
+                 cycles: str | None = "7800"):
         # 36000 frames ~= 8.5 minutes of in-game time at 70 fps. Plenty for
         # a Digger run; cap exists so an immortal idle policy doesn't loop
         # forever.
@@ -119,6 +120,13 @@ class DiggerEnv:
         self.clip_reward = clip_reward
         self.episodic_life = episodic_life
         self.death_penalty = float(death_penalty)
+        # DOSBox Pure "dosbox_pure_cycles" (None = core default, "auto").
+        # Digger paces itself off the PIT timer, so emulating a slower CPU
+        # mostly just makes frames cheaper: 7800 (386DX-33) matches
+        # auto-mode gameplay timing (NOOP death onsets within a few frames)
+        # at ~6x less emulation cost. 2750 (286-12) is cheaper still but
+        # starves the game: monsters arrive ~30-80 frames late.
+        self.cycles = cycles
         self._core: _libretro.LibretroCore | None = None
         self._last_action = self.NOOP
         self._last_score = 0
@@ -177,6 +185,8 @@ class DiggerEnv:
 
         self._core = _libretro.LibretroCore(
             str(CORE_PATH), str(SYS_DIR), str(SAVE_DIR))
+        if self.cycles is not None:
+            self._core.set_option("dosbox_pure_cycles", str(self.cycles))
         self._core.load_game(str(GAME_PATH))
         self._advance_to_gameplay()
 
@@ -268,15 +278,27 @@ class DiggerEnv:
 
     # -- helpers -----------------------------------------------------------
 
-    def _advance_to_gameplay(self, title=20, hold=10, settle=20) -> None:
-        for _ in range(title):
+    def _advance_to_gameplay(self, max_frames: int = 3000) -> None:
+        """Get from boot to the first frame of gameplay: tap RETURN every 60
+        frames until RAM shows lives > 0 and the digger alive. A fixed frame
+        count is not enough, because boot time depends on the emulated
+        CPU speed (`cycles`)."""
+        key = _libretro.RETROK.RETURN
+        for f in range(max_frames):
+            if f >= 20 and self._in_gameplay():
+                self._core.set_key(key, False)
+                return
+            if f % 60 == 20:
+                self._core.set_key(key, True)
+            elif f % 60 == 30:
+                self._core.set_key(key, False)
             self._core.run()
-        self._core.set_key(_libretro.RETROK.RETURN, True)
-        for _ in range(hold):
-            self._core.run()
-        self._core.set_key(_libretro.RETROK.RETURN, False)
-        for _ in range(settle):
-            self._core.run()
+        raise RuntimeError(f"game did not start within {max_frames} frames")
+
+    def _in_gameplay(self) -> bool:
+        m = self._core.read_memory_region(0)
+        stage = struct.unpack_from("<h", m, DEATH_STAGE_OFFSET)[0]
+        return 0 < m[LIVES_OFFSET] <= 5 and stage == DEATH_STAGE_ALIVE
 
     def _apply_action(self, action: int) -> None:
         if action == self._last_action:
@@ -318,7 +340,7 @@ class DiggerEnv:
             "death_counted": bool(self._death_counted),
         }
 
-    def load_state(self, state: dict) -> np.ndarray:
+    def load_state(self, state: dict, refresh: bool = True) -> np.ndarray:
         """Restore a snapshot from save_state(). Returns the current frame.
 
         We release any frontend-held key before unserialize so the C++
@@ -344,8 +366,12 @@ class DiggerEnv:
         # drew (the pre-restore screen, or the spawn screen in a freshly
         # booted process), and the game needs ~3 frames to redraw. Run
         # them so the returned observation matches the restored game.
-        for _ in range(3):
-            self._core.run()
+        # refresh=False skips this for callers that restore many times per
+        # step (search rollouts) and must not advance game time; they get a
+        # stale frame back and have to cope with it themselves.
+        if refresh:
+            for _ in range(3):
+                self._core.run()
         # Wrapper fields are tolerated as missing: a state snapshot from
         # run_digger.py --live S only contains {core, held_keys} because
         # the live viewer talks to the raw libretro core, not DiggerEnv.

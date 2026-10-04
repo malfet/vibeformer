@@ -270,13 +270,14 @@ def _find_bags_by_template(m_blk_play: np.ndarray
     cand_ys, cand_xs = np.where(candidates)
 
     out: list[tuple[int, int, bool]] = []
-    seen: set[tuple[int, int]] = set()
-    for ty, tx in zip(cand_ys.tolist(), cand_xs.tolist()):
-        if (ty, tx) in seen:
-            continue
-        if not np.array_equal(m_blk_play[ty:ty + TH, tx:tx + TW], BAG_TEMPLATE):
-            continue
-        seen.add((ty, tx))
+    if len(cand_ys) == 0:
+        return out
+    # Full template check for all survivors in one gather. The pre-filter
+    # still passes ~2k positions a frame; checking them one np.array_equal
+    # at a time from Python was ~45% of the extractor's runtime.
+    windows = np.lib.stride_tricks.sliding_window_view(m_blk_play, (TH, TW))
+    hit = (windows[cand_ys, cand_xs] == BAG_TEMPLATE).all(axis=(1, 2))
+    for ty, tx in zip(cand_ys[hit].tolist(), cand_xs[hit].tolist()):
         sprite_cy = ty + BAG_CENTER_DY
         sprite_cx = tx + BAG_CENTER_DX
         col, row = pixel_to_tile(sprite_cx, sprite_cy + PLAY_TOP)
@@ -456,13 +457,31 @@ def _find_nobbins_by_template(m_grn_play: np.ndarray,
     out_h, out_w = H - TH + 1, W - TW + 1
     # match_count[y, x] = number of template body-pixels that are green
     # if the template's top-left is placed at (y, x).
-    match_count = np.zeros((out_h, out_w), dtype=np.int32)
-    for dy, dx in _NOBBIN_OFFSETS:
-        match_count += m_grn_play[dy:dy + out_h, dx:dx + out_w].astype(np.int32)
     threshold = int(NOBBIN_BODY_COUNT * min_match_frac)
-    candidate_mask = match_count >= threshold
-    if not candidate_mask.any():
+    # Exact two-stage count. A match may miss at most `slack` template
+    # pixels, so any position with fewer than k - slack of the first k
+    # offsets green can never reach `threshold`. Summing k slices over the
+    # frame and the rest only at the survivors gives the same match_count
+    # wherever it can matter, at a fraction of the cost of 52 full slices.
+    # uint8 holds the count (<= 52) and adds bool slices in place.
+    offs = _NOBBIN_OFFSETS
+    slack = NOBBIN_BODY_COUNT - threshold
+    k = min(len(offs), 2 * slack)
+    partial = np.zeros((out_h, out_w), dtype=np.uint8)
+    for dy, dx in offs[:k]:
+        partial += m_grn_play[dy:dy + out_h, dx:dx + out_w]
+    cy, cx = np.nonzero(partial >= k - slack)
+    if len(cy) == 0:
         return []
+    counts = partial[cy, cx].astype(np.int32)
+    for dy, dx in offs[k:]:
+        counts += m_grn_play[cy + dy, cx + dx]
+    keep = counts >= threshold
+    if not keep.any():
+        return []
+    match_count = np.zeros((out_h, out_w), dtype=np.int32)
+    match_count[cy[keep], cx[keep]] = counts[keep]
+    candidate_mask = match_count >= threshold
 
     # Non-max suppression: iteratively take the global argmax and zero
     # out a NOBBIN_TPL-sized neighbourhood around it. Cheap because the
@@ -559,6 +578,15 @@ def _monster_pixel_center(dgrn_play_mask: np.ndarray,
     return int(xs.mean()) + x0, int(ys.mean()) + y0 + PLAY_TOP
 
 
+# Little-endian RGBA bytes read as uint32: R is the low byte.
+_RGB_MASK = np.uint32(0x00FFFFFF)
+
+
+def _pack(rgb: tuple[int, int, int]) -> np.uint32:
+    r, g, b = rgb
+    return np.uint32(r | (g << 8) | (b << 16))
+
+
 def extract_state_fast(frame_rgba: np.ndarray) -> GameState:
     """Vectorised CV extractor, ~10x faster than extract_state.
 
@@ -580,15 +608,16 @@ def extract_state_fast(frame_rgba: np.ndarray) -> GameState:
     tile_idx_flat = _tile_index_for_play(H, W).ravel()
     n_tiles = MWIDTH * MHEIGHT
 
-    # All boolean masks computed in one sweep through `play`.
-    pr = play[..., 0]; pg = play[..., 1]; pb = play[..., 2]
-    m_red   = (pr == PAL_RED[0])   & (pg == PAL_RED[1])   & (pb == PAL_RED[2])
-    m_grn   = (pr == PAL_GREEN[0]) & (pg == PAL_GREEN[1]) & (pb == PAL_GREEN[2])
-    m_dgrn  = (pr == PAL_DGREEN[0]) & (pg == PAL_DGREEN[1]) & (pb == PAL_DGREEN[2])
-    m_yel   = (pr == PAL_YELLOW[0]) & (pg == PAL_YELLOW[1]) & (pb == PAL_YELLOW[2])
-    m_blk   = (pr == 0) & (pg == 0) & (pb == 0)
-    m_dirt  = (((pr == PAL_DIRT_A[0]) & (pg == PAL_DIRT_A[1]) & (pb == PAL_DIRT_A[2])) |
-               ((pr == PAL_DIRT_B[0]) & (pg == PAL_DIRT_B[1]) & (pb == PAL_DIRT_B[2])))
+    # One uint32 compare per colour instead of three uint8 compares + two
+    # ANDs: view each RGBA pixel as a 32-bit word with alpha masked off.
+    px = np.ascontiguousarray(frame_rgba[PLAY_TOP:PLAY_BOTTOM]).view(
+        np.uint32)[..., 0] & _RGB_MASK
+    m_red   = px == _pack(PAL_RED)
+    m_grn   = px == _pack(PAL_GREEN)
+    m_dgrn  = px == _pack(PAL_DGREEN)
+    m_yel   = px == _pack(PAL_YELLOW)
+    m_blk   = px == 0
+    m_dirt  = (px == _pack(PAL_DIRT_A)) | (px == _pack(PAL_DIRT_B))
 
     def per_tile(mask: np.ndarray) -> np.ndarray:
         return np.bincount(tile_idx_flat[mask.ravel()],

@@ -56,7 +56,7 @@ def build_agent(ckpt_path: Path, device) -> tuple[torch.nn.Module, dict]:
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("checkpoint", type=Path, nargs="?")
-    p.add_argument("--policy", choices=("ckpt", "random", "teacher"),
+    p.add_argument("--policy", choices=("ckpt", "random", "teacher", "search"),
                    default="ckpt",
                    help="random / teacher give same-session baselines; "
                         "cross-session numbers are not comparable (see "
@@ -71,6 +71,12 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=1234)
     p.add_argument("--force-cpu", action="store_true")
     p.add_argument("--label", type=str, default=None)
+    p.add_argument("--search-horizon", type=int, default=24,
+                   help="--policy search: rollout length in agent steps")
+    p.add_argument("--search-commit", type=int, default=3,
+                   help="--policy search: steps the candidate is held")
+    p.add_argument("--search-rollouts", type=int, default=2,
+                   help="--policy search: rollouts per candidate")
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
@@ -92,7 +98,13 @@ def main() -> None:
     env = SymbolicDiggerEnv(max_steps=10**9, clip_reward=False,
                             episodic_life=False, frame_stack=frame_stack,
                             egocentric=egocentric)
-    teacher = SmartHeuristic() if args.policy == "teacher" else None
+    if args.policy == "search":
+        from tools.search_teacher import SearchTeacher
+        teacher = SearchTeacher(env, horizon=args.search_horizon,
+                                commit=args.search_commit,
+                                rollouts=args.search_rollouts)
+    else:
+        teacher = SmartHeuristic() if args.policy == "teacher" else None
 
     label = args.label or (args.policy if args.policy != "ckpt"
                            else str(args.checkpoint))
@@ -153,6 +165,8 @@ def main() -> None:
               f"score={score} lives_recorded={len(life_lengths)} "
               f"L1={'clean' if clean_game else ('yes' if levelled else 'no')}",
               flush=True)
+        if args.policy == "search":
+            print(f"  [{label}]   {teacher.summary()}", flush=True)
 
     env.close()
 

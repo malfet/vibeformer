@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -179,6 +180,12 @@ public:
         return py::bytes(static_cast<const char*>(data), size);
     }
 
+    // Core option (e.g. dosbox_pure_cycles). Set before load_game(): the
+    // core reads its variables when the game boots.
+    void set_option(const std::string& key, const std::string& value) {
+        options_[key] = value;
+    }
+
     size_t serialize_size() {
         return retro_serialize_size_();
     }
@@ -257,6 +264,7 @@ public:
 
 private:
     static LibretroCore* instance_;
+    std::map<std::string, std::string> options_;
     void* handle_ = nullptr;
     bool game_loaded_ = false;
 
@@ -360,9 +368,15 @@ private:
                 return true;
             }
             case RETRO_ENVIRONMENT_GET_VARIABLE: {
+                // Options set via set_option() override the core defaults.
                 auto* v = static_cast<retro_variable*>(data);
-                v->value = nullptr;  // use core defaults
-                return false;
+                auto it = v->key ? options_.find(v->key) : options_.end();
+                if (it == options_.end()) {
+                    v->value = nullptr;  // use core defaults
+                    return false;
+                }
+                v->value = it->second.c_str();
+                return true;
             }
             case RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE:
                 *static_cast<bool*>(data) = false;
@@ -492,6 +506,8 @@ PYBIND11_MODULE(_libretro, m) {
              "without firing keyboard_event_cb. Use after unserialize().")
         .def("set_key", &LibretroCore::set_key,
              py::arg("retro_key"), py::arg("pressed"))
+        .def("set_option", &LibretroCore::set_option, py::arg("key"),
+             py::arg("value"))
         .def("clear_keys", &LibretroCore::clear_keys);
 
     m.attr("MEMORY_SYSTEM_RAM") = py::int_(RETRO_MEMORY_SYSTEM_RAM);
