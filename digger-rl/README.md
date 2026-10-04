@@ -402,6 +402,38 @@ onset: 320 for training (`onset_bc_train.pkl`) and 120 held out
   life. The best policy averages 188. A +12% gain in life length doesn't
   close a ~3x gap.
 
+### 13. Search teacher: the first policy that meets the goal (2026-10-04)
+
+`tools/search_teacher.py` keeps SmartHeuristic as its default policy and
+overrules it with in-process emulator rollouts. The rollouts are scored on
+the RAM death flag (12d) and made possible by in-process save/restore (12c).
+Per decision it plays the heuristic's action plus heuristic continuation
+for `horizon` steps, `rollouts` times. If no rollout dies it takes the
+heuristic's action; otherwise it rolls out all six actions and takes the
+best (survival rate, steps survived, score gained). Same session, 7800
+cycles:
+
+| Policy | Games | Score | Life (steps) | L1 cleared without dying | L1 cleared | Cost/step |
+|---|---:|---:|---:|---:|---:|---:|
+| SmartHeuristic v6.4 | 20 | 1504 +-117 | 188 | 1/20 | 8/20 | <1 ms |
+| **Search h=24, r=2** | 16 | **3844 +-450** | **670** | **5/16** | **13/16** | 0.42 s |
+| Search h=40, r=3 | 12 | 3802 +-380 | 635 | 3/12 | 11/12 | 1.0 s |
+
+- Life length goes up 3.5x and score 2.5x. The full search runs on ~28%
+  of steps (40% for h=40) and overrules the heuristic on ~19%.
+- Looking deeper didn't help: h=40/r=3 is within noise of h=24/r=2 at
+  2.4x the cost. Most fatal mistakes are visible within ~24 steps (96
+  frames), matching the near-death escapability curve.
+- This was made affordable by two speedups: 7800 emulated cycles (0.55 vs
+  3.4 ms/frame, same gameplay timing) and the vectorised CV extractor
+  (3.8 vs ~10 ms/frame). Rollouts also run CV only when the heuristic
+  decides.
+- It is a teacher, not a deployable agent: 0.4 s per step and it reads
+  RAM and calls the emulator. Next is distilling it, starting with
+  symbolic BC/DAgger on its labels, then pixels.
+
+    python eval_symbolic.py --policy search --episodes 2   # ~10 min/game
+
 ## Lessons ported from ../snake (2026-08-31)
 
 The snake project ran the same recipe on a much cheaper simulator and
