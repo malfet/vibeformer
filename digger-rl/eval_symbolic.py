@@ -110,8 +110,11 @@ def main() -> None:
         pstack = collections.deque(maxlen=pcfg["frame_stack"])
 
         def pixel_frame():
-            return preprocess_uint8(env._env._core.get_frame(),
-                                    pcfg["obs_size"], pcfg["color"])
+            raw = env._env._core.get_frame()
+            if "obs_hw" in pcfg:   # native-aspect model (train_bc_traces)
+                from tools.gen_search_trace import _resize_rgb
+                return _resize_rgb(raw, *pcfg["obs_hw"])
+            return preprocess_uint8(raw, pcfg["obs_size"], pcfg["color"])
     if args.policy == "search":
         from tools.search_teacher import SearchTeacher
         teacher = SearchTeacher(env, horizon=args.search_horizon,

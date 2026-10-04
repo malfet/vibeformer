@@ -34,8 +34,17 @@ import torch
 
 from digger_env import DiggerEnv, preprocess_uint8
 from tools.search_teacher import SearchTeacher
-from tools.symbolic_env import SymbolicDiggerEnv
+from tools.symbolic_env import SymbolicDiggerEnv, state_to_tensor
 from train_dagger import env_step_skipped
+
+
+def _resize_rgb(rgba: np.ndarray, h: int, w: int) -> np.ndarray:
+    """Area-resize keeping the frame's 1.6 aspect ratio (preprocess_uint8
+    squashes to a square). (h, w, 3) uint8."""
+    import torch.nn.functional as F
+    t = torch.from_numpy(rgba[..., :3]).permute(2, 0, 1)[None].float()
+    t = F.interpolate(t, size=(h, w), mode="area")
+    return t[0].permute(1, 2, 0).round().clamp(0, 255).byte().numpy()
 
 
 def _load_student(path: Path):
@@ -45,7 +54,8 @@ def _load_student(path: Path):
     in_ch = cfg["frame_stack"] * (3 if cfg["color"] else 1)
     agent = Agent(num_actions=DiggerEnv.NUM_ACTIONS, in_channels=in_ch,
                   width=cfg["encoder_width"],
-                  separate_critic=cfg.get("separate_critic", False))
+                  separate_critic=cfg.get("separate_critic", False),
+                  in_hw=tuple(cfg.get("obs_hw", (cfg["obs_size"],) * 2)))
     agent.load_state_dict(ckpt["agent"])
     agent.eval()
     return agent, cfg
@@ -63,6 +73,8 @@ def main() -> None:
     p.add_argument("--horizon", type=int, default=24)
     p.add_argument("--rollouts", type=int, default=2)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--hires", type=str, default="100x160",
+                   help="also store native-aspect HxW frames ('' to skip)")
     a = p.parse_args()
 
     torch.manual_seed(a.seed)
@@ -79,13 +91,21 @@ def main() -> None:
         stack = collections.deque(maxlen=scfg["frame_stack"])
 
     frames, labels, executed, rewards, scores, lives, resets = ([] for _ in range(7))
+    syms, hires = [], []
+    hr_hw = tuple(int(v) for v in a.hires.split("x")) if a.hires else None
     env.reset()
     teacher.reset()
     pending_reset = True
     agree = 0
     t0 = time.monotonic()
     while len(frames) < a.steps:
-        proc = preprocess_uint8(env._env._core.get_frame(), a.obs_size, True)
+        raw_frame = env._env._core.get_frame()
+        proc = preprocess_uint8(raw_frame, a.obs_size, True)
+        # Symbolic obs of the same decision-time state: lets the same labels
+        # train a symbolic student, separating perception from imitation.
+        syms.append(state_to_tensor(env._last_state).astype(np.uint8))
+        if hr_hw:
+            hires.append(_resize_rgb(raw_frame, *hr_hw))
         if student is not None and pending_reset:
             stack.clear()
             stack.extend([proc] * stack.maxlen)
@@ -123,6 +143,8 @@ def main() -> None:
     np.savez_compressed(
         a.out,
         frames=np.stack(frames).astype(np.uint8),
+        sym=np.stack(syms),
+        **({"frames_hires": np.stack(hires)} if hr_hw else {}),
         actions=np.array(labels, dtype=np.uint8),
         executed=np.array(executed, dtype=np.uint8),
         raw_rewards=np.array(rewards, dtype=np.float32),

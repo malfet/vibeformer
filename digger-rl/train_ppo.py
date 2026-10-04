@@ -440,13 +440,18 @@ def layer_init(layer: nn.Module, std: float = np.sqrt(2),
     return layer
 
 
-def _nature_cnn(in_channels: int, c1: int, c2: int, c3: int, fc: int) -> nn.Sequential:
+def _nature_cnn(in_channels: int, c1: int, c2: int, c3: int, fc: int,
+                in_hw: tuple[int, int] = (84, 84)) -> nn.Sequential:
+    # Conv output size for an arbitrary input (7x7 at the classic 84x84).
+    h, w = in_hw
+    for k, st in ((8, 4), (4, 2), (3, 1)):
+        h, w = (h - k) // st + 1, (w - k) // st + 1
     return nn.Sequential(
         layer_init(nn.Conv2d(in_channels, c1, 8, stride=4)), nn.ReLU(),
         layer_init(nn.Conv2d(c1, c2, 4, stride=2)), nn.ReLU(),
         layer_init(nn.Conv2d(c2, c3, 3, stride=1)), nn.ReLU(),
         nn.Flatten(),
-        layer_init(nn.Linear(c3 * 7 * 7, fc)), nn.ReLU(),
+        layer_init(nn.Linear(c3 * h * w, fc)), nn.ReLU(),
     )
 
 
@@ -466,14 +471,16 @@ class Agent(nn.Module):
     """
 
     def __init__(self, num_actions: int, in_channels: int = 4, width: int = 1,
-                 separate_critic: bool = False):
+                 separate_critic: bool = False,
+                 in_hw: tuple[int, int] = (84, 84)):
         super().__init__()
         c1, c2, c3, fc = 32 * width, 64 * width, 64 * width, 512 * width
         self.width = width
         self.separate_critic = separate_critic
-        self.encoder = _nature_cnn(in_channels, c1, c2, c3, fc)
+        self.encoder = _nature_cnn(in_channels, c1, c2, c3, fc, in_hw)
         if separate_critic:
-            self.critic_encoder = _nature_cnn(in_channels, c1, c2, c3, fc)
+            self.critic_encoder = _nature_cnn(in_channels, c1, c2, c3, fc,
+                                              in_hw)
         else:
             # Alias attribute so .value()/.act() can read the same path
             # regardless of mode; alias is a plain Python reference, not
