@@ -52,6 +52,7 @@ def _load_student(path: Path):
     ckpt = torch.load(path, weights_only=False, map_location="cpu")
     cfg = ckpt["config"]
     in_ch = cfg["frame_stack"] * (3 if cfg["color"] else 1)
+    in_ch += 6 * bool(cfg.get("prev_action"))
     agent = Agent(num_actions=DiggerEnv.NUM_ACTIONS, in_channels=in_ch,
                   width=cfg["encoder_width"],
                   separate_critic=cfg.get("separate_critic", False),

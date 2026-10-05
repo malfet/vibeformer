@@ -434,6 +434,49 @@ cycles:
 
     python eval_symbolic.py --policy search --episodes 2   # ~10 min/game
 
+### 14. Imitating the search teacher: accuracy rises, survival doesn't (2026-10-04)
+
+~100k search-teacher steps (`tools/gen_search_trace.py`, 14 parallel
+collectors). Every decision is stored as 84x84 RGB, native-aspect 100x160
+RGB, and the symbolic grid, so one set of labels trains every input type
+(`tools/train_bc_traces.py`, 13 files train / 1 held out). 10-game
+evals, same session:
+
+| Student | Held-out acc | Score | Life (steps) |
+|---|---:|---:|---:|
+| symbolic + previous action | **64.7%** | 653 +-85 | 167 |
+| symbolic | 55.8% | 598 +-82 | 165 |
+| pixel 100x160 | 44.5% | 550 +-106 | 143 |
+| pixel 84x84 | 42.0% | 398 +-75 | 159 |
+| pixel 100x160 + previous action | 60.8% | 200 +-55 | 157 |
+| (heuristic teacher / search teacher) | - | 1504 / 3844 | 188 / 670 |
+
+- **Perception is not the main gap.** A student that reads the exact
+  symbolic grid tops out at 56% held-out. Native-aspect pixels add only
+  ~2.5 points over 84x84. Every student memorises: train accuracy keeps
+  climbing to 75-86% while held-out peaks in epochs 2-5 and then falls.
+- **The labels are self-consistent but persistent.** Asked twice on the
+  same state the teacher agrees 95% (76% on searched steps), and
+  `label[t] == label[t-1]` already scores 58.5%, better than every
+  history-free student. Adding the previous action as input lifts
+  symbolic to 64.7% and pixel to 60.8%. Stacking 4 steps of symbolic
+  history adds nothing beyond that.
+- **None of it moves life length.** Every student lives 143-167 steps,
+  at or below the plain heuristic (188) and far from the teacher (670).
+  The previous-action pixel student is the copycat failure: it learns
+  "repeat the last action" and then repeats its own mistakes, scoring
+  200.
+- **Why:** the teacher's advantage lives in the ~20% of steps where
+  lookahead overrules the heuristic. Those are the least predictable from
+  the current frame, and BC's average-accuracy objective barely weights
+  them. The students learn the persistent, heuristic-like 80% and miss
+  the decisions that keep the digger alive.
+
+Next: store the search's per-action survival estimates and searched
+flags in the traces, then distil *those*: weight the overruled steps and
+add a per-action danger head as a soft target. Then run DAgger so the
+student gets labels in the states where it actually dies.
+
 ## Lessons ported from ../snake (2026-08-31)
 
 The snake project ran the same recipe on a much cheaper simulator and

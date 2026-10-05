@@ -41,30 +41,43 @@ FIELD = {"px84": "frames", "hires": "frames_hires", "sym": "sym"}
 
 def load(paths: list[str], field: str, stack: int):
     """Per-trace arrays plus a flat (trace, t) index that never stacks
-    across an episode reset."""
-    arrs, acts, index = [], [], []
+    across an episode reset. Also returns the previous *executed* action
+    per sample (NOOP at an episode start) -- what a deployed agent knows."""
+    arrs, acts, prevs, index = [], [], [], []
     for i, p in enumerate(paths):
         d = np.load(p)
         x, a, r = d[field], d["actions"].astype(np.int64), d["resets"]
+        ex = d["executed"].astype(np.int64) if "executed" in d.files else a
+        prev = np.concatenate([[0], ex[:-1]])
+        prev[r] = 0
         arrs.append(x)
         acts.append(a)
+        prevs.append(prev)
         for t in range(stack - 1, len(a)):
             if not r[t - stack + 2:t + 1].any():
                 index.append((i, t))
-    return arrs, acts, np.array(index)
+    return arrs, acts, prevs, np.array(index)
 
 
-def batch(arrs, acts, index, ids, stack, pixel):
-    xs, ys = [], []
+def batch(arrs, acts, prevs, index, ids, stack, pixel):
+    """(obs, label, prev_action). Pixel stacks are (k*3, H, W) in
+    FrameStack's layout; symbolic stacks concatenate k agent steps."""
+    xs, ys, ps = [], [], []
     for i, t in index[ids]:
+        w = arrs[i][t - stack + 1:t + 1]
         if pixel:
-            # (k, H, W, 3) -> (k*3, H, W): FrameStack's channel layout.
-            w = arrs[i][t - stack + 1:t + 1]
             xs.append(w.transpose(0, 3, 1, 2).reshape(-1, *w.shape[1:3]))
         else:
-            xs.append(arrs[i][t])
+            xs.append(w.reshape(-1, *w.shape[2:]))
         ys.append(acts[i][t])
-    return np.stack(xs), np.array(ys)
+        ps.append(prevs[i][t])
+    return np.stack(xs), np.array(ys), np.array(ps)
+
+
+def with_prev(x: torch.Tensor, prev: torch.Tensor) -> torch.Tensor:
+    """Append 6 constant planes one-hot encoding the previous action."""
+    oh = F.one_hot(prev, 6).to(x.dtype)[:, :, None, None]
+    return torch.cat([x, oh.expand(-1, -1, *x.shape[2:])], dim=1)
 
 
 def random_shift(x: torch.Tensor, pad: int) -> torch.Tensor:
@@ -94,6 +107,10 @@ def main() -> None:
     p.add_argument("--shift", type=int, default=0,
                    help="random-shift augmentation in pixels (pixel inputs)")
     p.add_argument("--width", type=int, default=1)
+    p.add_argument("--prev-action", action="store_true",
+                   help="feed the previous executed action as 6 one-hot planes")
+    p.add_argument("--hist", type=int, default=1,
+                   help="symbolic input: stack this many agent steps")
     p.add_argument("--init", type=Path, default=None,
                    help="start from this checkpoint (DAgger rounds)")
     p.add_argument("--seed", type=int, default=1)
@@ -104,13 +121,14 @@ def main() -> None:
     rng = np.random.default_rng(a.seed)
     device = select_device(False)
     pixel = a.input != "sym"
-    stack = 4 if pixel else 1
+    stack = 4 if pixel else a.hist
     field = FIELD[a.input]
     tr = load(a.traces, field, stack)
     va = load(a.val, field, stack)
-    sample, _ = batch(*tr, np.arange(1), stack, pixel)
+    sample, _, _ = batch(*tr, np.arange(1), stack, pixel)
     in_ch, h, w = sample.shape[1:]
-    print(f"[{a.run_name}] {a.input}: train {len(tr[2]):,}  val {len(va[2]):,}  "
+    in_ch += 6 * a.prev_action
+    print(f"[{a.run_name}] {a.input}: train {len(tr[3]):,}  val {len(va[3]):,}  "
           f"obs {sample.shape[1:]}", flush=True)
 
     if pixel:
@@ -119,12 +137,13 @@ def main() -> None:
         cfg = {"frame_stack": stack, "color": True, "obs_size": h,
                "obs_hw": [h, w], "frame_skip": 4, "encoder_width": a.width,
                "separate_critic": False, "episodic_life": True,
-               "clip_reward": True}
+               "clip_reward": True, "prev_action": a.prev_action}
         logits_of = lambda x: model.actor(model.encode(x))       # noqa: E731
     else:
         from train_ppo_symbolic import SymbolicAgent
         model = SymbolicAgent(in_channels=in_ch, num_actions=6, h=h, w=w)
-        cfg = {"frame_stack": 1, "egocentric": False, "arch": "cnn"}
+        cfg = {"frame_stack": stack, "egocentric": False, "arch": "cnn",
+               "prev_action": a.prev_action, "hist_steps": stack}
         logits_of = lambda x: model.actor(model.encode(x))       # noqa: E731
     if a.init is not None:
         model.load_state_dict(torch.load(a.init, weights_only=False,
@@ -137,30 +156,34 @@ def main() -> None:
     out_dir = CKPT_DIR / a.run_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    def to_t(x):
+    def to_t(x, prev):
         t = torch.from_numpy(x).to(device).float()
-        return t.div_(255.0) if pixel else t
+        if pixel:
+            t = t.div_(255.0)
+        if a.prev_action:
+            t = with_prev(t, torch.from_numpy(prev).to(device))
+        return t
 
     def evaluate():
         model.eval()
         correct = 0
         with torch.no_grad():
-            for s in range(0, len(va[2]), 1024):
-                x, y = batch(*va, np.arange(s, min(s + 1024, len(va[2]))),
-                             stack, pixel)
-                correct += (logits_of(to_t(x)).argmax(-1).cpu().numpy()
+            for s in range(0, len(va[3]), 1024):
+                x, y, pv = batch(*va, np.arange(s, min(s + 1024, len(va[3]))),
+                                 stack, pixel)
+                correct += (logits_of(to_t(x, pv)).argmax(-1).cpu().numpy()
                             == y).sum()
         model.train()
-        return correct / len(va[2])
+        return correct / len(va[3])
 
     best = -1.0
     for ep in range(a.epochs):
         t0 = time.monotonic()
-        perm = rng.permutation(len(tr[2]))
+        perm = rng.permutation(len(tr[3]))
         ce_sum = acc_sum = nb = 0
         for s in range(0, len(perm), a.batch_size):
-            x, y = batch(*tr, perm[s:s + a.batch_size], stack, pixel)
-            xt, yt = to_t(x), torch.from_numpy(y).to(device)
+            x, y, pv = batch(*tr, perm[s:s + a.batch_size], stack, pixel)
+            xt, yt = to_t(x, pv), torch.from_numpy(y).to(device)
             if pixel and a.shift:
                 xt = random_shift(xt, a.shift)
             logits = logits_of(xt)

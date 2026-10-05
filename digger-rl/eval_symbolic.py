@@ -34,6 +34,16 @@ from train_ppo import select_device
 from train_ppo_symbolic import IterAgent, SymbolicAgent
 
 
+def add_prev(x: torch.Tensor, cfg: dict, prev: int) -> torch.Tensor:
+    """Append the previous action as 6 one-hot planes for checkpoints
+    trained with tools/train_bc_traces.py --prev-action."""
+    if not cfg.get("prev_action"):
+        return x
+    oh = torch.zeros(1, 6, *x.shape[2:], dtype=x.dtype, device=x.device)
+    oh[:, prev] = 1.0
+    return torch.cat([x, oh], dim=1)
+
+
 def build_agent(ckpt_path: Path, device) -> tuple[torch.nn.Module, dict]:
     ckpt = torch.load(ckpt_path, weights_only=False, map_location="cpu")
     cfg = ckpt["config"]
@@ -41,6 +51,7 @@ def build_agent(ckpt_path: Path, device) -> tuple[torch.nn.Module, dict]:
                       egocentric=cfg.get("egocentric", False))
     probe = SymbolicDiggerEnv(**env_kwargs)
     in_ch, h, w = probe.obs_shape
+    in_ch += 6 * bool(cfg.get("prev_action"))
     num_actions = probe.NUM_ACTIONS
     if cfg.get("arch", "cnn") == "iter":
         agent = IterAgent(in_channels=in_ch, num_actions=num_actions,
@@ -144,6 +155,7 @@ def main() -> None:
         clean_game = False
         prev_em = None
         refill = True   # (re)fill the pixel stack, as DiggerVecEnv.reset does
+        prev_a = 0      # previous executed action (prev_action checkpoints)
         while True:
             if pixel is not None:
                 fr = pixel_frame()
@@ -156,7 +168,8 @@ def main() -> None:
                 x = np.concatenate([f.transpose(2, 0, 1) for f in pstack], 0)
                 with torch.no_grad():
                     xt = torch.from_numpy(x).to(device).float().div_(255.0)
-                    logits = pixel.actor(pixel.encode(xt.unsqueeze(0)))
+                    xt = add_prev(xt.unsqueeze(0), pcfg, prev_a)
+                    logits = pixel.actor(pixel.encode(xt))
                     a = int(logits.argmax(-1).item() if args.argmax else
                             torch.distributions.Categorical(
                                 logits=logits).sample().item())
@@ -167,11 +180,13 @@ def main() -> None:
             else:
                 with torch.no_grad():
                     x = torch.from_numpy(obs).to(device).unsqueeze(0)
+                    x = add_prev(x, cfg, prev_a)
                     logits = agent.actor(agent.encode(x))
                     a = int(logits.argmax(-1).item() if args.argmax else
                             torch.distributions.Categorical(
                                 logits=logits).sample().item())
             obs, _, done, info = env_step_skipped(env, a, args.frame_skip)
+            prev_a = a
             steps_this_life += 1
             score = int(info.get("score", score))
             # Lives are segmented at death onset (RAM death stage), so a
@@ -195,6 +210,7 @@ def main() -> None:
                 # The deployed env skips the death sequence and refills the
                 # stack on reset; refill once the digger is back.
                 refill = True
+                prev_a = 0
             if done:
                 break
         game_scores.append(score)
