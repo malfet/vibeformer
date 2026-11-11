@@ -38,6 +38,8 @@ state.
 | `python play.py --live` | Play yourself. S/L save/load the emulator state. |
 | `python watch.py POLICY` | Watch a policy play (inline in Kitty / Ghostty / WezTerm, else matplotlib). P pauses, +/- change speed. |
 | `python evaluate.py POLICY --episodes 20` | Score, life length, and level-1 clears over N full games. |
+| `python evaluate.py POLICY --levels data/save/levels` | Per level 1-10: clears, emeralds eaten, score in one life from each saved level start. |
+| `python -m tools.level_states` | Build save states at the start of (and inside) levels 1-10 by poking the level counter. |
 | `python collect.py --out F.npz` | Record teacher-labelled traces; `--student CKPT` for DAgger. |
 | `python train_symbolic.py ...` | Symbolic-state BC (`--total-timesteps 0`) and PPO (`--load-agent`). |
 | `python train_pixel.py ...` | Pixel BC / live-teacher DAgger / PPO. |
@@ -668,6 +670,68 @@ DAgger steps, 4 x 84x84 RGB) reached 96.5% training accuracy but plays
 at half the teacher's level (1513, life 188, 0/10 clean). Its mid-evals
 were still rising at round 3 (1090 -> 1105 -> 1530), and that trainer has
 no held-out split yet.
+
+### 20. Restores were broken; later levels now exist on disk; shooting is mostly wasted (2026-11-11)
+
+**Save-state restores stalled the digger.** `DiggerEnv.load_state`
+released the held key before `unserialize`, but the release reaches the
+guest on the next `run()`, *after* the restore. The game saw the key go
+up while the wrapper thought it was still held, so it never pressed it
+again: after every restore the digger stood still until the action
+changed. Everything restore-based (the search teacher, the old
+near-death scenarios) ran on this. Now a restore starts with nothing
+held and the next step presses its key fresh.
+
+**Restores are also not timing-exact.** Each one moves the game's tick
+phase ~1 frame forward. Restoring every step made the game visibly
+faster and dropped the teacher from ~3000 to ~1200 a game. So lookahead
+must not restore the *played* game: run probes in a second process
+(only one core per process), loading `save_state()` blobs there.
+
+**Later levels.** `gamedat.level` is at `LEVEL_OFFSET = 0x2599E`.
+`DiggerEnv.poke_level` patches it inside a serialize blob (RAM is stored
+uncompressed there). `tools/level_states.py` pokes N-1 shortly before
+level 1 ends, so the game builds level N itself: layout, background,
+monster count and speed. Levels 1-8 each have their own plan; 9 and 10
+reuse 6 and 7 (`levplan`). `data/save/levels` holds 4 starts per level
+1-10 plus mid-level states, 87 in all; `DiggerEnv(start_states=...,
+start_prob=p)` and `train_pixel.py --start-states/--start-prob` start
+episodes from them.
+
+One life from each level start (`evaluate.py --levels`, 8 runs per level):
+
+| Level | teacher clear / eaten | `ppo_ft1` final | pixel DAgger v1 |
+|---|---|---|---|
+| 1 | 2/8, 65% | **8/8, 100%** | 1/8, 69% |
+| 2 | 0/8, 22% | 0/8, 56% | 0/8, 17% |
+| 3 | 0/8, 25% | 0/8, 31% | 0/8, 26% |
+| 4 | 0/8, 26% | 0/8, 19% | 0/8, 13% |
+| 5-10 | 0/48, 21-36% | 0/48, 11-20% | 0/48, **0-2%** |
+
+- Nobody clears a later level in one life. PPO's edge over the teacher
+  is a level-1 specialisation: it is behind the teacher from level 4 on.
+- The pixel student stops eating emeralds at level 5: unseen backgrounds
+  break it completely, not gradually.
+
+**Shooting**, measured with `tools/fire_oracle.py`: from each step where FIRE
+would be accepted and a monster is out, play FIRE then NOOPs vs only
+NOOPs for 10 steps in a probe process; "would kill" if FIRE kills more.
+
+| 8 games | fire-ready steps | would kill | fired | fired & killed | missed kills |
+|---|---:|---:|---:|---:|---:|
+| teacher | 4390 | 21 (0.5%) | 137 | 9 (7%) | 12 |
+| `ppo_ft1` final | 3297 | 31 (0.9%) | 91 | 11 (12%) | 20 |
+
+- A killing shot exists ~once per 100-200 steps, and both policies waste
+  88-93% of their shots. Each miss costs the recharge (`levof10()*3+60`
+  frames after the bullet dies).
+- The cause is the teacher's labels, not missing observations. The obs
+  already has "fire ready", facing, dirt and monsters. The bullet
+  (`digger.c updatefire`) moves 8 px/frame horizontally and 7 px/frame
+  vertically, and stops at any non-black pixel: dirt edges of a part-dug
+  tile, emeralds, bags. The teacher's tile-level line-of-sight check
+  can't see that, BC copies it, and PPO's kill reward is too rare (and
+  anchored to the teacher) to unlearn it.
 
 ## Lessons ported from ../snake (2026-08-31)
 

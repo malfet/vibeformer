@@ -4,6 +4,7 @@
     python evaluate.py data/checkpoints/RUN/ppo_sym_final.pt --episodes 20
     python evaluate.py data/checkpoints/RUN/ppo_digger_final.pt   # pixel ckpt
     python evaluate.py random | search
+    python evaluate.py teacher --levels data/save/levels   # per level
 
 The policy is a spec from tools/policies.py: teacher, search, random, or a
 checkpoint from train_symbolic.py or train_pixel.py. Reports:
@@ -14,13 +15,22 @@ checkpoint from train_symbolic.py or train_pixel.py. Reports:
   - **level 1**: games that cleared level 1, and that did so without
     losing a life (the project goal).
 
+With --levels DIR (states from tools/level_states.py) it instead plays one
+life from every saved level start and reports, per level: how often the
+level is cleared before the first death, the share of its emeralds eaten,
+and the score gained.
+
 Cross-session numbers drift; compare against a same-session teacher run.
 """
 
 from __future__ import annotations
 
 import argparse
+import collections
+import pickle
+import re
 import statistics
+from pathlib import Path
 
 import torch
 
@@ -47,6 +57,10 @@ def main() -> None:
                    help="search: steps the candidate is held")
     p.add_argument("--search-rollouts", type=int, default=2,
                    help="search: rollouts per candidate")
+    p.add_argument("--levels", type=Path, default=None,
+                   help="evaluate per level from the level starts in DIR")
+    p.add_argument("--max-steps", type=int, default=3000,
+                   help="--levels: steps allowed per level attempt")
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
@@ -63,6 +77,10 @@ def main() -> None:
                          seed=args.seed, **search_kwargs)
 
     label = args.label or args.policy
+    if args.levels is not None:
+        evaluate_levels(env, policy, args, label)
+        env.close()
+        return
     game_scores: list[int] = []
     life_lengths: list[int] = []
     clean_l1 = 0
@@ -124,6 +142,51 @@ def main() -> None:
               f"max {max(life_lengths)}  n={len(life_lengths)} agent steps")
     print(f"level 1    : cleared without dying {clean_l1}/{args.episodes}  "
           f"cleared at all {any_l1}/{args.episodes}")
+
+
+def evaluate_levels(env, policy, args, label: str) -> None:
+    starts = sorted(args.levels.glob("L*_*_0.pkl"),
+                    key=lambda f: int(re.match(r"L(\d+)_", f.name)[1]))
+    if not starts:
+        raise SystemExit(f"no level starts (L*_*_0.pkl) in {args.levels}")
+    env.reset()                               # boots the core to load into
+    res = collections.defaultdict(list)       # level -> [(clear, eaten, pts)]
+    for f in starts:
+        with open(f, "rb") as fh:
+            d = pickle.load(fh)
+        level = d["level"]
+        for _ in range(args.episodes):
+            obs = env.load_state(d["state"])
+            policy.reset()
+            n0 = int(env._last_state.emeralds.sum())
+            score0 = score = d["score"]
+            n_left, cleared = n0, False
+            for _ in range(args.max_steps):
+                a = policy(obs)
+                obs, _, done, info = env_step_skipped(env, a, args.frame_skip)
+                policy.observe(info)
+                score = int(info.get("score", score))
+                if env._env.read_level() != level:
+                    cleared = True
+                    break
+                n_left = int(env._last_state.emeralds.sum())
+                if done or info.get("death_event", False) \
+                        or info.get("dying", False):
+                    break
+            eaten = 1.0 if cleared else 1 - n_left / max(n0, 1)
+            res[level].append((cleared, eaten, score - score0))
+            print(f"  [{label}] L{level} {f.stem}: "
+                  f"{'CLEAR' if cleared else 'died '} "
+                  f"eaten {eaten:4.0%} +{score - score0}", flush=True)
+    print(f"\n=== {label} per level ({args.episodes} x "
+          f"{len(starts)} starts, one life each"
+          f"{', argmax' if args.argmax else ', stochastic'}) ===")
+    print("level  n  cleared  emeralds eaten  score gained")
+    for level in sorted(res):
+        r = res[level]
+        print(f"{level:5d} {len(r):2d}  {sum(c for c, _, _ in r):3d}/{len(r):<3d}"
+              f"  {statistics.mean(e for _, e, _ in r):13.0%}"
+              f"  {statistics.mean(p for _, _, p in r):12.0f}")
 
 
 if __name__ == "__main__":

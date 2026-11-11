@@ -360,6 +360,8 @@ class Config:
     frame_skip: int = 4
     frame_stack: int = 4
     obs_size: int = 84
+    start_states: str | None = None   # dir of tools/level_states.py states
+    start_prob: float = 0.0           # P(an episode starts from one of them)
     color: bool = True                # RGB by default (3*frame_stack channels); --no-color falls back to grayscale
     encoder_width: int = 1            # NatureCNN width multiplier; 2 = ~4x params
     separate_critic: bool = False     # give the critic its own NatureCNN encoder
@@ -809,6 +811,12 @@ def parse_args() -> Config:
                    help="linearly anneal entropy bonus toward this value over training")
     p.add_argument("--death-penalty", type=float, default=Config.death_penalty,
                    help="subtract this from reward on every life loss (default 0)")
+    p.add_argument("--start-states", type=str, default=None,
+                   help="dir of level states (tools/level_states.py); "
+                        "episodes start from them with --start-prob")
+    p.add_argument("--start-prob", type=float, default=Config.start_prob,
+                   help="probability an episode starts from a saved "
+                        "level state instead of level 1")
     p.add_argument("--bc-traces", type=str, nargs="+", default=[],
                    help="one or more .npz playtraces from play.py "
                         "--record-playtrace; if set, BC-pretrain the actor "
@@ -904,6 +912,7 @@ def parse_args() -> Config:
         dagger_iters=a.dagger_iters,
         dagger_collect_steps=a.dagger_collect_steps,
         dagger_epochs=a.dagger_epochs,
+        start_states=a.start_states, start_prob=a.start_prob,
         color=a.color, encoder_width=a.encoder_width,
         separate_critic=a.separate_critic, load_agent=a.load_agent,
         save_best=a.save_best, run_name=a.run_name,
@@ -923,7 +932,9 @@ def main() -> None:
 
     env_kwargs = dict(max_steps=10**9, clip_reward=cfg.clip_reward,
                       episodic_life=cfg.episodic_life,
-                      death_penalty=cfg.death_penalty)
+                      death_penalty=cfg.death_penalty,
+                      start_states=cfg.start_states,
+                      start_prob=cfg.start_prob)
     vec = DiggerVecEnv(num_envs=cfg.num_envs, frame_skip=cfg.frame_skip,
                        frame_stack=cfg.frame_stack, obs_size=cfg.obs_size,
                        color=cfg.color, env_kwargs=env_kwargs)

@@ -384,3 +384,5 @@ I.e as part of the cleanup, can you delete somethings which are on longer releva
 
 ---
 And I guess as next step I want to start student-teacher traiing from pixels
+
+Ok, so what could be done to make it learn further. I.e. can it explore some strategies to come up with novel idea. And may be let's collect few sort of training evaluating checkpoints especially around later level to push pixel trainer to learn different background colors. Also I've noticed that both symbolic and PPO often repeat teachers error or lack of understanding how shooting works. I'm not sure which would be the right approach - extract "can shoot" and projectile position from the game state during the symbolic extraction or something else

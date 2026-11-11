@@ -21,6 +21,7 @@ from __future__ import annotations
 import collections
 import gc
 import multiprocessing as mp
+import pickle
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +41,9 @@ SAVE_DIR = REPO / "data" / "save"
 # DOSBox Pure's SET_MEMORY_MAPS).
 SCORE_OFFSET = 0x282E0  # int32 LE
 LIVES_OFFSET = 0x259F2  # uint8
+# gamedat[curplayer].level (main.c), int16, 1-based. Found as the only
+# byte equal to the level at every level start of 8 games (levels 1-3).
+LEVEL_OFFSET = 0x2599E
 
 # The digger's own record sits right next to LIVES_OFFSET (same struct).
 # Located by scanning for the spawn values (x=152, y=180, col=7, row=9)
@@ -101,7 +105,9 @@ class DiggerEnv:
                  clip_reward: bool = True,
                  episodic_life: bool = False,
                  death_penalty: float = 0.0,
-                 cycles: str | None = "7800"):
+                 cycles: str | None = "7800",
+                 start_states: str | None = None,
+                 start_prob: float = 0.0):
         # 36000 frames ~= 8.5 minutes of in-game time at 70 fps. Plenty for
         # a Digger run; cap exists so an immortal idle policy doesn't loop
         # forever.
@@ -127,6 +133,16 @@ class DiggerEnv:
         # at ~6x less emulation cost. 2750 (286-12) is cheaper still but
         # starves the game: monsters arrive ~30-80 frames late.
         self.cycles = cycles
+        # start_states: a directory of tools/level_states.py pickles. On a
+        # hard reset, with probability start_prob the game continues from
+        # one of them (a random level start or mid-level state) instead of
+        # level 1, so training sees later levels' layouts and backgrounds.
+        self.start_prob = float(start_prob)
+        self._start_files = (sorted(Path(start_states).glob("L*.pkl"))
+                             if start_states else [])
+        if self.start_prob > 0 and not self._start_files:
+            raise ValueError(f"no L*.pkl start states in {start_states!r}")
+        self._rng = np.random.default_rng()
         self._core: _libretro.LibretroCore | None = None
         self._last_action = self.NOOP
         self._last_score = 0
@@ -198,6 +214,13 @@ class DiggerEnv:
         self._death_counted = False
         self._real_game_over = False
         self._steps = 0
+        if self._start_files and self._rng.random() < self.start_prob:
+            f = self._start_files[self._rng.integers(len(self._start_files))]
+            with open(f, "rb") as fh:
+                d = pickle.load(fh)
+            frame = self.load_state(d["state"]["env"])
+            self._steps = 0
+            return frame
         return self._core.get_frame()
 
     def step(self, action: int) -> StepResult:
@@ -360,7 +383,13 @@ class DiggerEnv:
         # *without* firing keyboard events (set_held_keys_raw). The core's
         # internal state was reverted by unserialize, so the polled input
         # now agrees with what the core remembers.
-        self._core.set_held_keys_raw(state["held_keys"])
+        # That is not enough on its own: clear_keys()'s release events
+        # reach the guest on the next run(), *after* the restore, so the
+        # game sees the key go up while the mirror says it is held, and
+        # _apply_action() never presses it again (the digger stalled
+        # after every restore). So start with nothing held and let the
+        # next step press its key fresh.
+        self._core.set_held_keys_raw([])
         # The framebuffer is not part of the serialized state: right after
         # unserialize, get_frame() still returns whatever the core last
         # drew (the pre-restore screen, or the spawn screen in a freshly
@@ -379,7 +408,7 @@ class DiggerEnv:
         # emulator RAM so the env stays consistent.
         live_score = self._read_score()
         live_lives = self._read_lives()
-        self._last_action = int(state.get("last_action", self.NOOP))
+        self._last_action = self.NOOP          # nothing held; see above
         self._last_score = int(state.get("last_score", live_score))
         self._seen_alive = bool(state.get("seen_alive", live_lives > 0))
         self._steps = int(state.get("steps", 0))
@@ -417,6 +446,35 @@ class DiggerEnv:
         return {"digger_xy": (x, y), "digger_rc": (row, col),
                 "death_stage": stage,
                 "dying": stage != DEATH_STAGE_ALIVE}
+
+    def read_level(self) -> int:
+        m = self._core.read_memory_region(0)
+        return struct.unpack_from("<h", m, LEVEL_OFFSET)[0]
+
+    def poke_level(self, level: int) -> None:
+        """Overwrite the level counter in the running game.
+
+        There is no memory-write API, so this patches the RAM image inside
+        a serialize() blob (it is stored uncompressed, though not as one
+        contiguous copy of region 0: the bytes around the counter are
+        located by content) and unserializes it. The game only reads the
+        counter when it builds a level (layout, background, monster count
+        and speed: main.c levplan / levof10), so poke level N-1 shortly
+        before the current level ends to get a properly built level N.
+        Like any restore this costs ~1 frame of timing phase.
+        """
+        m = bytes(self._core.read_memory_region(0))
+        lo, hi = LEVEL_OFFSET - 64, LEVEL_OFFSET + 64
+        blob = bytearray(self._core.serialize())
+        at = blob.find(m[lo:hi])
+        if at < 0 or blob.find(m[lo:hi], at + 1) >= 0:
+            raise RuntimeError("level counter not uniquely found in state")
+        struct.pack_into("<h", blob, at + LEVEL_OFFSET - lo, level)
+        held = list(self._core.get_held_keys())
+        self._core.unserialize(bytes(blob))
+        self._core.set_held_keys_raw(held)
+        if self.read_level() != level:
+            raise RuntimeError("level poke did not take")
 
     def _read_score(self) -> int:
         m = self._core.read_memory_region(0)
