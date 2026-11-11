@@ -74,6 +74,10 @@ def main() -> None:
 
     snd = None
     speed, paused, quit_ = args.speed, False, False
+    # Absolute deadlines: sleeping "step time minus work" each step let
+    # macOS's ~3 ms oversleep add up (16.5 instead of 17.5 steps/s), and
+    # the audio ran dry every second or two.
+    deadline = time.monotonic()
     results = []
     with open_display(args.display, f"DIGGER {args.policy}") as disp:
         for game in range(args.games):
@@ -97,13 +101,13 @@ def main() -> None:
                         quit_ = True
                     elif key == "p":
                         paused = not paused
+                        deadline = time.monotonic()
                     elif key in ("+", "="):
                         speed = speed * 2 if speed else 0
                     elif key in ("-", "_"):
                         speed = speed / 2 if speed else 4.0
                 if quit_:
                     break
-                t0 = time.monotonic()
                 if paused:
                     time.sleep(0.05)
                     if snd is not None:
@@ -125,11 +129,13 @@ def main() -> None:
                     f"lives {env._last_state.lives} -- "
                     f"a={ACTION_NAMES[a]:<5s} -- step {step} -- "
                     f"x{speed:g}{' -- PAUSED' if paused else ''}")
-                if speed:
-                    slack = args.frame_skip / FPS / speed \
-                        - (time.monotonic() - t0)
-                    if slack > 0:
-                        time.sleep(slack)
+                if speed and not paused:
+                    deadline += args.frame_skip / FPS / speed
+                    now = time.monotonic()
+                    if deadline > now:
+                        time.sleep(deadline - now)
+                    elif now - deadline > 0.25:    # far behind: don't race
+                        deadline = now
             if quit_ or not disp.is_open:
                 break
             results.append(score)

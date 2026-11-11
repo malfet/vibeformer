@@ -397,3 +397,5 @@ I've pushed update to sciextractor that has sound module
 Yes, I can hear the sound, pretty cool
 
 And perhaps in both --live and watch, pressing q should abort the playback
+
+Can you check if using ctypes (same as sciextractor playback) might be better. I see some weird clicks during the playback, not sure where they are coming from

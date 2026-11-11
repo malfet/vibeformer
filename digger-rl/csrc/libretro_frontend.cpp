@@ -506,7 +506,11 @@ PYBIND11_MODULE(_libretro, m) {
         .def(py::init<const std::string&, const std::string&, const std::string&>(),
              py::arg("core_path"), py::arg("system_dir"), py::arg("save_dir"))
         .def("load_game", &LibretroCore::load_game, py::arg("path"))
-        .def("run", &LibretroCore::run)
+        // Release the GIL while the core emulates a frame: the core's
+        // callbacks are all C++, and holding it starved Python threads
+        // (the audio output callback missed its deadlines -> clicks).
+        .def("run", &LibretroCore::run,
+             py::call_guard<py::gil_scoped_release>())
         .def("reset", &LibretroCore::reset)
         .def("get_frame", &LibretroCore::get_frame)
         .def("get_memory", &LibretroCore::get_memory, py::arg("id") = RETRO_MEMORY_SYSTEM_RAM)

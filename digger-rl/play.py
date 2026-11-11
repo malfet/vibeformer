@@ -341,6 +341,7 @@ def run_live(core, record_path: Path | None = None,
     snd = open_sound(core) if sound else None
     repeat_guard: set[str] = set()
     last = time.monotonic()
+    debt = 0.0             # wall time not yet emulated
     fps_ema = target_fps
     frame_no = 0
     quit_ = False
@@ -359,9 +360,13 @@ def run_live(core, record_path: Path | None = None,
             if key in ("r", "s", "l"):
                 (repeat_guard.add if pressed else repeat_guard.discard)(key)
 
-        # Catch up real-time emulation if matplotlib falls behind. Cap at 5
-        # frames per render to avoid runaway after a stall.
-        steps = max(1, min(5, int(round(elapsed / target_dt))))
+        # Emulate as many frames as wall time has passed, carrying the
+        # remainder: rounding each loop's elapsed time (and macOS's
+        # oversleep) ran the game ~5% slow, which starved --sound. Cap at
+        # 5 frames per render so a stall doesn't cause a runaway.
+        debt = min(debt + elapsed, 5 * target_dt)
+        steps = int(debt / target_dt)
+        debt -= steps * target_dt
         for _ in range(steps):
             core.run()
             if record_path is not None:
@@ -404,7 +409,7 @@ def run_live(core, record_path: Path | None = None,
                 f"emu {fps_ema:5.1f} fps -- frame {frame_no}{rec_tag}")
 
         # If we got ahead of real time, sleep the rest of the budget.
-        slack = target_dt - (time.monotonic() - now)
+        slack = target_dt - debt - (time.monotonic() - now)
         if slack > 0:
             time.sleep(slack)
 
