@@ -685,6 +685,79 @@ def extract_state_fast(frame_rgba: np.ndarray) -> GameState:
     return state
 
 
+# ---- RAM extractor ----------------------------------------------------------
+# Exact state read from DIGGER.EXE's data segment (memory region 0), so no
+# CV is involved. Offsets were found by scanning RAM for the level-1 layout
+# and the spawn coordinates, and checked against the struct layouts in
+# sobomax's source. All words are int16 LE. Game coordinates are 320x200:
+# tile (h, v) has its sprite at x = h*20 + 12, y = v*18 + 18. The frame is
+# 2x that, so a tile is 40x36 px starting at (24, 36). That is NOT the
+# TILE_W x TILE_H grid the CV extractor above assumes.
+RAM_DIGGER = 0x259C8     # x,y,h,v,rx,ry,mdir,dir,_,recharge,fx,fy,fdir,_,deathstage
+RAM_DIGGER_NOTFIRING = RAM_DIGGER + 2 * 23
+RAM_EMFIELD = 0x25A3E    # int8[150], nonzero = emerald
+RAM_MONSTERS = 0x25AD6   # 6 x 36 B: x,y,h,v,xr,yr,dir,hdir,t,hnt,death,bag,
+                         #           dtime,stime,chase,flag,nob,alive
+RAM_BAGS = 0x25D1A       # 7 x 26 B: x,y,h,v,xr,yr,dir,wt,gt,fallh,
+                         #           wobbling,unfallen,exist (live copy)
+RAM_FIELD = 0x2600C      # int16[150]; bit 0x2000 set = not dug through
+N_MONSTERS, MONSTER_WORDS = 6, 18
+N_BAGS, BAG_WORDS = 7, 13
+
+
+def _ram_tile(x: int, y: int) -> tuple[int, int]:
+    """Nearest tile (col, row) to sprite position (x, y) in game coords."""
+    col = min(MWIDTH - 1, max(0, (x - 12 + 10) // 20))
+    row = min(MHEIGHT - 1, max(0, (y - 18 + 9) // 18))
+    return col, row
+
+
+def extract_state_ram(mem: bytes) -> GameState:
+    """GameState straight from game RAM (`core.read_memory_region(0)`).
+
+    Unlike the CV extractors, this is exact on every frame, including
+    right after a save-state restore, when the framebuffer still lags.
+    The cherry is not decoded yet (it is always None, the same as CV).
+    """
+    def words(off: int, n: int) -> np.ndarray:
+        return np.frombuffer(mem, dtype="<i2", count=n, offset=off)
+
+    state = GameState()
+    d = words(RAM_DIGGER, 24)
+    col, row = _ram_tile(int(d[0]), int(d[1]))
+    state.digger = DiggerPos(col=col, row=row, dir=int(d[7]),
+                             alive=int(d[14]) == 1,
+                             can_fire=int(d[9]) == 0 and int(d[23]) != 0)
+    state.lives = int(d[21])
+
+    em = np.frombuffer(mem, dtype=np.int8, count=MWIDTH * MHEIGHT,
+                       offset=RAM_EMFIELD)
+    state.emeralds = (em != 0).reshape(MHEIGHT, MWIDTH)
+    fld = words(RAM_FIELD, MWIDTH * MHEIGHT)
+    state.dirt = ((fld & 0x2000) != 0).reshape(MHEIGHT, MWIDTH)
+
+    mons = words(RAM_MONSTERS, N_MONSTERS * MONSTER_WORDS)
+    for m in mons.reshape(N_MONSTERS, MONSTER_WORDS):
+        if m[15] == 0 or m[17] == 0:          # !flag or !alive
+            continue
+        x, y = int(m[0]), int(m[1])
+        col, row = _ram_tile(x, y)
+        # Sprite centre in frame pixels, the same convention as CV cx/cy.
+        state.monsters.append(MonsterPos(
+            col=col, row=row, dir=int(m[6]), is_hobbin=m[16] == 0,
+            cx=2 * x + 15, cy=2 * y + 9))
+
+    bags = words(RAM_BAGS, N_BAGS * BAG_WORDS)
+    for b in bags.reshape(N_BAGS, BAG_WORDS):
+        if b[12] == 0:                        # !exist
+            continue
+        col, row = _ram_tile(int(b[0]), int(b[1]))
+        state.bags.append(BagPos(col=col, row=row,
+                                 moving=int(b[6]) != DIR_NONE,
+                                 broken=int(b[8]) != 0))
+    return state
+
+
 # ---- Visualization helper -------------------------------------------------
 
 def render_overlay(frame_rgba: np.ndarray, state: GameState,

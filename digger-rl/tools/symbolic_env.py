@@ -1,7 +1,8 @@
 """Symbolic-observation DiggerEnv: returns a small (C, MHEIGHT, MWIDTH) tensor.
 
-Wraps DiggerEnv and converts each raw RGBA frame into a stack of boolean
-per-tile masks via the CV extractor in game_state.py. The result is a
+Wraps DiggerEnv and converts each step's game state, read from emulator
+RAM (`extract_state_ram` in game_state.py), into a stack of boolean
+per-tile masks. The result is a
 tiny structured observation (10x15 grid x ~6 channels) so the agent
 network can be a few-conv MLP instead of a multi-million-param CNN
 chewing on 84x84 raw pixels.
@@ -12,7 +13,7 @@ Channel layout (each plane is a 10x15 float32 mask):
   2 digger
   3 monster (any nobbin / hobbin in that tile)
   4 bag intact
-  5 cherry              (currently always zero; CV doesn't detect cherry)
+  5 cherry              (currently always zero; cherry not decoded yet)
 
 Frame stacking: a single frame is non-Markov for everything that moves
 (monster velocity, falling bag, fire cooldown, digger sub-tile pos).
@@ -44,7 +45,7 @@ import collections
 import numpy as np
 
 from digger_env import DiggerEnv
-from tools.game_state import MHEIGHT, MWIDTH, extract_state_fast as extract_state
+from tools.game_state import MHEIGHT, MWIDTH, extract_state_ram
 
 # Channels in a single symbolic frame.
 BASE_OBS_CHANNELS = 6
@@ -184,13 +185,9 @@ class SymbolicDiggerEnv:
         self._prev_dist: float | None = None
         self._prev_lives: int = -1
         # Last tile the digger was seen on; the egocentric transform needs
-        # a centre even on frames where the CV extractor loses the sprite
-        # (mid-death animation, level transition).
+        # a centre even on frames where the digger is not present
+        # (mid-death animation).
         self._digger_rc: tuple[int, int] = (MHEIGHT // 2, MWIDTH // 2)
-        # Frames left before the framebuffer catches up after a no-refresh
-        # restore (see restore_snapshot); step() reuses the last good state
-        # for them instead of parsing a stale screen.
-        self._stale_frames = 0
 
     @property
     def obs_channels(self) -> int:
@@ -228,9 +225,8 @@ class SymbolicDiggerEnv:
                 self._digger_rc = (r, c)
 
     def reset(self) -> np.ndarray:
-        raw = self._env.reset()
-        self._stale_frames = 0
-        state = extract_state(raw)
+        self._env.reset()
+        state = self._read_state()
         self._last_state = state
         self._prev_dist = _nearest_emerald_distance(state)
         self._prev_lives = -1
@@ -245,11 +241,7 @@ class SymbolicDiggerEnv:
 
     def step(self, action: int):
         s = self._env.step(action)
-        if self._stale_frames > 0:
-            self._stale_frames -= 1
-            state = self._last_state
-        else:
-            state = extract_state(s.obs)
+        state = self._read_state()
         self._last_state = state
         self._note_digger(state)
         reward = self.score_weight * float(s.reward)
@@ -274,6 +266,11 @@ class SymbolicDiggerEnv:
         info["death"] = bool(died)
         return self._push_frame(state), reward, s.done, info
 
+    def _read_state(self):
+        # From RAM, not the framebuffer: exact, and free of the ~3-frame
+        # framebuffer lag after a no-refresh restore (README 12c).
+        return extract_state_ram(self._env._core.read_memory_region(0))
+
     def save_state(self) -> dict:
         """Snapshot a state that load_state() can replay. Wraps the
         underlying DiggerEnv snapshot and adds the symbolic shaping
@@ -294,9 +291,8 @@ class SymbolicDiggerEnv:
         policy doesn't see a stack mixing frames from before and after
         the restore point.
         """
-        raw = self._env.load_state(state["env"])
-        self._stale_frames = 0
-        parsed = extract_state(raw)
+        self._env.load_state(state["env"])
+        parsed = self._read_state()
         self._last_state = parsed
         self._prev_lives = -1
         self._note_digger(parsed)
@@ -324,8 +320,6 @@ class SymbolicDiggerEnv:
         self._prev_lives, self._digger_rc = pl, rc
         self._stack.clear()
         self._stack.extend(stack)
-        # The framebuffer lags unserialize by ~3 frames (README 12c).
-        self._stale_frames = 3
 
     def close(self) -> None:
         self._env.close()

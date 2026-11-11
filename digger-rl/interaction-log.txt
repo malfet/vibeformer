@@ -351,3 +351,12 @@ Feels like traces belong to one of those abandonned experiments, that didn't rea
 
 ---
 Push changes, and start a new training (but first update PyTorch to 2.15 in your local .venv)
+
+---
+Is symbolic grid stable? Perhaps let's look at symbolic state extraction, as there were some issues with how CV worked. May be get back to the .exe, decompile it or rely on github repo (checked out as ~/git/sobomax/digger) and try to infer the state from games internal logic, specifically digger position, death time etc. Or has it all been done and correct right now. There were number of cases when symbolic extractor was not stable and digger position jumped around etc
+
+---
+Ok, so can you update the symbolic state and commit changes. And perhaps you can test that it works well by seeing that teacher cleans 1st level
+
+---
+And how to invoke playback with teacher? Another question - when you are using matplotlib, wouldn't Kitty protocol, if terminal supports it be better?

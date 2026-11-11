@@ -66,8 +66,8 @@ See **Lessons from PPO/DAGGER** below.
 | `tools/collect_death_states.py` | Harvests emulator save-states from N agent steps *before* each death (ring buffer of `retro_serialize` snapshots, ~1 ms / 678 KB each). Captures several lookbacks per death in one pass since collection is dominated by the ~25 s it takes the driver policy to die. `--probe` measures what fraction of the collected states a policy can escape — the ceiling for any curriculum built on them. |
 | `eval_symbolic.py` | Symbolic counterpart to `eval_checkpoint.py` (which only rebuilds the pixel NatureCNN). Runs N full 3-life games and reports **both** game score and per-life length in agent steps — the survival experiments need the second, every earlier scoreboard row quotes the first. `--policy random` / `--policy teacher` give same-session baselines. |
 | `run_digger.py` | Manual play (matplotlib `--live`) + trace recording. **S / L** keys snapshot and restore emulator state (in-memory or disk via `--save-slot`). `--resume` boots straight into a saved scenario. |
-| `tools/game_state.py` | `GameState` dataclass + `extract_state_fast(frame)` — vectorised CV extractor, ~4 ms/frame. Now populates `digger.dir` and `BagPos.moving`. |
-| `tools/symbolic_env.py` | `SymbolicDiggerEnv` wraps `DiggerEnv`, emits `(6, 10, 15)` mask tensors. Supports `shaping_coef`, `time_penalty`, and `save_state` / `load_state`. |
+| `tools/game_state.py` | `GameState` dataclass. `extract_state_ram(mem)` reads the exact state from game RAM and is what every symbolic consumer uses (Lesson 15). `extract_state_fast(frame)` is the older vectorised CV extractor, kept for pixel-side comparisons; its tile grid is misaligned. |
+| `tools/symbolic_env.py` | `SymbolicDiggerEnv` wraps `DiggerEnv`, emits `(6, 10, 15)` mask tensors built from RAM state. Supports `shaping_coef`, `time_penalty`, and `save_state` / `load_state`. |
 | `tools/heuristic_agent.py` | `SmartHeuristic v6.3`: v5 (BFS tunnel-distance safety, LoS FIRE, turn-to-fire) + phantom filter, under-bag transit rule, Dijkstra routing (v6), fall-column hazard model from bags.c ground truth (v6.2), retreat-and-ambush firing on chasers (v6.3, same-session 1399 vs 1242). `DeathBagLogger` (`--death-log`) emits JSONL death forensics + bag timing + level-up events. Ablation knobs: `--no-phantom-filter`, `--underbag`, `--routing`, `--fire-turn-min-dist`, `--safety-cap`, `--predict-monsters`. |
 | `tools/gen_symbolic_trace.py` | Generates BC traces from a chosen heuristic into `.npz` for offline BC. (Live teacher path in `train_ppo.py` makes this optional.) |
 | `eval_checkpoint.py` / `run_ppo.py` | Headless N-game eval / matplotlib viewer for pixel `train_ppo.py` checkpoints. |
@@ -478,6 +478,47 @@ Next: store the search's per-action survival estimates and searched
 flags in the traces, then distil *those*: weight the overruled steps and
 add a per-action danger head as a soft target. Then run DAgger so the
 student gets labels in the states where it actually dies.
+
+### 15. The CV symbolic state was wrong a third of the time; it now comes from RAM (2026-11-11)
+
+Measured against the digger's RAM record over 3000 heuristic steps,
+`extract_state_fast` put the digger on the right tile only 62.6% of the
+time. It lost the sprite 7.5% of the time, was off by 2+ tiles 96 times,
+and flickered A->B->A on a fixed RAM tile 25 times. The column error
+climbs from 2% at col 7 to 50% at col 0 and 92% at col 14. The cause is
+the tile grid: the game draws tile (h, v) at x = h*20+12, y = v*18+18 in
+320x200, i.e. 40x36 px tiles from (24, 36) on our frame, while the CV
+code assumes 42.67x36.8 px tiles from (0, 32).
+
+`extract_state_ram` replaces it everywhere a symbolic state is consumed
+(symbolic env, heuristic teacher, search rollouts, pixel-trainer teacher
+labels). RAM layout, found by scanning for the level-1 layout and spawn
+coordinates and checked against the sobomax struct definitions:
+
+| Offset | What | Layout |
+|---|---|---|
+| `0x259C8` | digger | int16 x, y, h, v, rx, ry, mdir, dir, _, recharge, fire x, y, dir, _, deathstage ... lives (+0x2A), notfiring (+0x2E) |
+| `0x25A3E` | emeralds | int8[150], nonzero = emerald |
+| `0x25AD6` | monsters | 6 x 36 B: x, y, h, v, xr, yr, dir, hdir, t, hnt, death, bag, dtime, stime, chase, flag, nob, alive |
+| `0x25D1A` | bags (live copy) | 7 x 26 B: x, y, h, v, xr, yr, dir, wt, gt (gold timer), fallh, wobbling, unfallen, exist |
+| `0x2600C` | dirt field (live copy) | int16[150], bit 0x2000 set = not dug through |
+
+Objects map to the nearest tile. The cherry is not decoded yet; channel 5
+stays zero, as it always was under CV. The ~3-frame framebuffer lag
+after a no-refresh restore (12c) no longer matters, because RAM is
+current immediately.
+
+The unchanged v6.4 heuristic, fed exact state (20 games, 2 seeds, same
+session; the two seeds replay identical first four games):
+
+| Teacher v6.4 on | Score | Life (steps) | L1 cleared | L1 cleared without dying |
+|---|---:|---:|---:|---:|
+| CV state (Lessons 12e, 13; earlier sessions) | 1304-1504 | 161-188 | 6-8/20 | 1/20 |
+| **RAM state** | **2399** (2805 +-325 / 1993 +-197) | **246** (273 / 219) | **20/20** | **0/20** |
+
+The teacher now clears level 1 every game, but still never without
+losing a life. All earlier symbolic results (BC clones, PPO, search
+traces) were trained on the noisy state and should be re-run.
 
 ## Lessons ported from ../snake (2026-08-31)
 

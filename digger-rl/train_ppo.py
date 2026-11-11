@@ -30,7 +30,7 @@ from torch.distributions import Categorical
 from torch.optim import Adam
 
 from digger_env import DiggerEnv, DiggerVecEnv
-from tools.game_state import extract_state_fast
+from tools.game_state import extract_state_ram
 from tools.heuristic_agent import DodgeMonsters, GreedyEmerald, SmartHeuristic
 
 REPO = Path(__file__).parent.resolve()
@@ -59,8 +59,7 @@ def _bc_collect_teacher(vec: DiggerVecEnv, teacher, K: int,
     teacher.reset()
     t0 = time.monotonic()
     for k in range(K):
-        raw = vec._env._core.get_frame()
-        sym_state = extract_state_fast(raw)
+        sym_state = extract_state_ram(vec._env._core.read_memory_region(0))
         t_action = int(teacher(sym_state))
         obs_store[k] = obs_np[0]
         act_store[k] = t_action
@@ -122,8 +121,7 @@ def _bc_collect_student(agent: "Agent", vec: DiggerVecEnv, teacher,
     t0 = time.monotonic()
     agree = 0
     for k in range(K):
-        raw = vec._env._core.get_frame()
-        sym_state = extract_state_fast(raw)
+        sym_state = extract_state_ram(vec._env._core.read_memory_region(0))
         t_action = int(teacher(sym_state))
         with torch.no_grad():
             s_action, _, _, _ = agent.act(obs_t)
@@ -973,7 +971,7 @@ def main() -> None:
 
     # Live teacher labeling. Required by --teacher-policy. Only the
     # in-process (num_envs=1) path exposes the underlying DiggerEnv so
-    # we can call get_frame() + extract_state_fast() on the current
+    # we can call extract_state_ram() on its RAM for the current
     # state right before the student picks its action.
     teacher = None
     if cfg.teacher_policy:
@@ -1104,13 +1102,12 @@ def main() -> None:
             obs_buf[step] = obs_t
             done_buf[step] = done_t
 
-            # Live teacher labeling: read the current emulator frame
-            # *before* the student acts, extract the tile grid, query
-            # the heuristic, and stash its action as the BC-anchor
-            # label for this rollout state.
+            # Live teacher labeling: read the game state from RAM
+            # *before* the student acts, query the heuristic, and stash
+            # its action as the BC-anchor label for this rollout state.
             if teacher is not None:
-                raw_frame = vec._env._core.get_frame()
-                sym_state = extract_state_fast(raw_frame)
+                sym_state = extract_state_ram(
+                    vec._env._core.read_memory_region(0))
                 t_action = int(teacher(sym_state))
                 teacher_buf[step, 0] = t_action
 

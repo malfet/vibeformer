@@ -26,7 +26,7 @@ from __future__ import annotations
 import copy
 import time
 
-from tools.game_state import extract_state_fast
+from tools.game_state import extract_state_ram
 from tools.heuristic_agent import SmartHeuristic
 from tools.symbolic_env import SymbolicDiggerEnv
 
@@ -66,7 +66,7 @@ class SearchTeacher:
         info = {}
         for t in range(self.horizon):
             if t >= self.commit and (t - self.commit) % self.decide_every == 0:
-                a = int(h(extract_state_fast(raw._core.get_frame())))
+                a = int(h(extract_state_ram(raw._core.read_memory_region(0))))
             for _ in range(self.frame_skip):
                 s = raw.step(a)
                 info = s.info
