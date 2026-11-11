@@ -22,6 +22,7 @@ import collections
 import gc
 import multiprocessing as mp
 import pickle
+import re
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -483,6 +484,33 @@ class DiggerEnv:
     def _read_lives(self) -> int:
         m = self._core.read_memory_region(0)
         return m[LIVES_OFFSET]
+
+
+def load_dos_ckpt(spec: str) -> tuple[dict, str]:
+    """An emulator save state, as a DiggerEnv.load_state() dict, plus a
+    description. `spec` is either
+
+      - a pickle path: a play.py S slot ({core, held_keys}), a
+        DiggerEnv.save_state(), a SymbolicDiggerEnv.save_state(), or a
+        tools/level_states.py file; or
+      - `L<n>` / `L<n>_<k>`: level n's start (k-th of them, default 0) in
+        data/save/levels (tools/level_states.py).
+    """
+    m = re.fullmatch(r"[Ll](\d+)(?:_(\d+))?", spec)
+    path = (SAVE_DIR / "levels" / f"L{m[1]}_{m[2] or 0}_0.pkl"
+            if m else Path(spec))
+    if not path.exists():
+        raise FileNotFoundError(f"no emulator state {spec!r} ({path})")
+    with open(path, "rb") as fh:
+        d = pickle.load(fh)
+    desc = str(path)
+    if "level" in d:                          # tools/level_states.py
+        desc += (f" (level {d['level']}, step {d['step']}, "
+                 f"lives {d['lives']}, score {d['score']})")
+        d = d["state"]
+    if "env" in d:                            # SymbolicDiggerEnv
+        d = d["env"]
+    return d, desc
 
 
 # -- Vectorised wrapper -----------------------------------------------------

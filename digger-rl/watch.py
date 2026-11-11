@@ -4,11 +4,13 @@
     python watch.py data/checkpoints/dagger3/ppo_sym_final.pt
     python watch.py data/checkpoints/RUN/ppo_digger_final.pt --argmax
     python watch.py search --overlay
+    python watch.py teacher --dos-ckpt L5      # from level 5's start
 
 The policy is a spec from tools/policies.py (teacher, search, random, or a
 checkpoint from either trainer). Frames show inline in Kitty / Ghostty /
 WezTerm, else in a matplotlib window (--display). Ctrl+C / Ctrl+Q quits
-the terminal viewer; P pauses; +/- change the speed.
+the terminal viewer; P pauses; +/- change the speed. --sound plays the
+game's audio (needs sounddevice).
 """
 
 from __future__ import annotations
@@ -18,9 +20,11 @@ import time
 
 import torch
 
+from digger_env import load_dos_ckpt
 from tools.display import open_display
 from tools.game_state import render_overlay
 from tools.heuristic_agent import ACTION_NAMES
+from tools.sound import open_sound
 from tools.policies import env_kwargs, make_policy
 from tools.symbolic_env import SymbolicDiggerEnv, env_step_skipped
 from train_pixel import select_device
@@ -43,6 +47,12 @@ def main() -> None:
     p.add_argument("--frame-skip", type=int, default=4)
     p.add_argument("--display", choices=("auto", "kitty", "mpl"),
                    default="auto")
+    p.add_argument("--sound", action="store_true",
+                   help="play the game's audio (needs sounddevice)")
+    p.add_argument("--dos-ckpt", default=None, metavar="STATE",
+                   help="start every game from this emulator state: a "
+                        "state pickle, or L<n>[_<k>] for level n's start "
+                        "in data/save/levels (tools/level_states.py)")
     p.add_argument("--seed", type=int, default=1234)
     p.add_argument("--force-cpu", action="store_true")
     args = p.parse_args()
@@ -53,15 +63,30 @@ def main() -> None:
     policy = make_policy(args.policy, env, select_device(args.force_cpu),
                          argmax=args.argmax, seed=args.seed)
 
+    start = None
+    if args.dos_ckpt is not None:
+        start, desc = load_dos_ckpt(args.dos_ckpt)
+        print(f"starting from {desc}", flush=True)
+
     def frame():
         raw = env._env._core.get_frame()
         return render_overlay(raw, env._last_state) if args.overlay else raw
 
+    snd = None
     speed, paused = args.speed, False
     results = []
     with open_display(args.display, f"DIGGER {args.policy}") as disp:
         for game in range(args.games):
+            # reset() boots a fresh core; the old one must be released
+            # first (one core per process), so drop the player's handle.
+            if snd is not None:
+                snd.close()
+                snd = None
             obs = env.reset()
+            if args.sound:
+                snd = open_sound(env._env._core)
+            if start is not None:
+                obs = env.load_state({"env": start})
             policy.reset()
             step, score, a = 0, 0, 0
             while disp.is_open:
@@ -77,11 +102,15 @@ def main() -> None:
                 t0 = time.monotonic()
                 if paused:
                     time.sleep(0.05)
+                    if snd is not None:
+                        snd.flush()
                 else:
                     a = policy(obs)
                     obs, _, done, info = env_step_skipped(
                         env, a, args.frame_skip)
                     policy.observe(info)
+                    if snd is not None:
+                        snd.feed()
                     step += 1
                     score = int(info.get("score", score))
                     if done:
@@ -100,6 +129,9 @@ def main() -> None:
             if not disp.is_open:
                 break
             results.append(score)
+    if snd is not None:
+        snd.close()
+        snd = None
     env.close()
     for i, s in enumerate(results):
         print(f"game {i + 1}: score {s}")

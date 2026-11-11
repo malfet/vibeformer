@@ -5,7 +5,8 @@ Default: run N frames headlessly and dump a PPM screenshot.
          terminal supports it, else a matplotlib window; see --display),
          run continuously at ~70 fps emulator time, and forward keyboard
          events into the emulator. Ctrl+C / Ctrl+Q quits the Kitty viewer.
-         Keys: arrows + Enter + Space drive the game. R restarts at level 1.
+         Keys: arrows move, F / Control / F1 fire, Enter + Space drive the
+         menus. R restarts at level 1.
          S takes a state snapshot via core.serialize() (in-memory by default,
          or to --save-slot PATH if given). L restores the most recent
          snapshot via core.unserialize(). NB: DOSBox Pure's save/restore is
@@ -13,6 +14,8 @@ Default: run N frames headlessly and dump a PPM screenshot.
 --save-slot PATH: pickle file used by S/L. Persists across runs.
 --resume: at startup, load the slot from --save-slot before showing the
          first frame. Lets you boot directly into a saved scenario.
+--dos-ckpt STATE: start from an emulator state: any state pickle, or
+         L<n> for level n's start (tools/level_states.py). L returns there.
 --record-playtrace PATH: while in --live, snapshot at frame-skip cadence and
          save (frames, actions, rewards, lives) to PATH.npz for behavioural
          cloning warmup in train_pixel.py.
@@ -27,7 +30,8 @@ from pathlib import Path
 import numpy as np
 
 import _libretro
-from digger_env import DiggerEnv, preprocess_uint8
+from digger_env import DiggerEnv, load_dos_ckpt, preprocess_uint8
+from tools.sound import open_sound
 from tools.display import open_display
 
 REPO = Path(__file__).parent.resolve()
@@ -71,7 +75,11 @@ _NAMED_KEYS = {
     "tab":       _libretro.RETROK.F1,
     "backspace": _libretro.RETROK.BACKSPACE,
     "shift":     _libretro.RETROK.LSHIFT,
-    "control":   _libretro.RETROK.LCTRL,
+    # FIRE is F1 in Digger, which on a Mac keyboard needs fn. F and
+    # Control fire too (Digger uses neither; F can't be typed as a letter,
+    # e.g. in high-score initials).
+    "control":   _libretro.RETROK.F1,
+    "f":         _libretro.RETROK.F1,
     "alt":       _libretro.RETROK.LALT,
 }
 for _i in range(1, 13):
@@ -104,8 +112,8 @@ def dominant_action(held_order: list[int]) -> int:
     """Collapse the human's current multi-key state into one discrete action.
 
     DiggerEnv's action space is exclusive (NOOP / 4 arrows / FIRE) but a human
-    naturally holds LEFT and taps F1 at the same time. Priority: FIRE wins if
-    F1 is held; otherwise the most-recently-pressed arrow; otherwise NOOP.
+    naturally holds LEFT and taps fire (F1 / F / Control) at the same time.
+    Priority: FIRE wins if it is held; otherwise the most-recently-pressed arrow; otherwise NOOP.
     """
     if _libretro.RETROK.F1 in held_order:
         return DiggerEnv.FIRE
@@ -163,6 +171,8 @@ def run_live(core, record_path: Path | None = None,
              color: bool = False,
              save_slot_path: Path | None = None,
              resume_at_start: bool = False,
+             start_state: dict | None = None,
+             sound: bool = False,
              display: str = "auto") -> None:
     target_fps = core.get_av_info()[4] or 70.0
     target_dt = 1.0 / target_fps
@@ -232,6 +242,10 @@ def run_live(core, record_path: Path | None = None,
             print(f"   warning: failed to preload {save_slot_path}: {e}",
                   flush=True)
 
+    # --dos-ckpt: start there, and let L return to it until S saves anew.
+    if start_state is not None:
+        save_slot = {"core": start_state["core"], "held_keys": []}
+
     def save_emulator_state():
         nonlocal save_slot
         try:
@@ -272,10 +286,10 @@ def run_live(core, record_path: Path | None = None,
                 core.set_key(k, False)
             held_order.clear()
             core.unserialize(save_slot["core"])
-            core.set_held_keys_raw(save_slot["held_keys"])
-            # Rebuild the UI-side held_order list so subsequent
-            # on_release events know what to release.
-            held_order.extend(save_slot["held_keys"])
+            # The releases above reach the game after the restore, so
+            # nothing is held now; the next key press drives it (as in
+            # DiggerEnv.load_state).
+            core.set_held_keys_raw([])
             disp.show(core.get_frame())
             prev_score = read_score(core)
             seen_alive = read_lives(core) > 0
@@ -311,7 +325,9 @@ def run_live(core, record_path: Path | None = None,
           "the most recent snapshot. Close the window (or Ctrl+C in the "
           "terminal viewer) to quit.")
 
-    if resume_at_start:
+    if start_state is not None:
+        load_emulator_state()
+    elif resume_at_start:
         if save_slot is None:
             print(f"   warning: --resume given but no usable slot at "
                   f"{save_slot_path}; starting fresh", flush=True)
@@ -323,6 +339,7 @@ def run_live(core, record_path: Path | None = None,
         print(f"Recording trace to {record_path} "
               f"(frame_skip={frame_skip}, obs_size={obs_size}).")
 
+    snd = open_sound(core) if sound else None
     repeat_guard: set[str] = set()
     last = time.monotonic()
     fps_ema = target_fps
@@ -360,6 +377,8 @@ def run_live(core, record_path: Path | None = None,
                     sub_counter = 0
                     window_reward = 0.0
         frame_no += steps
+        if snd is not None:
+            snd.feed()
 
         disp.show(core.get_frame())
 
@@ -387,6 +406,8 @@ def run_live(core, record_path: Path | None = None,
             time.sleep(slack)
 
     core.clear_keys()
+    if snd is not None:
+        snd.close()
     disp.close()
 
     if record_path is not None and rec_frames:
@@ -452,8 +473,21 @@ def main():
                    help="at startup in --live mode, restore the state in "
                         "--save-slot before showing the first frame. "
                         "Requires --save-slot to point at an existing file.")
+    p.add_argument("--sound", action="store_true",
+                   help="--live: play the game's audio (needs sounddevice)")
+    p.add_argument("--dos-ckpt", default=None, metavar="STATE",
+                   help="start --live from this emulator state: a pickle "
+                        "(S slot, env save_state, tools/level_states.py) "
+                        "or L<n>[_<k>] for level n's start in "
+                        "data/save/levels. L returns to it.")
     args = p.parse_args()
 
+    start_state = None
+    if args.dos_ckpt is not None:
+        if not args.live:
+            p.error("--dos-ckpt requires --live")
+        start_state, desc = load_dos_ckpt(args.dos_ckpt)
+        print(f"starting from {desc}", flush=True)
     if args.record_playtrace is not None and not args.live:
         p.error("--record-playtrace requires --live")
     if args.resume and args.save_slot is None:
@@ -470,6 +504,8 @@ def main():
                  color=args.color,
                  save_slot_path=args.save_slot,
                  resume_at_start=args.resume,
+                 start_state=start_state,
+                 sound=args.sound,
                  display=args.display)
     else:
         run_headless(core, args.frames)

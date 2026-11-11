@@ -35,8 +35,8 @@ state.
 
 | Command | What it does |
 |---|---|
-| `python play.py --live` | Play yourself. S/L save/load the emulator state. |
-| `python watch.py POLICY` | Watch a policy play (inline in Kitty / Ghostty / WezTerm, else matplotlib). P pauses, +/- change speed. |
+| `python play.py --live` | Play yourself: arrows move, F / Control / F1 fire. S/L save/load the emulator state; `--dos-ckpt L5` starts at level 5's start (or from any state pickle); `--sound` plays the audio. |
+| `python watch.py POLICY` | Watch a policy play (inline in Kitty / Ghostty / WezTerm, else matplotlib). P pauses, +/- change speed; `--dos-ckpt`, `--sound` as in play.py. |
 | `python evaluate.py POLICY --episodes 20` | Score, life length, and level-1 clears over N full games. |
 | `python evaluate.py POLICY --levels data/save/levels` | Per level 1-10: clears, emeralds eaten, score in one life from each saved level start. |
 | `python -m tools.level_states` | Build save states at the start of (and inside) levels 1-10 by poking the level counter. |

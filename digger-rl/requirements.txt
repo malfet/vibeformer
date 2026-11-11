@@ -3,3 +3,4 @@ numpy>=2.0
 setuptools
 matplotlib>=3.8
 torch>=2.4
+sounddevice  # optional: play.py / watch.py --sound

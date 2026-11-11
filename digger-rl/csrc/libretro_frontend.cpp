@@ -254,6 +254,18 @@ public:
             std::string(info.library_version ? info.library_version : ""));
     }
 
+    void enable_audio(bool on) {
+        audio_enabled_ = on;
+        if (!on) audio_buf_.clear();
+    }
+
+    py::bytes take_audio() {
+        py::bytes out(reinterpret_cast<const char*>(audio_buf_.data()),
+                      audio_buf_.size() * sizeof(int16_t));
+        audio_buf_.clear();
+        return out;
+    }
+
     py::tuple get_av_info() {
         retro_system_av_info av = {};
         retro_get_system_av_info_(&av);
@@ -290,6 +302,10 @@ private:
 
     std::vector<uint8_t> game_data_;
     std::vector<uint8_t> frame_data_;
+    // Interleaved stereo int16 from the core, kept only while enabled
+    // (nothing drains it otherwise); take_audio() empties it.
+    bool audio_enabled_ = false;
+    std::vector<int16_t> audio_buf_;
     unsigned frame_w_ = 0, frame_h_ = 0;
     retro_pixel_format pixel_format_ = RETRO_PIXEL_FORMAT_0RGB1555;
     std::string system_dir_, save_dir_;
@@ -319,8 +335,18 @@ private:
     static void video_cb(const void* data, unsigned w, unsigned h, size_t pitch) {
         instance_->handle_video(data, w, h, pitch);
     }
-    static void audio_sample_cb(int16_t, int16_t) {}
-    static size_t audio_batch_cb(const int16_t*, size_t frames) { return frames; }
+    static void audio_sample_cb(int16_t l, int16_t r) {
+        if (instance_->audio_enabled_) {
+            instance_->audio_buf_.push_back(l);
+            instance_->audio_buf_.push_back(r);
+        }
+    }
+    static size_t audio_batch_cb(const int16_t* data, size_t frames) {
+        if (instance_->audio_enabled_)
+            instance_->audio_buf_.insert(instance_->audio_buf_.end(),
+                                         data, data + 2 * frames);
+        return frames;
+    }
     static void input_poll_cb() {}
     static int16_t input_state_cb(unsigned port, unsigned device,
                                   unsigned /*index*/, unsigned id) {
@@ -498,6 +524,11 @@ PYBIND11_MODULE(_libretro, m) {
              "Return the bytes of the registered memory region at the given index.")
         .def("get_system_info", &LibretroCore::get_system_info)
         .def("get_av_info", &LibretroCore::get_av_info)
+        .def("enable_audio", &LibretroCore::enable_audio, py::arg("on") = true,
+             "Start (or stop) buffering the core's audio for take_audio().")
+        .def("take_audio", &LibretroCore::take_audio,
+             "Audio since the last call: interleaved stereo int16 bytes "
+             "at get_av_info()[5] Hz.")
         .def("get_held_keys", &LibretroCore::get_held_keys,
              "List of retro_keys currently registered as held in the "
              "frontend mirror (used by input_state_cb).")
