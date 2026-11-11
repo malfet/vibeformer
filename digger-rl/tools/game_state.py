@@ -165,6 +165,10 @@ class DiggerPos:
     alive: bool = True
     can_fire: bool = True  # CV can't read this directly from a single frame;
                            # caller must track bullet presence to set it false
+    # Sprite position in 320x200 game coords (RAM only; None from CV).
+    # Tile-aligned when (x - 12) % 20 == 0 and (y - 18) % 18 == 0.
+    x: Optional[int] = None
+    y: Optional[int] = None
 
     @property
     def present(self) -> bool:
@@ -727,7 +731,8 @@ def extract_state_ram(mem: bytes) -> GameState:
     col, row = _ram_tile(int(d[0]), int(d[1]))
     state.digger = DiggerPos(col=col, row=row, dir=int(d[7]),
                              alive=int(d[14]) == 1,
-                             can_fire=int(d[9]) == 0 and int(d[23]) != 0)
+                             can_fire=int(d[9]) == 0 and int(d[23]) != 0,
+                             x=int(d[0]), y=int(d[1]))
     state.lives = int(d[21])
 
     em = np.frombuffer(mem, dtype=np.int8, count=MWIDTH * MHEIGHT,

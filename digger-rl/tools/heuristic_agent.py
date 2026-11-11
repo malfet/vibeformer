@@ -48,6 +48,13 @@ _DIR_TO_ACTION = {
     DIR_UP:    DiggerEnv.UP,
     DIR_DOWN:  DiggerEnv.DOWN,
 }
+# Action that reverses a digger moving in the given direction.
+_REVERSE_ACTION = {
+    DIR_LEFT:  DiggerEnv.RIGHT,
+    DIR_RIGHT: DiggerEnv.LEFT,
+    DIR_UP:    DiggerEnv.DOWN,
+    DIR_DOWN:  DiggerEnv.UP,
+}
 _ACTION_TO_FACING = {
     DiggerEnv.LEFT:  DIR_LEFT,
     DiggerEnv.RIGHT: DIR_RIGHT,
@@ -315,10 +322,33 @@ class SmartHeuristic:
     # and dropping it blinds the agent to the enemy about to kill it.
     _PHANTOM_KEEP_DIST: int = 2
 
+    @staticmethod
+    def _heading_tile(digger) -> tuple[int, int, bool]:
+        """(row, col, mid_tile): the tile to plan from, i.e. the tile the
+        digger is moving into, and whether it is between tiles.
+
+        The game only accepts a turn at a tile boundary (digger.c
+        updatedigger: vertical needs rx == 0, horizontal needs ry == 0);
+        a perpendicular key held mid-tile keeps the digger going and
+        turns it at the next boundary. So mid-tile, every option except
+        reversing starts from the tile it is heading into. Planning from
+        the *rounded* tile instead flips the plan whenever the sprite
+        crosses a tile midpoint, which made the agent oscillate.
+        """
+        if digger.x is None:                  # CV state: no sub-tile info
+            return digger.row, digger.col, False
+        rx, ry = (digger.x - 12) % 20, (digger.y - 18) % 18
+        h, v = (digger.x - 12) // 20, (digger.y - 18) // 18
+        if rx:
+            return v, h + 1 if digger.dir == DIR_RIGHT else h, True
+        if ry:
+            return v + 1 if digger.dir == DIR_DOWN else v, h, True
+        return v, h, False
+
     def _decide(self, state) -> int:
         if state.digger is None or not state.digger.present:
             return DiggerEnv.NOOP
-        dr, dc = state.digger.row, state.digger.col
+        dr, dc, mid_tile = self._heading_tile(state.digger)
         # Prefer the CV-detected facing; fall back to the action-history
         # `prev_dir` when CV reports DIR_NONE (sprite mid-animation).
         cv_dir = getattr(state.digger, "dir", DIR_NONE)
@@ -449,12 +479,19 @@ class SmartHeuristic:
         # prefer going around a bag but can still dig through to an
         # emerald beneath it.
         surcharge = (underbag_tiles if self.underbag == "transit" else set())
+        # An emerald in the tile we are already moving into is as good as
+        # eaten. Left as a target, planning from that tile (see
+        # _heading_tile) makes turning back look better than going on.
+        emeralds = state.emeralds
+        if mid_tile and emeralds[dr, dc]:
+            emeralds = emeralds.copy()
+            emeralds[dr, dc] = False
         em_dist = (self._emerald_dist_field(state, bag_tiles | hazard_tiles,
-                                            surcharge)
+                                            surcharge, emeralds)
                    if self.routing == "dijkstra" else None)
-        no_emeralds = not bool(state.emeralds.any())
+        no_emeralds = not bool(emeralds.any())
         if em_dist is None:
-            em_rows, em_cols = np.where(state.emeralds)
+            em_rows, em_cols = np.where(emeralds)
             em_targets = list(zip(em_rows.tolist(), em_cols.tolist()))
 
         def emerald_dist(r: int, c: int) -> int:
@@ -464,10 +501,19 @@ class SmartHeuristic:
                 return int(em_dist[r, c])
             return min(abs(er - r) + abs(ec - c) for er, ec in em_targets)
 
+        candidates = [(a, dr + ddr, dc + ddc)
+                      for a, ddr, ddc in self._MOVE_CANDIDATES]
+        # Mid-tile, turning back is only worth it for safety: on emerald
+        # distance alone it flip-flops (heading to an emerald, it looks
+        # done, so we turn back before eating it, and it is a target again).
+        reverse = (_REVERSE_ACTION.get(state.digger.dir)
+                   if mid_tile else None)
+
+        # (action, destination, lex score) per candidate, for debugging.
+        self.last_scores = []
         best_score: tuple | None = None
         best_action = DiggerEnv.NOOP
-        for action, ddr, ddc in self._MOVE_CANDIDATES:
-            nr, nc = dr + ddr, dc + ddc
+        for action, nr, nc in candidates:
             if nr < 0 or nr >= MHEIGHT or nc < 0 or nc >= MWIDTH:
                 continue
             if (nr, nc) in bag_tiles:
@@ -523,8 +569,10 @@ class SmartHeuristic:
             # (digging is ~1.7x slower than the bag falls).
             not_hazard = 0 if tile_hazard else 1
             fast_exit = (1 if in_hazard and not state.dirt[nr, nc] else 0)
-            score = (not_hazard, fast_exit, safety, -is_noop, -e_dist,
-                     sticky)
+            not_reverse = 0 if action == reverse else 1
+            score = (not_hazard, fast_exit, safety, not_reverse, -is_noop,
+                     -e_dist, sticky)
+            self.last_scores.append((action, (nr, nc), score))
             if best_score is None or score > best_score:
                 best_score = score
                 best_action = action
@@ -536,18 +584,24 @@ class SmartHeuristic:
     _UNDERBAG_SURCHARGE: int = 6
 
     def _emerald_dist_field(self, state, blocked: set,
-                             surcharge: set = frozenset()) -> np.ndarray:
+                             surcharge: set = frozenset(),
+                             emeralds: np.ndarray | None = None
+                             ) -> np.ndarray:
         """(MHEIGHT, MWIDTH) int array: cheapest-path distance from each
         tile to the nearest emerald. Multi-source Dijkstra from all
         emerald tiles; `blocked` tiles (bags, falling-bag paths) are
         impassable; entering a dirt tile costs 2 (digging is slower than
         walking a tunnel), cleared tiles cost 1; `surcharge` tiles
-        (under-bag) add _UNDERBAG_SURCHARGE. Unreachable tiles get a
+        (under-bag) add _UNDERBAG_SURCHARGE and cannot be entered from
+        below, matching the move filter's no-UP-into-under-bag rule.
+        Otherwise an emerald right under a bag scores the tile beneath it
+        as one step away while no legal move takes that step, and the
+        agent paces back and forth next to it. Unreachable tiles get a
         large sentinel so any reachable move dominates them.
         """
         H, W = state.dirt.shape
         dist = np.full((H, W), 10 ** 6, dtype=np.int32)
-        er, ec = np.where(state.emeralds)
+        er, ec = np.where(state.emeralds if emeralds is None else emeralds)
         if er.size == 0:
             return dist
         heap: list[tuple[int, int, int]] = []
@@ -564,6 +618,9 @@ class SmartHeuristic:
                 if not (0 <= nr < H and 0 <= nc < W):
                     continue
                 if (nr, nc) in blocked:
+                    continue
+                # (nr, nc) -> (r, c) would be an UP move into (r, c).
+                if dr_ == 1 and (r, c) in surcharge:
                     continue
                 nd = d + (2 if state.dirt[nr, nc] else 1)
                 if (nr, nc) in surcharge:

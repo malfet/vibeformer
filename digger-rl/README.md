@@ -521,6 +521,38 @@ The teacher now clears level 1 every game, but still never without
 losing a life. All earlier symbolic results (BC clones, PPO, search
 traces) were trained on the noisy state and should be re-run.
 
+### 16. The teacher paced back and forth; it now plans from the tile it is heading into (2026-11-11)
+
+Watching `--live` showed the digger reversing over and over from about
+step 55. It counted 38-42 reversals in the first 600 agent steps. There
+were three causes, all in `SmartHeuristic`:
+
+1. **Planning from the rounded tile.** The game only accepts a turn at a
+   tile boundary (`digger.c` updatedigger: vertical needs rx == 0,
+   horizontal needs ry == 0). A perpendicular key held mid-tile keeps the
+   digger going and turns it at the boundary. The heuristic scored moves
+   from the nearest tile, which flips as the sprite crosses a tile
+   midpoint, so the plan flipped with it. It now plans from the tile the
+   digger is moving into (`_heading_tile`, using the RAM x/y now on
+   `DiggerPos`).
+2. **An emerald the rules won't let it take.** The no-UP-into-under-bag
+   rule blocked the move, but the emerald-distance field still counted the
+   emerald one step away. Every legal move then tied and it paced beside
+   it. The field now forbids that edge too.
+3. **Turning back mid-tile on emerald distance.** Heading into an emerald
+   tile, the emerald counts as eaten, so the field can prefer turning
+   back. It then turns before eating it, and the emerald is a target
+   again. A mid-tile reversal now has to win on safety (hazard / fall
+   column / monster distance); it can't win on emerald distance alone.
+
+Reversals dropped to 4-6 in 600 steps, and those are firing turns and
+retreats. Same session, 20 games each, RAM state:
+
+| Teacher v6.4 | Score | Life (steps) | L1 cleared | L1 cleared without dying |
+|---|---:|---:|---:|---:|
+| plan from rounded tile | 2124 (2233 / 2015) | 234 | 20/20 | 1/20 |
+| **plan from heading tile** | **2783** (2945 / 2620) | **263** | 20/20 | **6/20** |
+
 ## Lessons ported from ../snake (2026-08-31)
 
 The snake project ran the same recipe on a much cheaper simulator and
