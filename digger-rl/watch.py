@@ -8,9 +8,9 @@
 
 The policy is a spec from tools/policies.py (teacher, search, random, or a
 checkpoint from either trainer). Frames show inline in Kitty / Ghostty /
-WezTerm, else in a matplotlib window (--display). Ctrl+C / Ctrl+Q quits
-the terminal viewer; P pauses; +/- change the speed. --sound plays the
-game's audio (needs sounddevice).
+WezTerm, else in a matplotlib window (--display). Q quits, P pauses,
++/- change the speed. --sound plays the game's audio (needs
+sounddevice).
 """
 
 from __future__ import annotations
@@ -73,7 +73,7 @@ def main() -> None:
         return render_overlay(raw, env._last_state) if args.overlay else raw
 
     snd = None
-    speed, paused = args.speed, False
+    speed, paused, quit_ = args.speed, False, False
     results = []
     with open_display(args.display, f"DIGGER {args.policy}") as disp:
         for game in range(args.games):
@@ -89,16 +89,20 @@ def main() -> None:
                 obs = env.load_state({"env": start})
             policy.reset()
             step, score, a = 0, 0, 0
-            while disp.is_open:
+            while disp.is_open and not quit_:
                 for key, pressed in disp.poll():
                     if not pressed:
                         continue
-                    if key == "p":
+                    if key == "q":
+                        quit_ = True
+                    elif key == "p":
                         paused = not paused
                     elif key in ("+", "="):
                         speed = speed * 2 if speed else 0
                     elif key in ("-", "_"):
                         speed = speed / 2 if speed else 4.0
+                if quit_:
+                    break
                 t0 = time.monotonic()
                 if paused:
                     time.sleep(0.05)
@@ -126,7 +130,7 @@ def main() -> None:
                         - (time.monotonic() - t0)
                     if slack > 0:
                         time.sleep(slack)
-            if not disp.is_open:
+            if quit_ or not disp.is_open:
                 break
             results.append(score)
     if snd is not None:

@@ -6,7 +6,7 @@ Default: run N frames headlessly and dump a PPM screenshot.
          run continuously at ~70 fps emulator time, and forward keyboard
          events into the emulator. Ctrl+C / Ctrl+Q quits the Kitty viewer.
          Keys: arrows move, F / Control / F1 fire, Enter + Space drive the
-         menus. R restarts at level 1.
+         menus. R restarts at level 1. Q quits.
          S takes a state snapshot via core.serialize() (in-memory by default,
          or to --save-slot PATH if given). L restores the most recent
          snapshot via core.unserialize(). NB: DOSBox Pure's save/restore is
@@ -322,8 +322,7 @@ def run_live(core, record_path: Path | None = None,
 
     print("Live mode. Arrows + Enter + Space drive the game. "
           "R restarts at level 1. S saves a state snapshot, L restores "
-          "the most recent snapshot. Close the window (or Ctrl+C in the "
-          "terminal viewer) to quit.")
+          "the most recent snapshot. Q (or closing the window) quits.")
 
     if start_state is not None:
         load_emulator_state()
@@ -344,11 +343,15 @@ def run_live(core, record_path: Path | None = None,
     last = time.monotonic()
     fps_ema = target_fps
     frame_no = 0
-    while disp.is_open:
+    quit_ = False
+    while disp.is_open and not quit_:
         now = time.monotonic()
         elapsed = now - last
         last = now
         for key, pressed in disp.poll():
+            if key == "q":
+                quit_ = True
+                break
             # Key repeats arrive as extra presses; R/S/L act once per press.
             if pressed and key in ("r", "s", "l") and key in repeat_guard:
                 continue

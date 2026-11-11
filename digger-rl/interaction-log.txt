@@ -395,3 +395,5 @@ Also, in play, can you remap fire to either f or control key, as f1 is very awkw
 
 I've pushed update to sciextractor that has sound module
 Yes, I can hear the sound, pretty cool
+
+And perhaps in both --live and watch, pressing q should abort the playback
