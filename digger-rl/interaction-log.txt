@@ -366,3 +366,6 @@ Sure, do 1 then 3 (probably as separate module that shared between both run_ppo,
 
 ---
 Speaking of near death scenarious - weren't those needed when we've investigated that loosing live is probably 200 steps removed (due to funeral dirge) from the actual moment player dies)? If this is the case, perhaps they are not needed or could be re-collected later?
+
+---
+Cool, commit this
