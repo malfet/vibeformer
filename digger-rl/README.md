@@ -13,12 +13,19 @@ Same session where it matters; cross-session numbers drift by up to
 frames each); "L1 clean" is games that cleared level 1 without losing a
 life (the project goal).
 
-| Policy | Games | Score | Life | L1 clean |
-|---|---:|---:|---:|---:|
-| SmartHeuristic v6.4 teacher | 20 | 3098 | 278 | 6/20 |
-| BC student (`bc_v1`, 175k teacher steps) | 20 | 2765 | 259 | 8/20 |
-| DAgger round 3 student (`dagger3`, 700k steps) | 10 | 3115 | 314 | 6/10 |
-| PPO fine-tune of `dagger3` (`ppo_ft1`) | | running | | |
+Same session, 20 games each (2 seeds):
+
+| Policy | Score | Life | L1 clean |
+|---|---:|---:|---:|
+| **PPO fine-tune of `dagger3` (`ppo_ft1`, final)** | 3662 ±161 | **331** | **16/20** |
+| **PPO fine-tune of `dagger3` (`ppo_ft1`, best)** | **3752** ±196 | 330 | 11/20 |
+| SmartHeuristic v6.4 teacher | 3269 ±241 | 290 | 13/20 |
+| DAgger round 3 student (`dagger3`, 700k steps) | 2858 ±175 | 264 | 7/20 |
+| Pixel student (`pixel_dagger_v1`, BC + 3 DAgger, 10 games) | 1513 ±109 | 188 | 0/10 |
+
+The earlier BC run (`bc_v1`) scored 2765 against a same-day teacher of
+3098 (Lesson 17). The PPO student is the first policy that beats its
+teacher (Lesson 19).
 
 Earlier scoreboards (CV state, pixel PPO, Dreamer, DQN) are in the
 lessons below; every number before Lesson 15 used the misaligned CV
@@ -629,6 +636,38 @@ rounds are within noise. Life length is the clearest signal: about 13%
 above the teacher from round 2 on. The gain sits on the hard steps
 (accuracy at action changes +6 points), where the student previously
 drifted off the teacher's state distribution.
+
+### 19. PPO takes the DAgger student past the teacher (2026-11-11)
+
+`ppo_ft1`: 2M frames of PPO from `dagger3` (~45 min at 450-880 frames/s).
+10 critic-only warmup updates came first. Then a BC anchor on the
+`dagger3_*` traces, annealed 0.3 -> 0.05; reward score x 0.02; episodes
+ending at death onset; lr 1e-4; entropy 0.001 -> 0.0005; best checkpoint
+by rolling score kept. Command in "How to run".
+
+| Policy (same session, 20 games, 2 seeds) | Score | Life | L1 cleared | L1 clean |
+|---|---:|---:|---:|---:|
+| teacher | 3269 ±241 | 290 | 20/20 | 13/20 |
+| `dagger3` (PPO's start) | 2858 ±175 | 264 | 20/20 | 7/20 |
+| `ppo_ft1` best | 3752 ±196 | 330 | 20/20 | 11/20 |
+| `ppo_ft1` final | 3662 ±161 | 331 | 20/20 | 16/20 |
+
+- **+28-31% over its own start and +12-15% over the teacher on score;
+  life +14% over the teacher.** The score gap to the teacher is ~1.5-2
+  sem, so it is suggestive at n=20; life length and clean clears agree.
+- The value warmup did its job: KL and clip fraction stayed 0 for the
+  10 warmup updates. Afterwards entropy rose from ~0.01 to 0.1-0.6, and
+  training per-life score climbed from ~1500 to ~2500-3800.
+- `dagger3` evaluated at 2858 here vs 3115 in its own run (10 games,
+  one seed): the usual session drift; only same-session rows compare.
+- The final checkpoint is as good as the "best" one, so the rolling-score
+  selection did not pick a better point here.
+
+The pixel student (`train_pixel.py`, 100k teacher-driven + 3 x 25k
+DAgger steps, 4 x 84x84 RGB) reached 96.5% training accuracy but plays
+at half the teacher's level (1513, life 188, 0/10 clean). Its mid-evals
+were still rising at round 3 (1090 -> 1105 -> 1530), and that trainer has
+no held-out split yet.
 
 ## Lessons ported from ../snake (2026-08-31)
 
