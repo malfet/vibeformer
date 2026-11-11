@@ -1,4 +1,4 @@
-"""Frame viewer shared by run_digger.py, run_ppo.py and the heuristic agent.
+"""Frame viewer shared by play.py and watch.py.
 
 Two backends behind one interface:
 

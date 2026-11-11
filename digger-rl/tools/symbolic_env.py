@@ -14,6 +14,14 @@ Channel layout (each plane is a 10x15 float32 mask):
   3 monster (any nobbin / hobbin in that tile)
   4 bag intact
   5 cherry              (currently always zero; cherry not decoded yet)
+  6 heading tile        (tile the digger is moving into; == digger tile
+                         when aligned -- what the teacher plans from)
+  7-10 facing           (whole plane = 1 for the digger's facing: R, U, L, D)
+  11 fire ready         (whole plane = 1 when the game would accept FIRE)
+  12 bag moving         (falling or being pushed)
+
+Channels 6-12 carry everything SmartHeuristic decides from, so a student
+imitating it is not missing information the teacher had.
 
 Frame stacking: a single frame is non-Markov for everything that moves
 (monster velocity, falling bag, fire cooldown, digger sub-tile pos).
@@ -45,10 +53,12 @@ import collections
 import numpy as np
 
 from digger_env import DiggerEnv
-from tools.game_state import MHEIGHT, MWIDTH, extract_state_ram
+from tools.game_state import (DIR_DOWN, DIR_LEFT, DIR_RIGHT, DIR_UP, MHEIGHT,
+                              MWIDTH, extract_state_ram, heading_tile)
 
 # Channels in a single symbolic frame.
-BASE_OBS_CHANNELS = 6
+BASE_OBS_CHANNELS = 13
+_FACING_CHANNEL = {DIR_RIGHT: 7, DIR_UP: 8, DIR_LEFT: 9, DIR_DOWN: 10}
 BASE_OBS_SHAPE = (BASE_OBS_CHANNELS, MHEIGHT, MWIDTH)
 
 # Backwards-compat aliases: default = no frame stacking, so old imports
@@ -100,13 +110,22 @@ def state_to_tensor(state) -> np.ndarray:
     obs[0] = state.dirt.astype(np.float32)
     obs[1] = state.emeralds.astype(np.float32)
     if state.digger is not None and state.digger.present:
-        obs[2, state.digger.row, state.digger.col] = 1.0
+        d = state.digger
+        obs[2, d.row, d.col] = 1.0
+        hr, hc, _ = heading_tile(d)
+        obs[6, hr, hc] = 1.0
+        if d.dir in _FACING_CHANNEL:
+            obs[_FACING_CHANNEL[d.dir]] = 1.0
+        if d.can_fire:
+            obs[11] = 1.0
     for m in state.monsters:
         if 0 <= m.row < MHEIGHT and 0 <= m.col < MWIDTH:
             obs[3, m.row, m.col] = 1.0
     for b in state.bags:
         if 0 <= b.row < MHEIGHT and 0 <= b.col < MWIDTH:
             obs[4, b.row, b.col] = 1.0
+            if b.moving:
+                obs[12, b.row, b.col] = 1.0
     if state.cherry is not None:
         cc, cr = state.cherry
         if 0 <= cr < MHEIGHT and 0 <= cc < MWIDTH:

@@ -1,6 +1,6 @@
 """PPO on the symbolic tile-grid observation.
 
-Same PPO recipe as `train_ppo.py` but the agent sees the (C, 10, 15)
+Same PPO recipe as `train_pixel.py` but the agent sees the (C, 10, 15)
 symbolic mask grid from SymbolicDiggerEnv instead of raw 84x84 RGB
 frames. Two reasons:
 
@@ -23,7 +23,7 @@ Single env loop (DOSBox is one process per emulator instance).
 frame_skip applied via env_step_skipped, same as the trace generators.
 
 Run:
-    python train_ppo_symbolic.py --total-timesteps 500000 \\
+    python train_symbolic.py --total-timesteps 500000 \\
         --shaping-coef 0.5 --frame-stack 4 \\
         --run-name ppo_sym_v1
 """
@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import copy
 import pickle
 import time
 from dataclasses import dataclass
@@ -46,7 +47,7 @@ from torch.optim import Adam
 from tools.game_state import MHEIGHT, MWIDTH
 from tools.symbolic_env import SymbolicDiggerEnv
 from tools.symbolic_env import env_step_skipped
-from train_ppo import layer_init, select_device
+from train_pixel import layer_init, select_device
 
 REPO = Path(__file__).parent.resolve()
 CKPT_DIR = REPO / "data" / "checkpoints"
@@ -64,7 +65,7 @@ class Config:
     update_epochs: int = 4
     norm_adv: bool = True
     clip_coef: float = 0.1
-    # See train_ppo.py for the rationale; clip_vloss at clip_coef=0.1
+    # See train_pixel.py for the rationale; clip_vloss at clip_coef=0.1
     # caps per-update value movement and is mostly neutral when ablated.
     clip_vloss: bool = False
     ent_coef: float = 0.01
@@ -90,6 +91,8 @@ class Config:
     resume_from: Path | None = None
     resume_prob: float = 1.0
     load_agent: Path | None = None
+    value_warmup_updates: int = 0         # first N updates train only the
+                                          # critic head (encoder frozen)
     save_best: bool = False
     best_metric: str = "score"            # score | length | return
     # Behavioural-cloning warmup + per-PPO-minibatch anchor. If bc_traces
@@ -100,6 +103,8 @@ class Config:
     # teacher. Annealing bc_anchor_coef -> bc_anchor_final relaxes the
     # leash as PPO ramps up its own learning signal.
     bc_traces: tuple[str, ...] = ()
+    bc_val: tuple[str, ...] = ()          # held-out traces: per-epoch acc,
+                                          # best epoch kept
     bc_epochs: int = 10
     bc_batch_size: int = 256
     bc_anchor_coef: float = 0.0
@@ -271,8 +276,16 @@ def parse_args() -> Config:
                         "readout reads.")
     p.add_argument("--bc-traces", type=str, nargs="*", default=(),
                    help="one or more .npz files produced by "
-                        "tools/gen_symbolic_trace.py. BC pretrains the actor "
+                        "collect.py. BC pretrains the actor "
                         "on these before PPO starts.")
+    p.add_argument("--value-warmup-updates", type=int,
+                   default=Config.value_warmup_updates,
+                   help="first N PPO updates train only the critic head on "
+                        "a frozen encoder; use with --load-agent of a BC "
+                        "checkpoint whose critic is untrained")
+    p.add_argument("--bc-val", type=str, nargs="*", default=(),
+                   help="held-out traces: report per-epoch accuracy on them "
+                        "and keep the best BC epoch")
     p.add_argument("--bc-epochs", type=int, default=Config.bc_epochs)
     p.add_argument("--bc-batch-size", type=int, default=Config.bc_batch_size)
     p.add_argument("--bc-anchor-coef", type=float, default=Config.bc_anchor_coef,
@@ -287,7 +300,7 @@ def parse_args() -> Config:
                    action=argparse.BooleanOptionalAction)
     p.add_argument("--resume-from", type=Path, default=None,
                    help="Pickle file produced by env.save_state() or by "
-                        "run_digger.py --live S. If set, every env.reset() "
+                        "play.py --live S. If set, every env.reset() "
                         "is followed by env.load_state(<this file>) so the "
                         "agent always trains from this scenario rather "
                         "than the level-1 attract screen. Useful for "
@@ -318,11 +331,13 @@ def parse_args() -> Config:
         egocentric=a.egocentric,
         max_episode_steps=a.max_episode_steps,
         load_agent=a.load_agent,
+        value_warmup_updates=a.value_warmup_updates,
         save_best=a.save_best,
         best_metric=a.best_metric,
         arch=a.arch, iter_channels=a.iter_channels,
         iter_steps=a.iter_steps, readout=a.readout,
         bc_traces=tuple(a.bc_traces),
+        bc_val=tuple(a.bc_val),
         bc_epochs=a.bc_epochs,
         bc_batch_size=a.bc_batch_size,
         bc_anchor_coef=a.bc_anchor_coef,
@@ -391,7 +406,7 @@ def main() -> None:
                   f"each reset() samples one", flush=True)
         else:
             # Tolerate either single-state format -- DiggerEnv.save_state()
-            # returns a dict with "core"; run_digger.py --live S returns a
+            # returns a dict with "core"; play.py --live S returns a
             # dict with "core" too but no python wrapper fields.
             # SymbolicDiggerEnv wraps it with an extra layer
             # ({"env": {...}, "prev_dist": ...}). Lift bare DiggerEnv dicts
@@ -440,10 +455,10 @@ def main() -> None:
     # ---- BC data + pretrain ------------------------------------------------
     bc_obs: torch.Tensor | None = None
     bc_acts: torch.Tensor | None = None
-    if cfg.bc_traces:
-        bc_obs_arrs = []
-        bc_act_arrs = []
-        for tp in cfg.bc_traces:
+
+    def load_traces(paths):
+        obs_arrs, act_arrs = [], []
+        for tp in paths:
             d = np.load(tp)
             obs_arr = d["obs"]
             act_arr = d["actions"].astype(np.int64)
@@ -454,16 +469,37 @@ def main() -> None:
                     f"(frame_stack / egocentric mismatch?). Re-record with "
                     f"--frame-stack {cfg.frame_stack}"
                     + (" --egocentric" if cfg.egocentric else "") + ".")
-            bc_obs_arrs.append(obs_arr)
-            bc_act_arrs.append(act_arr)
+            obs_arrs.append(obs_arr)
+            act_arrs.append(act_arr)
             print(f"{tag} loaded BC trace {tp}: {len(act_arr):,} samples",
                   flush=True)
-        bc_obs = torch.from_numpy(np.concatenate(bc_obs_arrs, axis=0)).to(device)
-        bc_acts = torch.from_numpy(np.concatenate(bc_act_arrs, axis=0)).to(device)
+        return (torch.from_numpy(np.concatenate(obs_arrs, axis=0)).to(device),
+                torch.from_numpy(np.concatenate(act_arrs, axis=0)).to(device))
+
+    @torch.no_grad()
+    def bc_accuracy(obs, acts) -> tuple[float, float]:
+        """(accuracy, accuracy on steps whose label differs from the
+        previous step's) -- the second is where copying the last action
+        stops working, so it is the harder half of imitation."""
+        hit = []
+        for start in range(0, acts.numel(), 4096):
+            x = obs[start:start + 4096].float()
+            hit.append(agent.actor(agent.encode(x)).argmax(-1)
+                       == acts[start:start + 4096])
+        hit = torch.cat(hit)
+        change = torch.ones_like(hit)
+        change[1:] = acts[1:] != acts[:-1]
+        return hit.float().mean().item(), hit[change].float().mean().item()
+
+    if cfg.bc_traces:
+        bc_obs, bc_acts = load_traces(cfg.bc_traces)
+        val_obs, val_acts = (load_traces(cfg.bc_val) if cfg.bc_val
+                             else (None, None))
         M = bc_acts.numel()
         print(f"{tag} BC dataset: {M:,} (obs, action) pairs", flush=True)
 
         if cfg.bc_epochs > 0:
+            best_val, best_state = -1.0, None
             rng_bc = np.random.default_rng(cfg.seed)
             for epoch in range(cfg.bc_epochs):
                 perm = rng_bc.permutation(M)
@@ -473,7 +509,7 @@ def main() -> None:
                 for start in range(0, M, cfg.bc_batch_size):
                     mb = perm[start:start + cfg.bc_batch_size]
                     mb_t = torch.from_numpy(mb).to(device)
-                    logits = agent.actor(agent.encode(bc_obs[mb_t]))
+                    logits = agent.actor(agent.encode(bc_obs[mb_t].float()))
                     ce = F.cross_entropy(logits, bc_acts[mb_t])
                     optim.zero_grad()
                     ce.backward()
@@ -485,9 +521,19 @@ def main() -> None:
                         acc_sum += (logits.argmax(-1) == bc_acts[mb_t]
                                     ).float().mean().item()
                     nb += 1
-                print(f"{tag}   bc epoch {epoch + 1}/{cfg.bc_epochs}  "
-                      f"ce {ce_sum / nb:.3f}  acc {acc_sum / nb:.3f}",
-                      flush=True)
+                msg = (f"{tag}   bc epoch {epoch + 1}/{cfg.bc_epochs}  "
+                       f"ce {ce_sum / nb:.3f}  acc {acc_sum / nb:.3f}")
+                if val_obs is not None:
+                    v_acc, v_chg = bc_accuracy(val_obs, val_acts)
+                    msg += f"  val acc {v_acc:.3f}  val acc@change {v_chg:.3f}"
+                    if v_acc > best_val:
+                        best_val, best_state = v_acc, copy.deepcopy(
+                            agent.state_dict())
+                print(msg, flush=True)
+            if best_state is not None:
+                agent.load_state_dict(best_state)
+                print(f"{tag} BC: kept best held-out epoch "
+                      f"(val acc {best_val:.3f})", flush=True)
 
     N = cfg.num_steps
     obs_buf = torch.zeros(N, in_ch, obs_h, obs_w, device=device)
@@ -647,11 +693,20 @@ def main() -> None:
                     v_loss = 0.5 * ((new_val - flat_ret[mb]) ** 2).mean()
                 ent = entropy.mean()
                 loss = pg_loss - current_ent_coef * ent + cfg.vf_coef * v_loss
-                if anchor_active:
+                if update <= cfg.value_warmup_updates:
+                    # Critic-only warmup: fit V on a frozen encoder so an
+                    # untrained critic (e.g. after BC) neither drags the
+                    # shared features nor feeds the actor noise advantages.
+                    with torch.no_grad():
+                        z = agent.encode(flat_obs[mb])
+                    v_loss = 0.5 * ((agent.critic(z).squeeze(-1)
+                                     - flat_ret[mb]) ** 2).mean()
+                    loss = cfg.vf_coef * v_loss
+                elif anchor_active:
                     bc_M = bc_acts.numel()
                     bc_idx = torch.randint(
                         bc_M, (min(cfg.bc_batch_size, bc_M),), device=device)
-                    bc_logits = agent.actor(agent.encode(bc_obs[bc_idx]))
+                    bc_logits = agent.actor(agent.encode(bc_obs[bc_idx].float()))
                     anchor_ce = F.cross_entropy(bc_logits, bc_acts[bc_idx])
                     loss = loss + current_anchor * anchor_ce
                 optim.zero_grad()

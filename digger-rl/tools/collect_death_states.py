@@ -58,7 +58,7 @@ def _policy_fn(name: str, checkpoint: Path | None, env, rng):
         fn.reset = teacher.reset
         return fn
     import torch
-    from eval_symbolic import build_agent
+    from tools.policies import load_symbolic_agent as build_agent
     agent, _ = build_agent(checkpoint, "cpu")
 
     def act(obs):

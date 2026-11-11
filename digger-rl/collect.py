@@ -1,39 +1,43 @@
-"""Generate a BC trace by playing DIGGER with a heuristic policy.
+"""Record teacher-labelled traces for behavioural cloning / DAgger.
 
-Records the *symbolic* (C*frame_stack, 10, 15) observation at each policy
-step alongside the action the heuristic chose. The resulting .npz is
-consumed by `train_ppo_symbolic.py --bc-traces PATH` as supervised data
-for the actor (and optionally the critic via MC returns).
+Each policy step stores the symbolic (13*frame_stack, 10, 15) uint8
+observation and the teacher's (SmartHeuristic's) action. Who *plays* is
+separate from who labels:
 
-Why symbolic + SmartHeuristic: prior DAGGER pixel runs used GreedyEmerald
-as teacher and topped out at 783; SmartHeuristic v5 scores ~1475 vs
-GreedyEmerald's ~1342 baseline and includes monster avoidance + LoS fire,
-so the BC labels carry strictly more useful signal. Recording the
-*symbolic* obs avoids the pixel-to-tile perception problem that bottle-
-necked the pixel runs.
+  - default: the teacher plays (plain BC data);
+  - --student CKPT: a train_symbolic.py checkpoint plays (DAgger), so the
+    labels cover the states the student actually reaches;
+  - --explore P: with probability P a random action is played instead.
 
-    python -m tools.gen_symbolic_trace --out data/sym_smart.npz \\
-        --steps 50000 --frame-stack 4 --teacher smart
+The label is always the teacher's. Parallel collectors need different
+--seed values (the emulator itself is deterministic).
+
+    for i in $(seq 0 7); do
+      python collect.py --out data/traces/bc_$i.npz --steps 25000 \
+          --explore 0.05 --seed $i &
+    done; wait
+    python train_symbolic.py --total-timesteps 0 \
+        --bc-traces data/traces/bc_{0..6}.npz --bc-val data/traces/bc_7.npz
 """
 
 from __future__ import annotations
 
 import argparse
-import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 import numpy as np
 
+from digger_env import DiggerEnv
 from tools.heuristic_agent import DodgeMonsters, GreedyEmerald, SmartHeuristic
 from tools.symbolic_env import BASE_OBS_CHANNELS, SymbolicDiggerEnv
 from tools.symbolic_env import env_step_skipped
 
 
 def collect(num_steps: int, frame_skip: int, frame_stack: int,
-             teacher_name: str, egocentric: bool = False) -> dict:
+             teacher_name: str, egocentric: bool = False,
+             explore: float = 0.0, seed: int = 0,
+             student: Path | None = None) -> dict:
     env = SymbolicDiggerEnv(max_steps=10**9, episodic_life=True,
                              frame_stack=frame_stack,
                              egocentric=egocentric)
@@ -48,7 +52,16 @@ def collect(num_steps: int, frame_skip: int, frame_stack: int,
     teacher = teachers[teacher_name]()
     in_ch, obs_h, obs_w = env.obs_shape
 
-    obs_buf = np.zeros((num_steps, in_ch, obs_h, obs_w), dtype=np.float32)
+    # Every plane is a 0/1 mask, so uint8 loses nothing at 1/4 the size.
+    obs_buf = np.zeros((num_steps, in_ch, obs_h, obs_w), dtype=np.uint8)
+    rng = np.random.default_rng(seed)
+    if student is not None:
+        # DAgger: the student drives, the teacher only labels. Imported
+        # here so plain collection doesn't need torch.
+        import torch
+        from tools.policies import load_symbolic_agent
+        torch.manual_seed(seed)
+        agent, _ = load_symbolic_agent(student, torch.device("cpu"))
     act_buf = np.zeros((num_steps,), dtype=np.int64)
     rew_buf = np.zeros((num_steps,), dtype=np.float32)
     done_buf = np.zeros((num_steps,), dtype=bool)
@@ -64,6 +77,18 @@ def collect(num_steps: int, frame_skip: int, frame_stack: int,
         obs_buf[t] = cur_obs
         action = teacher(env._last_state)
         act_buf[t] = action
+        if student is not None:
+            with torch.no_grad():
+                x = torch.from_numpy(np.asarray(cur_obs, np.float32))[None]
+                logits = agent.actor(agent.encode(x))
+                action = int(torch.distributions.Categorical(
+                    logits=logits).sample().item())
+        # Noise injection: sometimes play a random action, but always
+        # record the teacher's. The student then sees states the teacher
+        # would not reach, with the teacher's recovery as the label, and
+        # parallel collectors (the emulator is deterministic) diverge.
+        if explore > 0 and rng.random() < explore:
+            action = int(rng.integers(DiggerEnv.NUM_ACTIONS))
         next_obs, total_r, done, info = env_step_skipped(
             env, int(action), frame_skip)
         rew_buf[t] = float(total_r)
@@ -113,13 +138,23 @@ def main() -> None:
     p.add_argument("--teacher", type=str, default="smart",
                    choices=["smart", "greedy", "dodge"],
                    help="which heuristic to record (smart = SmartHeuristic)")
+    p.add_argument("--explore", type=float, default=0.0,
+                   help="probability of playing a random action instead of "
+                        "the teacher's (the label stays the teacher's)")
+    p.add_argument("--student", type=Path, default=None,
+                   help="DAgger: a train_symbolic checkpoint that plays "
+                        "(sampled); the teacher's action is still the label")
+    p.add_argument("--seed", type=int, default=0,
+                   help="seed for --explore; give parallel collectors "
+                        "different seeds")
     p.add_argument("--egocentric", action="store_true",
                    help="record the digger-centred obs; must match the "
                         "trainer's --egocentric")
     args = p.parse_args()
     args.out.parent.mkdir(parents=True, exist_ok=True)
     data = collect(args.steps, args.frame_skip, args.frame_stack,
-                   args.teacher, args.egocentric)
+                   args.teacher, args.egocentric, args.explore, args.seed,
+                   args.student)
     np.savez_compressed(args.out, **data)
     size_mb = args.out.stat().st_size / 1e6
     print(f"Wrote {size_mb:.1f} MB to {args.out}")

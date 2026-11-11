@@ -1,82 +1,99 @@
-# Digger RL — status & next steps
+# Digger RL
 
-Reinforcement-learning experiments on the 1983 DOS game **DIGGER** running
-inside DOSBox Pure via a libretro pybind11 binding. The goal is to learn
-to play it from minimal supervision (score + survival time as reward),
-ultimately with a *pixel-only* deployable agent.
+Learning to play the 1983 DOS game **DIGGER**, running in DOSBox Pure
+through a libretro pybind11 binding. The approach: bootstrap a student
+from a hand-written teacher (behavioural cloning, then DAgger), then
+fine-tune it with PPO to get past the teacher. Learning from first
+principles (no teacher) and a pixel-only agent are later goals.
 
-## TL;DR — current scoreboard
+## Current scoreboard (2026-11-11, symbolic state from RAM)
 
-| Approach | n | Mean (sem) | Max ep | Notes |
-|---|---:|---:|---:|---|
-| **SmartHeuristic v6 (teacher)** | 10 | **1932** | **4600** | v5 + phantom filter + under-bag transit rule + Dijkstra emerald routing; min ep 1000. Same-session vs v5's 1010; absolute level drifts ±400 between sessions (see caveat) |
-| **Symbolic BC clone of v6.4 teacher** | 20 | **1175 ±84** | 2050 | **best ML result so far.** 60k samples, 10 epochs, no PPO / no DAgger; 95.4% teacher action accuracy. Same-session teacher 1362 → 86% of teacher. See "the actual headline" below |
-| **Pixel BC + 3 DAGGER iters, v6 teacher, 50-ep eval** | 50 | **1042 ±50** | 1950 | **best ML so far**, pixel-only; same net/data budget as the old 629 recipe — the entire delta is the teacher |
-| Pixel PPO on the v6 BC ckpt (best ckpt; sep. critic + value warmup + anchor anneal + save-best) | 50 | 851 ±44 | 1700 | PPO still net-negative on pixels, but −18% now vs −55% in the old recipe |
-| Pixel PPO on the v6 BC ckpt (final ckpt) | 50 | 750 ±42 | 1425 | final < best: keep --save-best |
-| SmartHeuristic v5 (teacher) | 10 | 1010 | 2250 | fresh 10-ep re-bench; the historical "1475" was a 5-ep number |
-| Symbolic PPO + BC pretrain + per-step BC anchor + penalties | 20 | 891 | 1475 | best *symbolic* ML (v5-teacher era) |
-| Pixel BC-only (100k labels, 20 epochs, v5 teacher), 50-ep eval | 50 | 629.5 ±32 | 1175 | old pixel ceiling at 92.1% teacher acc |
-| Pixel DAGGER (50k warmup + 3×25k student-collected), 50-ep eval | 50 | 625.0 ±34 | 1275 | within noise of pure BC; DAGGER iters did not help |
-| Audit's pixel DAGGER (multi-iter, GreedyEmerald teacher) | — | 783 | — | the older audit number; not 50-ep checked |
-| Pixel PPO + warmup + live teacher anchor + penalties | 20 | 364 | 750 | PPO **degrades** the BC policy |
-| Pixel PPO + live teacher anchor (no warmup) | 20 | 324 | 825 | live anchor only |
-| Symbolic PPO + shaping only (vanilla, seed=1) | 20 | 290 | 1050 | local-optimum basin at ~250 |
-| Symbolic PPO + shaping only (vanilla, seed=2) | 20 | 235 | 500 | same basin |
-| Symbolic Dreamer V3 (500k frames; code removed 2026-11-11) | 20 | 250 | — | actor entropy collapse |
-| Pixel PPO from scratch (exp4_long_500k) | 20 | 75 | — | classic NatureCNN, no teacher |
+Same session where it matters; cross-session numbers drift by up to
+~±400. Score is a full 3-life game; life is agent steps per life (4
+frames each); "L1 clean" is games that cleared level 1 without losing a
+life (the project goal).
 
-**Caveat on evaluation noise.** Most numbers above are 10–20 episode
-in-trainer ep_end averages, which have ±~100 standard error around the
-true mean (we measured this: single-episode std is ~230). The pixel BC
-result was reported as "812" from a 10-episode eval; a proper 50-ep
-re-eval brought it to **629.5 ±32**. Treat 10-ep numbers as ±100;
-prefer the `eval_checkpoint.py` 50-ep numbers for any comparison
-worth acting on.
+| Policy | Games | Score | Life | L1 clean |
+|---|---:|---:|---:|---:|
+| SmartHeuristic v6.4 teacher | 20 | 3098 | 278 | 6/20 |
+| BC student (`bc_v1`, 175k teacher steps) | 20 | 2765 | 259 | 8/20 |
+| DAgger round 3 student (`dagger3`, 700k steps) | 10 | 3115 | 314 | 6/10 |
+| PPO fine-tune of `dagger3` (`ppo_ft1`) | | running | | |
 
-**Caveat on cross-session drift.** Worse: 20-episode teacher means
-measured on *identical code* moved from 1634/1932 one day to 1226 the
-next (three same-day runs of the new code clustered tightly at
-1149–1214 while the old code scored 1226 that same day). Whatever the
-mechanism (DOSBox timing/monster behaviour vs. system load), the
-between-session spread (~±400) dwarfs the within-session sem (~±150).
-**Only same-session A/B comparisons are valid**; never compare a
-today-number against a yesterday-number. A chunk of the "teacher v6
-doubled v5" delta above is real (same-session ablation grid), but the
-absolute teacher level varies by session.
+Earlier scoreboards (CV state, pixel PPO, Dreamer, DQN) are in the
+lessons below; every number before Lesson 15 used the misaligned CV
+state.
 
-Conclusion: the biggest lever, by far, is **teacher quality** (the
-same lesson the snake project learned): upgrading SmartHeuristic v5 →
-v6 (1010 → 1932, from an ablation-verified interaction of Dijkstra
-routing × the under-bag transit rule) lifted the *unchanged* pixel
-BC+DAGGER recipe from 629.5 to 1042 — and made DAGGER iterations
-productive for the first time. PPO on top of pixel BC remains
-net-negative (851 best vs 1042 BC) even with a separate critic,
-value-head warmup and an annealed teacher anchor; the residual pixel
-perception errors are not something reward-driven refinement can fix.
-See **Lessons from PPO/DAGGER** below.
+## Entrypoints
+
+| Command | What it does |
+|---|---|
+| `python play.py --live` | Play yourself. S/L save/load the emulator state. |
+| `python watch.py POLICY` | Watch a policy play (inline in Kitty / Ghostty / WezTerm, else matplotlib). P pauses, +/- change speed. |
+| `python evaluate.py POLICY --episodes 20` | Score, life length, and level-1 clears over N full games. |
+| `python collect.py --out F.npz` | Record teacher-labelled traces; `--student CKPT` for DAgger. |
+| `python train_symbolic.py ...` | Symbolic-state BC (`--total-timesteps 0`) and PPO (`--load-agent`). |
+| `python train_pixel.py ...` | Pixel BC / live-teacher DAgger / PPO. |
+
+`POLICY` is `teacher`, `search`, `random`, or a checkpoint from either
+trainer (`tools/policies.py` tells them apart by their config).
 
 ## Layout
 
 | File | Purpose |
-| --- | --- |
-| `digger_env.py` | `DiggerEnv` (single env, RGBA frames, score/lives via RAM at 0x282E0/0x259F2) and `DiggerVecEnv` (in-proc for `num_envs=1`, subprocess workers for >1). Now also exposes `save_state` / `load_state` via libretro `retro_serialize`. |
-| `train_ppo.py` | Pixel PPO (NatureCNN). Supports BC from `.npz` traces *and* live teacher labeling (`--teacher-policy {smart,greedy,dodge}`), warmup phase (`--warmup-steps`), and BC-only mode (`--total-timesteps 0`). |
-| `train_ppo_symbolic.py` | Symbolic-obs PPO with the same recipe: BC traces + per-minibatch anchor + death/time penalty + resume-from-state. |
-| `tools/collect_death_states.py` | Harvests emulator save-states from N agent steps *before* each death (ring buffer of `retro_serialize` snapshots, ~1 ms / 678 KB each). Captures several lookbacks per death in one pass since collection is dominated by the ~25 s it takes the driver policy to die. `--probe` measures what fraction of the collected states a policy can escape — the ceiling for any curriculum built on them. |
-| `eval_symbolic.py` | Symbolic counterpart to `eval_checkpoint.py` (which only rebuilds the pixel NatureCNN). Runs N full 3-life games and reports **both** game score and per-life length in agent steps — the survival experiments need the second, every earlier scoreboard row quotes the first. `--policy random` / `--policy teacher` give same-session baselines. |
-| `tools/display.py` | Shared viewer for `run_digger.py`, `run_ppo.py` and `heuristic_agent --live`: Kitty graphics + Kitty keyboard protocol (key releases included) when the terminal supports it, else matplotlib. `--display {auto,kitty,mpl}`. Ctrl+C / Ctrl+Q quits the terminal viewer. |
-| `run_digger.py` | Manual play (matplotlib `--live`) + trace recording. **S / L** keys snapshot and restore emulator state (in-memory or disk via `--save-slot`). `--resume` boots straight into a saved scenario. |
-| `tools/game_state.py` | `GameState` dataclass. `extract_state_ram(mem)` reads the exact state from game RAM and is what every symbolic consumer uses (Lesson 15). `extract_state_fast(frame)` is the older vectorised CV extractor, kept for pixel-side comparisons; its tile grid is misaligned. |
-| `tools/symbolic_env.py` | `SymbolicDiggerEnv` wraps `DiggerEnv`, emits `(6, 10, 15)` mask tensors built from RAM state. Supports `shaping_coef`, `time_penalty`, and `save_state` / `load_state`. |
-| `tools/heuristic_agent.py` | `SmartHeuristic v6.3`: v5 (BFS tunnel-distance safety, LoS FIRE, turn-to-fire) + phantom filter, under-bag transit rule, Dijkstra routing (v6), fall-column hazard model from bags.c ground truth (v6.2), retreat-and-ambush firing on chasers (v6.3, same-session 1399 vs 1242). `DeathBagLogger` (`--death-log`) emits JSONL death forensics + bag timing + level-up events. Ablation knobs: `--no-phantom-filter`, `--underbag`, `--routing`, `--fire-turn-min-dist`, `--safety-cap`, `--predict-monsters`. |
-| `tools/gen_symbolic_trace.py` | Generates BC traces from a chosen heuristic into `.npz` for offline BC. (Live teacher path in `train_ppo.py` makes this optional.) |
-| `eval_checkpoint.py` / `run_ppo.py` | Headless N-game eval / matplotlib viewer for pixel `train_ppo.py` checkpoints. |
-| `tools/search_teacher.py` | `SearchTeacher`: SmartHeuristic overruled by in-emulator save/restore rollouts (Lesson 13). Strongest teacher; ~0.4 s/step. |
-| `tools/gen_search_trace.py` | Parallel search-teacher trace collector; stores 84x84, native-aspect and symbolic views per step. |
-| `tools/train_bc_traces.py` | Offline BC on search traces with a held-out file split (pixel or symbolic, optional `--prev-action`). |
-| `tools/make_report_figs.py` | Regenerates the figures in `docs/`. |
-| `interaction-log.txt` | Full chronological log of every prompt; the journey. |
+|---|---|
+| `csrc/libretro_frontend.cpp`, `setup.py`, `Makefile` | pybind11 `_libretro` binding for the DOSBox Pure core (`vendor/dosbox-pure`). `make` builds both. |
+| `digger_env.py` | `DiggerEnv`: frames, score/lives/death onset from RAM, save/load state. `DiggerVecEnv` (subprocess workers), `FrameStack`, `preprocess_uint8`. |
+| `tools/game_state.py` | `GameState` and `extract_state_ram`, the exact state read from game RAM (Lesson 15). `heading_tile`. The older CV extractor `extract_state_fast` is kept for reference only. |
+| `tools/symbolic_env.py` | `SymbolicDiggerEnv`: 13 planes per frame (below), frame stacking, egocentric option, reward shaping, `env_step_skipped`. |
+| `tools/heuristic_agent.py` | `SmartHeuristic` v6.4, the teacher (Lessons 11a, 16, 17). Headless benchmark with death forensics. |
+| `tools/search_teacher.py` | `SearchTeacher`: the heuristic overruled by emulator rollouts (Lesson 13). Stronger but 0.4 s/step. |
+| `tools/policies.py` | Loads any policy spec for `watch.py` / `evaluate.py`. |
+| `tools/display.py` | Kitty graphics + keyboard protocol viewer, matplotlib fallback. |
+| `tools/collect_death_states.py` | Save states N steps before each death; `--probe` checks escapability. |
+| `tools/make_report_figs.py` | Regenerates `docs/*.png`. |
+| `interaction-log.txt` | Every prompt, in order. |
+
+## Model architectures
+
+**Symbolic observation** (`state_to_tensor`), 13 planes of 10x15 per
+frame, 4 frames stacked into (52, 10, 15): dirt, emerald, digger,
+monster, bag, cherry (not decoded yet), heading tile, facing (4
+whole-board planes: R, U, L, D), fire ready (whole-board), bag moving.
+Everything the teacher decides from is in it (Lesson 17).
+
+**`SymbolicAgent`** (`train_symbolic.py`, ~1.3M params at 52 input
+channels): 3x conv3x3 (32, 64, 64, ReLU, padding 1) -> flatten -> FC 128
+-> linear actor (6 actions) and linear critic heads, sharing the trunk.
+`--arch iter` is a weight-tied iterative variant (232k params, used in
+the survival experiments).
+
+**Pixel `Agent`** (`train_pixel.py`): NatureCNN on 4 stacked 84x84
+frames (gray or color): conv 8x8/4 (32), 4x4/2 (64), 3x3/1 (64) -> FC
+512 -> actor and critic heads; `--separate-critic` gives the critic its
+own trunk, `--encoder-width` scales the channels.
+
+Actions: NOOP, LEFT, RIGHT, UP, DOWN, FIRE, each held for 4 emulator
+frames (`frame_skip`).
+
+## Training approaches
+
+1. **Behavioural cloning.** `collect.py` records (obs, teacher action);
+   `train_symbolic.py --total-timesteps 0 --bc-traces ... --bc-val ...`
+   fits cross-entropy and keeps the best held-out epoch. 5% noise
+   injection (`--explore`) gives off-teacher states with the teacher's
+   recovery labelled.
+2. **DAgger.** `collect.py --student CKPT` lets the student drive while
+   the teacher labels; retrain on the aggregate. Three rounds took
+   held-out accuracy from 92.4% to 93.9% (86.6% on the steps where the
+   teacher's action changes) and life length past the teacher's.
+3. **PPO fine-tune.** `train_symbolic.py --load-agent CKPT`:
+   critic-only warmup (`--value-warmup-updates`), a BC anchor to the
+   teacher labels annealed 0.3 -> 0.05, score x 0.02 as reward,
+   episodes ending at death onset, low lr / entropy, keep the best
+   checkpoint.
+4. **Pixels** (next): the same teacher labels, but the student sees
+   84x84 frames (`train_pixel.py` live-teacher DAgger).
 
 ## Lessons from PPO / DAGGER experiments
 
@@ -95,7 +112,7 @@ average to noise over a random-action rollout.
 
 ### 2. Symbolic obs is a 3× improvement out of the box
 
-Same trainer (`train_ppo_symbolic.py`), same recipe, only the
+Same trainer (`train_symbolic.py`), same recipe, only the
 observation changed: pixel-PPO plateaued at 75, symbolic-PPO at 250.
 The encoder no longer has to solve "where is everything"; it can spend
 all its capacity on "what to do." But 250 is still a **local-optimum
@@ -345,7 +362,7 @@ real curriculum should:
 | 20 | **6/12** | 3/12 |
 
 Same-process and cross-process save/restore both work, so a scenario
-recorded by hand in `run_digger.py --live` (S with `--save-slot`) is a
+recorded by hand in `play.py --live` (S with `--save-slot`) is a
 valid `--resume-from` start again.
 
 ### 12d. Deaths are now detected at onset, not at the lives decrement
@@ -360,7 +377,7 @@ flag across sub-frames. Without that, 3 deaths in 4 were dropped.
 Measured with NOOP: an episodic life went from ~730 to ~350 emulator
 frames, and the difference is all dead time.
 
-**Life lengths before this change are inflated.** `eval_symbolic.py`
+**Life lengths before this change are inflated.** `evaluate.py`
 used to measure from one lives drop to the next, which counts the
 previous death sequence. Measured at onset, a random policy's life is
 **~96 agent steps** (was 194). The "life length" column in the
@@ -374,7 +391,7 @@ all with onset-terminated episodes, score x 0.02 (emerald = +0.5),
 shaping off, and a v6.4 teacher anchor annealed 0.3 -> 0.05. Near-death
 scenarios were collected with the BC clone driving and anchored on death
 onset: 320 for training (`onset_bc_train.pkl`) and 120 held out
-(`onset_bc_heldout.pkl`, different run). Full games: `eval_symbolic.py`,
+(`onset_bc_heldout.pkl`, different run). Full games: `evaluate.py`,
 30 games (teacher 20). Held-out: survive 60 steps from each scenario.
 
 | Policy | Score | Life (steps) | L1 cleared without dying | L1 cleared | Held-out escapes |
@@ -435,7 +452,7 @@ cycles:
   RAM and calls the emulator. Next is distilling it, starting with
   symbolic BC/DAgger on its labels, then pixels.
 
-    python eval_symbolic.py --policy search --episodes 2   # ~10 min/game
+    python evaluate.py search --episodes 2   # ~10 min/game
 
 ### 14. Imitating the search teacher: accuracy rises, survival doesn't (2026-10-04)
 
@@ -553,6 +570,66 @@ retreats. Same session, 20 games each, RAM state:
 | plan from rounded tile | 2124 (2233 / 2015) | 234 | 20/20 | 1/20 |
 | **plan from heading tile** | **2783** (2945 / 2620) | **263** | 20/20 | **6/20** |
 
+### 17. A BC student now plays about as well as the teacher (2026-11-11)
+
+The first pure-imitation run on exact (RAM) state. Changes that made the
+teacher fully imitable:
+
+- **The observation carries everything the teacher decides from.**
+  `state_to_tensor` grew from 6 to 13 planes: heading tile (what the
+  teacher plans from, Lesson 16), facing (4 whole-board planes), fire
+  ready (whole-board plane, from the game's recharge state), and bag
+  moving. With 4-frame stacking the obs is (52, 10, 15).
+- **No hidden teacher state for firing.** On RAM state `SmartHeuristic`
+  gates FIRE on the game's own recharge (`DiggerPos.can_fire`) instead of
+  its private 50-step countdown. Same session, 20 games: 3098 vs 2931
+  score, 278 vs 269 life, 6/20 vs 9/20 clean L1 (within noise).
+- **Noise injection when collecting.** `gen_symbolic_trace --explore
+  0.05` plays a random action 5% of the time but always records the
+  teacher's label. Students see off-teacher states with the recovery
+  labelled. Parallel collectors also diverge this way; the emulator is
+  deterministic.
+- **Held-out BC accuracy.** `train_symbolic --bc-val` reports
+  per-epoch held-out accuracy and accuracy on steps where the teacher's
+  action changes, and keeps the best epoch.
+
+8 collectors x 25k steps (~2 min). 175k train / 25k held out, default CNN,
+20 epochs: train acc 99.2%, held-out 92.4%, held-out at action changes
+80.5%. Full games, same session:
+
+| Policy | Score | Life (steps) | L1 cleared | L1 cleared without dying |
+|---|---:|---:|---:|---:|
+| Teacher v6.4 (RAM, game recharge) | 3098 | 278 | 20/20 | 6/20 |
+| **BC student, sampled** | **2765** (89%) | **259** | 20/20 | **8/20** |
+| BC student, argmax | 2395 | 248 | 10/10 | 2/10 |
+
+Argmax is deterministic, so both seeds replay the same 10 games. It
+is worse than sampling, likely because a wrong argmax repeats in a
+deterministic loop, while sampling breaks out. The 99% vs 92% gap says
+more data (or DAgger on student states) is the next lever.
+
+### 18. DAgger lifts the student to the teacher's level (2026-11-11)
+
+Three DAgger rounds on top of `bc_v1`. Each round, 8 collectors x 25k
+steps let the previous student drive (sampled, 5% random) while the
+teacher labels every state (`collect.py --student`). A fresh model is
+then trained on all traces so far for 15 epochs. Held out: the teacher's
+`bc_v1_7` plus each round's student-driven trace 7.
+
+| Student | Train samples | Held-out acc | Acc at action changes | Score | Life | L1 clean |
+|---|---:|---:|---:|---:|---:|---:|
+| `bc_v1` | 175k | 92.4% | 80.5% | 2765 | 259 | 8/20 |
+| `dagger1` | 350k | 92.0% | 82.7% | 2798 | 257 | 4/10 |
+| `dagger2` | 525k | 93.3% | 85.1% | 3280 | 312 | 5/10 |
+| `dagger3` | 700k | 93.9% | 86.6% | 3115 | 314 | 6/10 |
+| teacher (same day) | | | | 3098 | 278 | 6/20 |
+
+DAgger rounds are 10 games, one seed, so score differences between
+rounds are within noise. Life length is the clearest signal: about 13%
+above the teacher from round 2 on. The gain sits on the hard steps
+(accuracy at action changes +6 points), where the student previously
+drifted off the teacher's state distribution.
+
 ## Lessons ported from ../snake (2026-08-31)
 
 The snake project ran the same recipe on a much cheaper simulator and
@@ -613,7 +690,7 @@ teacher, and whether it does so by playing well or by hiding.
 ### Result: survival-only reward is strictly dominated (2026-08-31)
 
 Six 500k-step arms, all launched the same session, evaluated the same
-session with `eval_symbolic.py` over 20 full 3-life games each
+session with `evaluate.py` over 20 full 3-life games each
 (stochastic sampling). Life length is agent steps between deaths, n=60
 lives per row.
 
@@ -702,215 +779,81 @@ most of the way. It also re-frames every PPO result here — the bar for
 
 ## How to run
 
-### Watch the heuristic play
+Build once: `make` (DOSBox Pure core + pybind11 extension into `.venv`).
+
+### Watch / evaluate
 
 ```bash
-python -m tools.heuristic_agent --live --smart   # Kitty/Ghostty/WezTerm: inline in the terminal
-python -m tools.heuristic_agent --live --smart --display mpl   # force a matplotlib window
-python -m tools.heuristic_agent --episodes 10 --no-episodic-life --smart   # ~1475 mean
+python watch.py teacher                     # the teacher
+python watch.py data/checkpoints/dagger3/ppo_sym_final.pt --overlay
+python evaluate.py teacher --episodes 20    # same-session baseline
+python evaluate.py data/checkpoints/dagger3/ppo_sym_final.pt --episodes 20
 ```
 
-### BC + DAGGER with the v6 teacher (the best pixel recipe: 1042 ±50)
+### Symbolic BC -> DAgger -> PPO (the current recipe)
 
 ```bash
-python train_ppo.py \
-  --total-timesteps 0 \
-  --warmup-steps 100000 --warmup-epochs 20 \
-  --dagger-iters 3 --dagger-collect-steps 25000 --dagger-epochs 5 \
-  --teacher-policy smart --bc-batch-size 256 \
-  --episodic-life --run-name pixel_bc_v6teacher
+# 1. BC on teacher traces (~2 min to collect 200k steps on 8 cores).
+for i in $(seq 0 7); do
+  python collect.py --out data/traces/bc_v1_$i.npz --steps 25000 \
+      --explore 0.05 --seed $i &
+done; wait
+python train_symbolic.py --total-timesteps 0 --bc-epochs 20 \
+  --bc-traces data/traces/bc_v1_{0..6}.npz --bc-val data/traces/bc_v1_7.npz \
+  --run-name bc_v1
 
-# Then run a tighter eval (the in-trainer 10-ep number is too noisy):
-python eval_checkpoint.py \
-  data/checkpoints/pixel_bc_v6teacher/ppo_digger_bc_only.pt --episodes 50
+# 2. DAgger round k: the previous student drives, the teacher labels,
+#    retrain on everything (k = 1, 2, 3; see Lesson 18).
+for i in $(seq 0 7); do
+  python collect.py --out data/traces/dagger1_$i.npz --steps 25000 \
+      --explore 0.05 --seed $((100+i)) \
+      --student data/checkpoints/bc_v1/ppo_sym_final.pt &
+done; wait
+python train_symbolic.py --total-timesteps 0 --bc-epochs 15 \
+  --bc-traces data/traces/{bc_v1_{0..6},dagger1_{0..6}}.npz \
+  --bc-val data/traces/{bc_v1_7,dagger1_7}.npz --run-name dagger1
+
+# 3. PPO fine-tune.
+python train_symbolic.py --total-timesteps 2000000 \
+  --load-agent data/checkpoints/dagger3/ppo_sym_final.pt \
+  --value-warmup-updates 10 --bc-epochs 0 \
+  --bc-traces data/traces/dagger3_{0..7}.npz \
+  --bc-anchor-coef 0.3 --bc-anchor-final 0.05 \
+  --score-weight 0.02 --shaping-coef 0 --lr 1e-4 \
+  --ent-coef 0.001 --ent-coef-final 0.0005 \
+  --save-best --best-metric score --run-name ppo_ft1
 ```
 
-### PPO on top of the BC checkpoint (evals below BC; see Lesson 11c)
+### Near-death scenarios
 
 ```bash
-python train_ppo.py \
-  --total-timesteps 600000 \
-  --load-agent data/checkpoints/pixel_bc_v6teacher/ppo_digger_bc_only.pt \
-  --separate-critic \
-  --warmup-steps 25000 --warmup-epochs 5 --bc-value \
-  --teacher-policy smart --bc-anchor-coef 0.3 --bc-anchor-final 0.0 \
-  --bc-batch-size 256 --episodic-life --save-best \
-  --run-name pixel_ppo_v6teacher
-```
-
-### Symbolic BC clone of the teacher (best ML result: 1175 ±84)
-
-```bash
-python -m tools.gen_symbolic_trace --out data/traces/sym_smart_v64_60k.npz \
-    --steps 60000 --teacher smart --frame-stack 4
-
-# --total-timesteps 0 runs BC and skips PPO entirely.
-python train_ppo_symbolic.py --total-timesteps 0 \
-  --bc-traces data/traces/sym_smart_v64_60k.npz --bc-epochs 10 \
-  --run-name ppo_sym_bc_v64
-
-python eval_symbolic.py data/checkpoints/ppo_sym_bc_v64/ppo_sym_final.pt \
-    --episodes 20 --label bc_only
-# Always collect same-session baselines alongside it -- cross-session
-# numbers are not comparable (see the drift caveat above):
-python eval_symbolic.py --policy teacher --episodes 20
-python eval_symbolic.py --policy random  --episodes 20
-```
-
-### Survival-only symbolic PPO (score-blind) — negative result, see above
-
-```bash
-python train_ppo_symbolic.py --total-timesteps 500000 \
-  --score-weight 0 --shaping-coef 0 --survival-reward 0.01 \
-  --gamma 0.997 --max-episode-steps 2000 \
-  --save-best --best-metric length --run-name ppo_sym_surv_alloc
-
-# Same objective, egocentric obs (19x29 digger-centred canvas):
-#   ... --egocentric --run-name ppo_sym_surv_ego
-# Same again on the 232k-param weight-tied iterator:
-#   ... --egocentric --arch iter --run-name ppo_sym_surv_iter
-```
-
-### Symbolic PPO with BC pretrain + anchor (the best symbolic recipe)
-
-```bash
-# 1. Generate offline BC trace from teacher
-python -m tools.gen_symbolic_trace --out data/traces/sym_smart_50k.npz \
-    --steps 50000 --teacher smart --frame-stack 4
-
-# 2. Train
-python train_ppo_symbolic.py \
-  --total-timesteps 500000 --num-steps 256 \
-  --bc-traces data/traces/sym_smart_50k.npz \
-  --bc-epochs 10 --bc-batch-size 256 \
-  --bc-anchor-coef 0.5 --bc-anchor-final 0.05 \
-  --death-penalty 100 --time-penalty 0.01 \
-  --shaping-coef 0.5 --frame-stack 4 \
-  --force-cpu --run-name ppo_sym_bc_v1
-```
-
-### Capture near-death scenarios and replay/train from them
-
-The capture side harvests emulator save-states from N agent steps
-*before* each death; the replay side either probes them or trains from
-them. `--lookbacks` takes a list because all of them come out of one
-ring buffer — collection is dominated by the ~25 s it takes the driver
-policy to die, so extra lookbacks are free.
-
-```bash
-# 1. CAPTURE. 80 deaths x 4 lookbacks = 320 scenarios (~217 MB).
-#    --policy ckpt collects states the *student* dies in (on-distribution);
-#    --policy teacher / random also work.
-python -m tools.collect_death_states \
-  --out data/scenarios/death_bcclone_far.pkl \
+# Capture save states N steps before each death, then check that a policy
+# can escape them at all before training on them (Lesson 12b).
+python -m tools.collect_death_states --out data/scenarios/deaths.pkl \
   --deaths 80 --lookbacks 15,25,40,60 \
-  --policy ckpt --checkpoint data/checkpoints/ppo_sym_bc_v64/ppo_sym_final.pt
-
-# 2. PROBE -- ALWAYS DO THIS BEFORE TRAINING. Replays each scenario and
-#    reports, per lookback, what fraction the policy escapes.
-python -m tools.collect_death_states \
-  --out data/scenarios/death_bcclone_far.pkl --probe \
-  --policy ckpt --checkpoint data/checkpoints/ppo_sym_bc_v64/ppo_sym_final.pt \
-  --probe-steps 30 --probe-limit 120
-
-# 3. TRAIN from the scenario set. Each reset() samples one uniformly.
-python train_ppo_symbolic.py --total-timesteps 400000 \
-  --resume-from data/scenarios/death_bcclone_far.pkl \
-  --resume-prob 0.5 \
-  --load-agent data/checkpoints/ppo_sym_bc_v64/ppo_sym_final.pt \
-  --score-weight 0 --shaping-coef 0 --survival-reward 0.01 \
-  --gamma 0.99 --max-episode-steps 40 \
-  --save-best --best-metric length --run-name ppo_sym_deathcur
+  --policy ckpt --checkpoint data/checkpoints/dagger3/ppo_sym_final.pt
+python -m tools.collect_death_states --out data/scenarios/deaths.pkl --probe \
+  --policy ckpt --checkpoint data/checkpoints/dagger3/ppo_sym_final.pt
+# Train with --resume-from data/scenarios/deaths.pkl --resume-prob 0.2
 ```
-
-**Read the probe output before training on the set.** A survival rate of
-0% at *every* lookback with *identical* steps-to-death across policies
-means the states are inside the death sequence and no action can change
-the outcome (Lesson 12b) — training on them produces a guaranteed null.
-Raise `--lookbacks` until the rate goes above zero, and use the shortest
-lookback that does.
-
-Two knobs that matter:
-
-- `--resume-prob 0.5` mixes ordinary level-start episodes back in.
-  Training purely on near-death states teaches escape at the cost of
-  forgetting the rest of the game.
-- **Do not add a BC anchor here.** These are precisely the states where
-  the driver policy's action was wrong; anchoring to it re-teaches the
-  mistake. Use `--load-agent` for the init and leave
-  `--bc-anchor-coef` at 0.
 
 ### Save / restore game state
 
 ```bash
-# Play to an interesting scenario, press S, close window
-python run_digger.py --live --save-slot scenarios/right_edge.pkl
-
-# Boot straight back into that scenario
-python run_digger.py --live --save-slot scenarios/right_edge.pkl --resume
-
-# Train PPO from that scenario
-python train_ppo_symbolic.py --resume-from scenarios/right_edge.pkl --force-cpu \
-  --total-timesteps 500000 --run-name ppo_sym_right_edge
+python play.py --live --save-slot data/save/right_edge.pkl   # S saves
+python play.py --live --save-slot data/save/right_edge.pkl --resume
+python train_symbolic.py --resume-from data/save/right_edge.pkl ...
 ```
 
-## Open paths
+## Key constants
 
-1. ~~DAGGER iterations on the BC-only pixel model~~ — done with the v6
-   teacher: 1042 ±50 ("plausibly reach 1000+" confirmed).
-2. **Symbolic BC + PPO with the v6 teacher** — the old symbolic recipe
-   (891) was built on v5 traces. Symbolic BC reaches 95.8% teacher
-   accuracy and PPO refinement is net-*positive* there (Lesson 5); with
-   a 1932-mean teacher the symbolic path could plausibly clear 1500.
-   Cheapest high-upside experiment left.
-3. **Higher-resolution pixel obs** (`--obs-size 168`) — 4× more pixels
-   per tile; digger sprite goes from 1–2 px to 4 px. The 92% pixel BC
-   accuracy ceiling (unchanged across both teachers) is where the next
-   pixel gain lives; more DAGGER rounds won't move it (rollout
-   agreement was still only 64% after three).
-4. **More / adaptive DAGGER rounds** — mid-evals were still climbing at
-   iter 3 (755 → 965 → 1190). Snake's rule applies: keep going while
-   rollout agreement rises, early-stop when it stalls.
-5. **Curriculum from saved scenarios** — capture "stuck at right edge"
-   states via `--live S`, train from those. `--resume-from` already
-   wired in `train_ppo_symbolic.py`.
-
-## Known open problems (from the heuristic era)
-
-Both long-standing teacher problems were closed by SmartHeuristic v6
-(see Lesson 11a): phantom border monsters are filtered by the
-they-can't-be-in-dirt rule (teacher-side; `extract_state_fast` still
-emits them, so symbolic obs are unchanged), and the "don't dig under a
-bag" rule is wired as the under-bag transit rule. One caveat inherited
-by the phantom filter: *hobbins* genuinely dig through dirt, so the
-filter also blinds the teacher to a hobbin mid-dirt; level 1 is
-nobbin-dominated so this is currently a good trade
-(`--no-phantom-filter` to ablate).
-
-## Key constants worth knowing
-
-- Tile grid: 15 cols × 10 rows (`MWIDTH`, `MHEIGHT` in `game_state.py`).
-- Score RAM offset: `0x282E0` (int32 LE). Lives: `0x259F2` (uint8).
-- Frame dimensions: 640×400 RGBA. Score bar takes top 32 px; play area is `(368, 640)`.
-- Palette: exactly 11 RGB triples, no antialiasing. See `PAL_*` constants in `game_state.py`.
-- `frame_skip = 4`, `frame_stack = 4`, `obs_size = 84` for pixel; none for symbolic.
-- Action space: `{NOOP, LEFT, RIGHT, UP, DOWN, FIRE}` with FIRE = F1 in the libretro keyboard layout.
-- `BASE_OBS_CHANNELS = 6` for symbolic: dirt / emerald / digger / monster / bag / cherry.
-
-## Recent significant commits
-
-- `743ce33` — DAGGER iterations (`--dagger-iters`) for BC-only mode
-- `f01ff07` — BC-only mode (`--total-timesteps 0` skips PPO)
-- `0d3ee6d` — BC warmup phase before PPO (`--warmup-steps`, `--warmup-epochs`)
-- `75f84f5` — live teacher labeling (`--teacher-policy`) for pixel DAGGER
-- `9bdcf11` — symbolic PPO: BC pretrain + anchor + reward shaping knobs
-- `3c7dd75` — symbolic PPO `--resume-from <pickle>` for scenario training
-- `ca15ddf` — `run_digger.py --live` S/L key bindings for state save/restore
-- `d0747e1` — `DiggerEnv.save_state` / `load_state` via libretro serialize
-- `3e4d51f` — MPS-vs-CPU diagnostic probes (rules out framework bug)
-- `0bc186e` — symbolic-obs PPO trainer
-- `d5566e1` — SmartHeuristic v5: dirt-aware FIRE LoS + safe turn-to-fire
-- `bb41a87` — digger direction + falling-bag detection + turn-to-fire
-
-The `interaction-log.txt` has every prompt in chronological order if
-you want to retrace specific decisions.
+- Tile grid: 15 cols x 10 rows. In game coords (320x200) tile (h, v) is
+  at x = h*20 + 12, y = v*18 + 18; on the 640x400 frame that is 40x36 px
+  tiles from (24, 36).
+- RAM (region 0): score `0x282E0` (int32), digger record `0x259C8`,
+  emeralds `0x25A3E`, monsters `0x25AD6`, bags `0x25D1A`, dirt field
+  `0x2600C` (layouts in Lesson 15).
+- `frame_skip = 4`, `frame_stack = 4`; pixel `obs_size = 84`.
+- Actions `{NOOP, LEFT, RIGHT, UP, DOWN, FIRE}`; FIRE is F1.
+- The game turns the digger only at tile boundaries (`digger.c`
+  updatedigger): plan from `heading_tile`, not the rounded tile.

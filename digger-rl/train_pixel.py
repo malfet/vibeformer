@@ -810,7 +810,7 @@ def parse_args() -> Config:
     p.add_argument("--death-penalty", type=float, default=Config.death_penalty,
                    help="subtract this from reward on every life loss (default 0)")
     p.add_argument("--bc-traces", type=str, nargs="+", default=[],
-                   help="one or more .npz playtraces from run_digger "
+                   help="one or more .npz playtraces from play.py "
                         "--record-playtrace; if set, BC-pretrain the actor "
                         "before PPO starts")
     p.add_argument("--bc-epochs", type=int, default=Config.bc_epochs,
@@ -881,7 +881,7 @@ def parse_args() -> Config:
                         "Must match the trace's color flag when using --bc-traces.")
     p.add_argument("--run-name", type=str, default="",
                    help="subdir under data/checkpoints/ for this run; needed "
-                        "to run several train_ppo invocations in parallel "
+                        "to run several train_pixel invocations in parallel "
                         "without checkpoint filename collisions")
     a = p.parse_args()
     return Config(

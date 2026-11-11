@@ -373,7 +373,7 @@ class DiggerEnv:
             for _ in range(3):
                 self._core.run()
         # Wrapper fields are tolerated as missing: a state snapshot from
-        # run_digger.py --live S only contains {core, held_keys} because
+        # play.py --live S only contains {core, held_keys} because
         # the live viewer talks to the raw libretro core, not DiggerEnv.
         # When the field is absent, recompute from the now-restored
         # emulator RAM so the env stays consistent.

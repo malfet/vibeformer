@@ -716,6 +716,32 @@ def _ram_tile(x: int, y: int) -> tuple[int, int]:
     return col, row
 
 
+def heading_tile(digger: DiggerPos) -> tuple[int, int, bool]:
+    """(row, col, mid_tile): the tile to plan from, i.e. the tile the
+    digger is moving into, and whether it is between tiles.
+
+    The game only accepts a turn at a tile boundary (digger.c
+    updatedigger: vertical needs rx == 0, horizontal needs ry == 0);
+    a perpendicular key held mid-tile keeps the digger going and
+    turns it at the next boundary. So mid-tile, every option except
+    reversing starts from the tile it is heading into. Planning from
+    the *rounded* tile instead flips the plan whenever the sprite
+    crosses a tile midpoint, which made the agent oscillate.
+    """
+    if digger.x is None:                  # CV state: no sub-tile info
+        return digger.row, digger.col, False
+    rx, ry = (digger.x - 12) % 20, (digger.y - 18) % 18
+    h, v = (digger.x - 12) // 20, (digger.y - 18) // 18
+    # Clamped: the digger has been seen facing DOWN with y past the last
+    # row's aligned y = 180 (an eval crashed on row 10); there is no
+    # further tile to head into.
+    if rx:
+        return v, min(MWIDTH - 1, h + 1 if digger.dir == DIR_RIGHT else h), True
+    if ry:
+        return min(MHEIGHT - 1, v + 1 if digger.dir == DIR_DOWN else v), h, True
+    return v, h, False
+
+
 def extract_state_ram(mem: bytes) -> GameState:
     """GameState straight from game RAM (`core.read_memory_region(0)`).
 
@@ -765,6 +791,12 @@ def extract_state_ram(mem: bytes) -> GameState:
 
 # ---- Visualization helper -------------------------------------------------
 
+def _frame_tile_center(col: int, row: int) -> tuple[int, int]:
+    """Centre of tile (col, row) in frame pixels, in the game's own
+    geometry (40x36 px tiles from (24, 36); see the RAM extractor)."""
+    return 24 + 40 * col + 20, 36 + 36 * row + 18
+
+
 def render_overlay(frame_rgba: np.ndarray, state: GameState,
                     show_digger: bool = False,
                     show_monsters: bool = True,
@@ -790,23 +822,23 @@ def render_overlay(frame_rgba: np.ndarray, state: GameState,
                 out[cy + dy, cx] = color
 
     if show_digger and state.digger is not None and state.digger.present:
-        cx, cy = tile_center(state.digger.col, state.digger.row)
+        cx, cy = _frame_tile_center(state.digger.col, state.digger.row)
         cross(cx, cy, (255, 0, 255), sz=3)
     if show_monsters:
         for m in state.monsters:
             if m.cx is not None and m.cy is not None:
                 cx, cy = m.cx, m.cy
             else:
-                cx, cy = tile_center(m.col, m.row)
+                cx, cy = _frame_tile_center(m.col, m.row)
             cross(cx, cy, (0, 0, 255), sz=4)
     if show_bags:
         for b in state.bags:
-            cx, cy = tile_center(b.col, b.row)
+            cx, cy = _frame_tile_center(b.col, b.row)
             cross(cx, cy, (255, 128, 0), sz=3)
     if show_emeralds:
         for r in range(MHEIGHT):
             for c in range(MWIDTH):
                 if state.emeralds[r, c]:
-                    cx, cy = tile_center(c, r)
+                    cx, cy = _frame_tile_center(c, r)
                     cross(cx, cy, (0, 255, 255), sz=1)
     return out

@@ -18,7 +18,7 @@ Rollouts step the raw DiggerEnv and run the CV extractor only when the
 heuristic has to decide (every `decide_every` agent steps), since the
 extractor costs ~3x an emulator frame.
 
-    python eval_symbolic.py --policy search --episodes 10
+    python evaluate.py search --episodes 10
 """
 
 from __future__ import annotations

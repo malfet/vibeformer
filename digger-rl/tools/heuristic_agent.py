@@ -1,4 +1,4 @@
-"""Hand-coded baseline policy + optional matplotlib viewer.
+"""Hand-coded teacher policies (SmartHeuristic is the one in use).
 
 Digger digs through everything but bags, so no A* needed -- the agent
 greedily takes the action that moves it one Manhattan step closer to
@@ -12,14 +12,12 @@ the nearest emerald, with a small overlay of threat-aware behaviour:
             via `prev_dir`), press FIRE. The bullet travels along the
             facing direction, so this hits the threat.
 
-Headless usage (SmartHeuristic is the default policy; --greedy /
---dodge select the older baselines):
+Headless benchmark with death forensics (--death-log); --greedy /
+--dodge select the older baselines:
     python -m tools.heuristic_agent --episodes 5 --no-episodic-life
 
-Interactive viewer (matplotlib window showing live gameplay with
-detected GameState overlaid as markers, plus title with current
-action / score / lives):
-    python -m tools.heuristic_agent --live
+To watch it play: python watch.py teacher. To score it alongside a
+student: python evaluate.py teacher.
 """
 
 from __future__ import annotations
@@ -39,7 +37,7 @@ import numpy as np
 
 from digger_env import DiggerEnv
 from tools.game_state import (DIR_DOWN, DIR_LEFT, DIR_NONE, DIR_RIGHT, DIR_UP,
-                                MHEIGHT, MWIDTH, render_overlay, tile_center)
+                              MHEIGHT, MWIDTH, heading_tile)
 from tools.symbolic_env import SymbolicDiggerEnv
 
 _DIR_TO_ACTION = {
@@ -322,33 +320,10 @@ class SmartHeuristic:
     # and dropping it blinds the agent to the enemy about to kill it.
     _PHANTOM_KEEP_DIST: int = 2
 
-    @staticmethod
-    def _heading_tile(digger) -> tuple[int, int, bool]:
-        """(row, col, mid_tile): the tile to plan from, i.e. the tile the
-        digger is moving into, and whether it is between tiles.
-
-        The game only accepts a turn at a tile boundary (digger.c
-        updatedigger: vertical needs rx == 0, horizontal needs ry == 0);
-        a perpendicular key held mid-tile keeps the digger going and
-        turns it at the next boundary. So mid-tile, every option except
-        reversing starts from the tile it is heading into. Planning from
-        the *rounded* tile instead flips the plan whenever the sprite
-        crosses a tile midpoint, which made the agent oscillate.
-        """
-        if digger.x is None:                  # CV state: no sub-tile info
-            return digger.row, digger.col, False
-        rx, ry = (digger.x - 12) % 20, (digger.y - 18) % 18
-        h, v = (digger.x - 12) // 20, (digger.y - 18) // 18
-        if rx:
-            return v, h + 1 if digger.dir == DIR_RIGHT else h, True
-        if ry:
-            return v + 1 if digger.dir == DIR_DOWN else v, h, True
-        return v, h, False
-
     def _decide(self, state) -> int:
         if state.digger is None or not state.digger.present:
             return DiggerEnv.NOOP
-        dr, dc, mid_tile = self._heading_tile(state.digger)
+        dr, dc, mid_tile = heading_tile(state.digger)
         # Prefer the CV-detected facing; fall back to the action-history
         # `prev_dir` when CV reports DIR_NONE (sprite mid-animation).
         cv_dir = getattr(state.digger, "dir", DIR_NONE)
@@ -422,7 +397,12 @@ class SmartHeuristic:
         # effect), then next step the facing matches and we FIRE.
         # Never while inside a fall column: a lit fuse outranks any
         # monster; keep moving.
-        if self._fire_cd == 0 and not in_hazard:
+        # From RAM, the game's own recharge says when FIRE works; the
+        # agent-side countdown is only a stand-in for CV state, and it is
+        # hidden state an imitating student could not see.
+        fire_ready = (state.digger.can_fire if state.digger.x is not None
+                      else self._fire_cd == 0)
+        if fire_ready and not in_hazard:
             target_dir = self._best_fire_direction(state, dr, dc, monsters)
             # target_dir must be a real direction: at episode start both
             # target_dir and facing are NOOP, and a bare `==` makes the
@@ -481,7 +461,7 @@ class SmartHeuristic:
         surcharge = (underbag_tiles if self.underbag == "transit" else set())
         # An emerald in the tile we are already moving into is as good as
         # eaten. Left as a target, planning from that tile (see
-        # _heading_tile) makes turning back look better than going on.
+        # heading_tile) makes turning back look better than going on.
         emeralds = state.emeralds
         if mid_tile and emeralds[dr, dc]:
             emeralds = emeralds.copy()
@@ -1099,85 +1079,6 @@ def run_headless(args) -> None:
     env.close()
 
 
-def run_live(args) -> None:
-    """Watch the policy play (tools/display.py), optional GameState overlay."""
-    from tools.display import open_display
-
-    env = SymbolicDiggerEnv(max_steps=10**9,
-                            episodic_life=not args.no_episodic_life)
-    if args.dodge:
-        policy = DodgeMonsters()
-    elif args.greedy:
-        policy = GreedyEmerald()
-    else:
-        policy = SmartHeuristic(args.dodge_range, args.fire_range,
-                                args.fire_cooldown,
-                                phantom_filter=not args.no_phantom_filter,
-                                underbag=args.underbag,
-                                routing=args.routing,
-                                fire_turn_min_dist=args.fire_turn_min_dist,
-                                safety_cap=args.safety_cap,
-                                predict_monsters=args.predict_monsters)
-
-    def frame():
-        raw = env._env._core.get_frame()
-        if not args.overlay:
-            return raw
-        return render_overlay(raw, env._last_state,
-                              show_digger=args.show_digger,
-                              show_emeralds=args.show_emeralds)
-
-    obs = env.reset()
-    disp = open_display(args.display, "DIGGER heuristic")
-    disp.show(frame())
-
-    target_fps = 70.087
-    target_dt = (1.0 / target_fps) * args.frame_skip
-    last_wall = time.monotonic()
-    fps_ema = 1.0 / target_dt
-    step_no = 0
-    seen_alive = False
-    game_over = ""
-    policy.reset()
-
-    while disp.is_open:
-        disp.poll()                     # drain keys; Ctrl+C closes Kitty
-        now = time.monotonic()
-        elapsed = now - last_wall
-        last_wall = now
-
-        action = policy(env._last_state)
-
-        done = False
-        info = {}
-        for _ in range(args.frame_skip):
-            obs, r, done_, info = env.step(action)
-            if done_: done = True; break
-        step_no += args.frame_skip
-
-        disp.show(frame())
-
-        score = info.get("score", 0)
-        lives = info.get("lives", 0)
-        if lives > 0: seen_alive = True
-        if elapsed > 0:
-            fps_ema = 0.9 * fps_ema + 0.1 * (args.frame_skip / elapsed)
-        disp.set_title(
-            f"score {score:>6d} -- lives {lives} -- "
-            f"a={ACTION_NAMES[action]:<5s} -- {fps_ema:5.1f} fps -- step {step_no}")
-
-        if done and seen_alive and lives == 0:
-            game_over = f"game over: score {score} steps {step_no}"
-            break
-        slack = target_dt - (time.monotonic() - now)
-        if slack > 0: time.sleep(slack)
-
-    disp.close()
-    if game_over:
-        print(game_over)
-    env.close()
-
-
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--episodes", type=int, default=5)
@@ -1227,19 +1128,6 @@ def parse_args():
     p.add_argument("--death-log", type=str, default="",
                    help="append JSONL death-forensics + bag-timing events "
                         "to this file (headless mode only)")
-    p.add_argument("--live", action="store_true",
-                   help="watch the policy play")
-    p.add_argument("--display", choices=("auto", "kitty", "mpl"),
-                   default="auto",
-                   help="--live viewer: Kitty graphics in the terminal, "
-                        "a matplotlib window, or auto-detect (default)")
-    p.add_argument("--overlay", action="store_true",
-                   help="draw small markers for detected monsters/bags "
-                        "(off by default; the digger sprite is already visible)")
-    p.add_argument("--show-digger", action="store_true",
-                   help="with --overlay, also mark the digger position")
-    p.add_argument("--show-emeralds", action="store_true",
-                   help="with --overlay, mark every detected emerald")
     return p.parse_args()
 
 
@@ -1247,10 +1135,7 @@ def main() -> None:
     args = parse_args()
     if sum((args.dodge, args.smart, args.greedy)) > 1:
         raise SystemExit("--dodge, --smart and --greedy are mutually exclusive")
-    if args.live:
-        run_live(args)
-    else:
-        run_headless(args)
+    run_headless(args)
 
 
 if __name__ == "__main__":

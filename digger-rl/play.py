@@ -15,7 +15,7 @@ Default: run N frames headlessly and dump a PPM screenshot.
          first frame. Lets you boot directly into a saved scenario.
 --record-playtrace PATH: while in --live, snapshot at frame-skip cadence and
          save (frames, actions, rewards, lives) to PATH.npz for behavioural
-         cloning warmup in train_ppo.py.
+         cloning warmup in train_pixel.py.
 """
 
 import argparse
@@ -436,9 +436,9 @@ def main():
                         "frames and save to this .npz path on exit")
     p.add_argument("--frame-skip", type=int, default=4,
                    help="emulator frames per recorded sample (must match the "
-                        "frame_skip used in train_ppo; default 4)")
+                        "frame_skip used in train_pixel; default 4)")
     p.add_argument("--obs-size", type=int, default=84,
-                   help="recorded frame resolution; matches train_ppo obs_size")
+                   help="recorded frame resolution; matches train_pixel obs_size")
     p.add_argument("--color", default=True,
                    action=argparse.BooleanOptionalAction,
                    help="record RGB frames (H,W,3); default on. "

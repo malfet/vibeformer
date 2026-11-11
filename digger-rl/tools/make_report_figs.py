@@ -51,7 +51,7 @@ def rgb(frame: np.ndarray) -> np.ndarray:
 
 
 def _ckpt_policy(path: Path):
-    from eval_symbolic import build_agent
+    from tools.policies import load_symbolic_agent as build_agent
     agent, cfg = build_agent(path, "cpu")
 
     def act(env, obs):
@@ -286,7 +286,7 @@ def fig_obs(out: Path) -> None:
         img = np.zeros(t.shape[1:] + (3,))
         colors = [(0.35, 0.22, 0.10), (0.10, 0.85, 0.35), (1.0, 1.0, 0.2),
                   (0.95, 0.25, 0.25), (0.85, 0.7, 0.1), (0.9, 0.3, 0.7)]
-        for i in range(min(ch, t.shape[0])):
+        for i in range(min(ch, t.shape[0], len(colors))):
             m = t[i] > 0.5
             for k in range(3):
                 img[..., k][m] = colors[i][k]

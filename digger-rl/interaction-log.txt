@@ -369,3 +369,18 @@ Speaking of near death scenarious - weren't those needed when we've investigated
 
 ---
 Cool, commit this
+
+---
+Ok, let's start the training to just mimick the teacher. Do you recommend using symbolic representation or pixels?
+
+---
+Let's try DAgger and then fine tune
+
+---
+Err how do I run some of those checkpoints? I tried run_ppo but it no longer works
+
+---
+I.e as part of the cleanup, can you delete somethings which are on longer relevant and consolidate entrypoints. And update Dagger RL with network arcitecture and traiing approaches
+
+---
+And I guess as next step I want to start student-teacher traiing from pixels
