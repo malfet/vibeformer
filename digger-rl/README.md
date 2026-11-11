@@ -65,6 +65,7 @@ See **Lessons from PPO/DAGGER** below.
 | `train_ppo_symbolic.py` | Symbolic-obs PPO with the same recipe: BC traces + per-minibatch anchor + death/time penalty + resume-from-state. |
 | `tools/collect_death_states.py` | Harvests emulator save-states from N agent steps *before* each death (ring buffer of `retro_serialize` snapshots, ~1 ms / 678 KB each). Captures several lookbacks per death in one pass since collection is dominated by the ~25 s it takes the driver policy to die. `--probe` measures what fraction of the collected states a policy can escape — the ceiling for any curriculum built on them. |
 | `eval_symbolic.py` | Symbolic counterpart to `eval_checkpoint.py` (which only rebuilds the pixel NatureCNN). Runs N full 3-life games and reports **both** game score and per-life length in agent steps — the survival experiments need the second, every earlier scoreboard row quotes the first. `--policy random` / `--policy teacher` give same-session baselines. |
+| `tools/display.py` | Shared viewer for `run_digger.py`, `run_ppo.py` and `heuristic_agent --live`: Kitty graphics + Kitty keyboard protocol (key releases included) when the terminal supports it, else matplotlib. `--display {auto,kitty,mpl}`. Ctrl+C / Ctrl+Q quits the terminal viewer. |
 | `run_digger.py` | Manual play (matplotlib `--live`) + trace recording. **S / L** keys snapshot and restore emulator state (in-memory or disk via `--save-slot`). `--resume` boots straight into a saved scenario. |
 | `tools/game_state.py` | `GameState` dataclass. `extract_state_ram(mem)` reads the exact state from game RAM and is what every symbolic consumer uses (Lesson 15). `extract_state_fast(frame)` is the older vectorised CV extractor, kept for pixel-side comparisons; its tile grid is misaligned. |
 | `tools/symbolic_env.py` | `SymbolicDiggerEnv` wraps `DiggerEnv`, emits `(6, 10, 15)` mask tensors built from RAM state. Supports `shaping_coef`, `time_penalty`, and `save_state` / `load_state`. |
@@ -672,7 +673,8 @@ most of the way. It also re-frames every PPO result here — the bar for
 ### Watch the heuristic play
 
 ```bash
-python -m tools.heuristic_agent --live --smart
+python -m tools.heuristic_agent --live --smart   # Kitty/Ghostty/WezTerm: inline in the terminal
+python -m tools.heuristic_agent --live --smart --display mpl   # force a matplotlib window
 python -m tools.heuristic_agent --episodes 10 --no-episodic-life --smart   # ~1475 mean
 ```
 

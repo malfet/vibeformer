@@ -1,8 +1,10 @@
 """Boot DIGGER.EXE in DOSBox Pure via libretro.
 
 Default: run N frames headlessly and dump a PPM screenshot.
---live:  open a matplotlib window, run continuously at ~70 fps emulator time,
-         and forward keyboard events from the window into the emulator.
+--live:  show the game (inline via the Kitty graphics protocol when the
+         terminal supports it, else a matplotlib window; see --display),
+         run continuously at ~70 fps emulator time, and forward keyboard
+         events into the emulator. Ctrl+C / Ctrl+Q quits the Kitty viewer.
          Keys: arrows + Enter + Space drive the game. R restarts at level 1.
          S takes a state snapshot via core.serialize() (in-memory by default,
          or to --save-slot PATH if given). L restores the most recent
@@ -26,6 +28,7 @@ import numpy as np
 
 import _libretro
 from digger_env import DiggerEnv, preprocess_uint8
+from tools.display import open_display
 
 REPO = Path(__file__).parent.resolve()
 CORE = REPO / "vendor" / "dosbox-pure" / "dosbox_pure_libretro.dylib"
@@ -52,7 +55,7 @@ def read_lives(core) -> int:
     region = core.read_memory_region(0)
     return region[LIVES_OFFSET]
 
-# Map matplotlib key-event names to libretro RETROK_* values. Single printable
+# Map display key names (matplotlib's, see tools/display.py) to libretro RETROK_* values. Single printable
 # characters are handled separately (ASCII matches RETROK for [a-z] and a few
 # others) so we only list the named/special keys here.
 _NAMED_KEYS = {
@@ -75,7 +78,7 @@ for _i in range(1, 13):
     _NAMED_KEYS[f"f{_i}"] = getattr(_libretro.RETROK, f"F{_i}")
 
 
-def matplotlib_key_to_retro(key: str | None) -> int | None:
+def key_to_retro(key: str | None) -> int | None:
     if key is None:
         return None
     k = key.lower()
@@ -159,32 +162,14 @@ def run_live(core, record_path: Path | None = None,
              frame_skip: int = 4, obs_size: int = 84,
              color: bool = False,
              save_slot_path: Path | None = None,
-             resume_at_start: bool = False) -> None:
-    import matplotlib as mpl
-    import matplotlib.pyplot as plt
-
-    # Matplotlib reserves several keys for plot navigation that would
-    # otherwise eat our keystrokes before they reach on_press:
-    #   keymap.save  : 's', 'ctrl+s'  (opens "Save figure" file dialog)
-    #   keymap.home  : 'h', 'r'       (reset axes -- collides with our R)
-    #   keymap.yscale: 'l'            (toggle log y-axis -- collides with L)
-    #   keymap.back  : 'left', 'c'    (eats LEFT arrow before our handler)
-    #   keymap.forward: 'right', 'v'  (eats RIGHT arrow before our handler)
-    #   keymap.fullscreen: 'f'        (annoying if pressed accidentally)
-    # Clear them for this process. Local to run_live so other matplotlib
-    # callers in this codebase keep the defaults.
-    for k in ("keymap.save", "keymap.home", "keymap.yscale",
-              "keymap.back", "keymap.forward", "keymap.fullscreen"):
-        mpl.rcParams[k] = []
-
+             resume_at_start: bool = False,
+             display: str = "auto") -> None:
     target_fps = core.get_av_info()[4] or 70.0
     target_dt = 1.0 / target_fps
 
     core.run()  # populate first frame
-    fig, ax = plt.subplots()
-    ax.set_axis_off()
-    img = ax.imshow(core.get_frame())
-    fig.tight_layout(pad=0)
+    disp = open_display(display, "DIGGER")
+    disp.show(core.get_frame())
 
     # Press-order list so dominant_action() can pick the most-recent arrow
     # when several are held at once.
@@ -222,7 +207,7 @@ def run_live(core, record_path: Path | None = None,
         held_order.clear()
         core.reset()
         advance_to_gameplay(core)
-        img.set_data(core.get_frame())
+        disp.show(core.get_frame())
         prev_score = read_score(core)
         sub_counter = 0
         window_reward = 0.0
@@ -291,7 +276,7 @@ def run_live(core, record_path: Path | None = None,
             # Rebuild the UI-side held_order list so subsequent
             # on_release events know what to release.
             held_order.extend(save_slot["held_keys"])
-            img.set_data(core.get_frame())
+            disp.show(core.get_frame())
             prev_score = read_score(core)
             seen_alive = read_lives(core) > 0
             notified_game_over = False
@@ -300,35 +285,31 @@ def run_live(core, record_path: Path | None = None,
         except Exception as e:
             print(f"L: load failed: {e}", flush=True)
 
-    def on_press(event):
-        if event.key and event.key.lower() == "r":
+    def on_press(key):
+        if key == "r":
             reset_emulator()
             return
-        if event.key and event.key.lower() == "s":
+        if key == "s":
             save_emulator_state()
             return
-        if event.key and event.key.lower() == "l":
+        if key == "l":
             load_emulator_state()
             return
-        retro = matplotlib_key_to_retro(event.key)
+        retro = key_to_retro(key)
         if retro is not None and retro not in held_order:
             core.set_key(retro, True)
             held_order.append(retro)
 
-    def on_release(event):
-        retro = matplotlib_key_to_retro(event.key)
+    def on_release(key):
+        retro = key_to_retro(key)
         if retro is not None and retro in held_order:
             core.set_key(retro, False)
             held_order.remove(retro)
 
-    fig.canvas.mpl_connect("key_press_event", on_press)
-    fig.canvas.mpl_connect("key_release_event", on_release)
-
-    plt.ion()
-    plt.show()
     print("Live mode. Arrows + Enter + Space drive the game. "
           "R restarts at level 1. S saves a state snapshot, L restores "
-          "the most recent snapshot. Close the window to quit.")
+          "the most recent snapshot. Close the window (or Ctrl+C in the "
+          "terminal viewer) to quit.")
 
     if resume_at_start:
         if save_slot is None:
@@ -342,13 +323,21 @@ def run_live(core, record_path: Path | None = None,
         print(f"Recording trace to {record_path} "
               f"(frame_skip={frame_skip}, obs_size={obs_size}).")
 
+    repeat_guard: set[str] = set()
     last = time.monotonic()
     fps_ema = target_fps
     frame_no = 0
-    while plt.fignum_exists(fig.number):
+    while disp.is_open:
         now = time.monotonic()
         elapsed = now - last
         last = now
+        for key, pressed in disp.poll():
+            # Key repeats arrive as extra presses; R/S/L act once per press.
+            if pressed and key in ("r", "s", "l") and key in repeat_guard:
+                continue
+            (on_press if pressed else on_release)(key)
+            if key in ("r", "s", "l"):
+                (repeat_guard.add if pressed else repeat_guard.discard)(key)
 
         # Catch up real-time emulation if matplotlib falls behind. Cap at 5
         # frames per render to avoid runaway after a stall.
@@ -372,9 +361,7 @@ def run_live(core, record_path: Path | None = None,
                     window_reward = 0.0
         frame_no += steps
 
-        img.set_data(core.get_frame())
-        fig.canvas.draw_idle()
-        fig.canvas.flush_events()
+        disp.show(core.get_frame())
 
         lives = read_lives(core)
         if lives > 0:
@@ -382,7 +369,7 @@ def run_live(core, record_path: Path | None = None,
             notified_game_over = False
         elif seen_alive and not notified_game_over:
             print(f"Game over (final score {read_score(core)}). "
-                  f"Press R to restart, close window to save & quit.",
+                  f"Press R to restart, or quit to save.",
                   flush=True)
             notified_game_over = True
 
@@ -390,10 +377,9 @@ def run_live(core, record_path: Path | None = None,
             fps_ema = 0.9 * fps_ema + 0.1 * (steps / elapsed)
         if frame_no % 30 == 0:
             rec_tag = f" -- rec {len(rec_frames)}" if record_path is not None else ""
-            fig.canvas.manager.set_window_title(
-                f"DIGGER -- score {read_score(core):6d} -- lives {lives} -- "
-                f"emu {fps_ema:5.1f} fps -- frame {frame_no}{rec_tag}"
-            )
+            disp.set_title(
+                f"score {read_score(core):6d} -- lives {lives} -- "
+                f"emu {fps_ema:5.1f} fps -- frame {frame_no}{rec_tag}")
 
         # If we got ahead of real time, sleep the rest of the budget.
         slack = target_dt - (time.monotonic() - now)
@@ -401,7 +387,7 @@ def run_live(core, record_path: Path | None = None,
             time.sleep(slack)
 
     core.clear_keys()
-    plt.close(fig)
+    disp.close()
 
     if record_path is not None and rec_frames:
         save_trace(record_path, rec_frames, rec_actions, rec_rewards,
@@ -438,7 +424,11 @@ def save_trace(path: Path, frames: list[np.ndarray], actions: list[int],
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--live", action="store_true",
-                   help="open a matplotlib window and run interactively")
+                   help="show the game and run interactively")
+    p.add_argument("--display", choices=("auto", "kitty", "mpl"),
+                   default="auto",
+                   help="--live viewer: Kitty graphics in the terminal, "
+                        "a matplotlib window, or auto-detect (default)")
     p.add_argument("--frames", type=int, default=20,
                    help="frames to run in headless mode (default: 20)")
     p.add_argument("--record-playtrace", type=Path, default=None,
@@ -479,7 +469,8 @@ def main():
                  frame_skip=args.frame_skip, obs_size=args.obs_size,
                  color=args.color,
                  save_slot_path=args.save_slot,
-                 resume_at_start=args.resume)
+                 resume_at_start=args.resume,
+                 display=args.display)
     else:
         run_headless(core, args.frames)
 

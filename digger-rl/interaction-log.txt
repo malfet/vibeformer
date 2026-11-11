@@ -360,3 +360,9 @@ Ok, so can you update the symbolic state and commit changes. And perhaps you can
 
 ---
 And how to invoke playback with teacher? Another question - when you are using matplotlib, wouldn't Kitty protocol, if terminal supports it be better?
+
+---
+Sure, do 1 then 3 (probably as separate module that shared between both run_ppo, run_digger and agent, and finallly 2 - I've noticed that agent around step 55 starts moving back and forth
+
+---
+Speaking of near death scenarious - weren't those needed when we've investigated that loosing live is probably 200 steps removed (due to funeral dirge) from the actual moment player dies)? If this is the case, perhaps they are not needed or could be re-collected later?

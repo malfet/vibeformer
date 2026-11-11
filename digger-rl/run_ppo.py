@@ -1,4 +1,4 @@
-"""Watch a trained PPO checkpoint play Digger in a matplotlib window.
+"""Watch a trained PPO checkpoint play Digger (tools/display.py viewer).
 
     python run_ppo.py data/checkpoints/ppo_digger_final.pt
 
@@ -52,8 +52,12 @@ def parse_args():
     p.add_argument("--episodes", type=int, default=1,
                    help="number of game-over events before exiting")
     p.add_argument("--show-stack", action="store_true",
-                   help="open a second window with the policy's frame stack "
+                   help="show the policy's frame stack next to the game "
                         "(past 3 frames merged into one RGB image: R=t-3, G=t-2, B=t-1)")
+    p.add_argument("--display", choices=("auto", "kitty", "mpl"),
+                   default="auto",
+                   help="viewer: Kitty graphics in the terminal, a matplotlib "
+                        "window, or auto-detect (default)")
     return p.parse_args()
 
 
@@ -75,7 +79,7 @@ def main():
           f"({'stochastic' if args.stochastic else 'argmax'} policy)",
           flush=True)
 
-    import matplotlib.pyplot as plt
+    from tools.display import open_display
 
     env = DiggerEnv()
     stack = FrameStack(k=args.frame_stack, size=args.obs_size, color=color)
@@ -86,28 +90,24 @@ def main():
     target_fps = 70.087
     target_dt = (1.0 / target_fps) * args.frame_skip  # real-time pacing
 
-    fig, ax = plt.subplots()
-    ax.set_axis_off()
-    img = ax.imshow(raw)
-    fig.tight_layout(pad=0)
-    fig.canvas.manager.set_window_title("DIGGER PPO -- gameplay")
+    # Optional: the policy's frame stack collapsed into a single RGB image
+    # (R=t-3, G=t-2, B=t-1) shown to the right of the gameplay. This makes
+    # motion legible at a glance -- stationary pixels appear gray, moving
+    # sprites leave colored trails as they shift between channels.
+    def frame(raw):
+        if not args.show_stack:
+            return raw
+        st = np.stack([stack.frames[0], stack.frames[1], stack.frames[2]],
+                      axis=-1)
+        st = (st * 255 if st.dtype != np.uint8 else st).astype(np.uint8)
+        k = raw.shape[0] // st.shape[0]
+        st = st.repeat(k, 0).repeat(k, 1)
+        pad = np.zeros((raw.shape[0], st.shape[1], 3), np.uint8)
+        pad[:st.shape[0]] = st[..., :3]
+        return np.concatenate([raw[..., :3], pad], axis=1)
 
-    # Optional: a second window with the policy's frame stack collapsed into a
-    # single RGB image: R=t-3, G=t-2, B=t-1. The current frame (t-0) is what
-    # you're already seeing upscaled in the gameplay window. This makes motion
-    # legible at a glance -- stationary pixels appear gray, moving sprites
-    # leave colored trails as they shift between channels.
-    fig2 = img2 = None
-    if args.show_stack:
-        fig2, ax2 = plt.subplots(figsize=(4, 4))
-        ax2.set_axis_off()
-        img2 = ax2.imshow(np.stack([obs[0], obs[1], obs[2]], axis=-1),
-                          vmin=0.0, vmax=1.0)
-        fig2.tight_layout(pad=0.3)
-        fig2.canvas.manager.set_window_title("PPO input -- RGB(t-3, t-2, t-1)")
-
-    plt.ion()
-    plt.show()
+    disp = open_display(args.display, "DIGGER PPO")
+    disp.show(frame(raw))
 
     seen_alive = False
     episodes_done = 0
@@ -116,7 +116,8 @@ def main():
     step_no = 0
     last_wall = time.monotonic()
 
-    while plt.fignum_exists(fig.number) and episodes_done < args.episodes:
+    while disp.is_open and episodes_done < args.episodes:
+        disp.poll()                     # drain keys; Ctrl+C closes Kitty
         now = time.monotonic()
         elapsed = now - last_wall
         last_wall = now
@@ -134,17 +135,7 @@ def main():
         raw, reward, done, info = env_step_skipped(env, action, args.frame_skip)
         step_no += args.frame_skip
 
-        img.set_data(raw)
-        fig.canvas.draw_idle()
-        fig.canvas.flush_events()
-
-        # Mirror the policy's frame stack as an RGB-channel merge, if shown.
-        if img2 is not None and plt.fignum_exists(fig2.number):
-            img2.set_data(np.stack([stack.frames[0],
-                                    stack.frames[1],
-                                    stack.frames[2]], axis=-1))
-            fig2.canvas.draw_idle()
-            fig2.canvas.flush_events()
+        disp.show(frame(raw))
 
         lives = info["lives"]
         if lives > 0:
@@ -153,10 +144,9 @@ def main():
 
         if elapsed > 0:
             fps_ema = 0.9 * fps_ema + 0.1 * (args.frame_skip / elapsed)
-        fig.canvas.manager.set_window_title(
-            f"DIGGER PPO -- score {info['score']:>6d} -- lives {lives} -- "
-            f"a={_ACTION_NAMES[action]} -- {fps_ema:5.1f} fps -- step {step_no}"
-        )
+        disp.set_title(
+            f"score {info['score']:>6d} -- lives {lives} -- "
+            f"a={_ACTION_NAMES[action]} -- {fps_ema:5.1f} fps -- step {step_no}")
         last_score = info["score"]
 
         if game_over or done:
@@ -177,7 +167,7 @@ def main():
         if slack > 0:
             time.sleep(slack)
 
-    plt.close("all")
+    disp.close()
     env.close()
 
 

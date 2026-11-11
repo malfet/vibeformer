@@ -1043,8 +1043,8 @@ def run_headless(args) -> None:
 
 
 def run_live(args) -> None:
-    """Open a matplotlib window, render gameplay with GameState overlay."""
-    import matplotlib.pyplot as plt
+    """Watch the policy play (tools/display.py), optional GameState overlay."""
+    from tools.display import open_display
 
     env = SymbolicDiggerEnv(max_steps=10**9,
                             episodic_life=not args.no_episodic_life)
@@ -1062,21 +1062,17 @@ def run_live(args) -> None:
                                 safety_cap=args.safety_cap,
                                 predict_monsters=args.predict_monsters)
 
+    def frame():
+        raw = env._env._core.get_frame()
+        if not args.overlay:
+            return raw
+        return render_overlay(raw, env._last_state,
+                              show_digger=args.show_digger,
+                              show_emeralds=args.show_emeralds)
+
     obs = env.reset()
-    raw = env._env._core.get_frame()
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.set_axis_off()
-    if args.overlay:
-        img = ax.imshow(render_overlay(
-            raw, env._last_state,
-            show_digger=args.show_digger,
-            show_emeralds=args.show_emeralds))
-    else:
-        img = ax.imshow(raw[..., :3])
-    fig.tight_layout(pad=0)
-    fig.canvas.manager.set_window_title("DIGGER heuristic (live)")
-    plt.ion()
-    plt.show()
+    disp = open_display(args.display, "DIGGER heuristic")
+    disp.show(frame())
 
     target_fps = 70.087
     target_dt = (1.0 / target_fps) * args.frame_skip
@@ -1084,9 +1080,11 @@ def run_live(args) -> None:
     fps_ema = 1.0 / target_dt
     step_no = 0
     seen_alive = False
+    game_over = ""
     policy.reset()
 
-    while plt.fignum_exists(fig.number):
+    while disp.is_open:
+        disp.poll()                     # drain keys; Ctrl+C closes Kitty
         now = time.monotonic()
         elapsed = now - last_wall
         last_wall = now
@@ -1100,34 +1098,26 @@ def run_live(args) -> None:
             if done_: done = True; break
         step_no += args.frame_skip
 
-        raw = env._env._core.get_frame()
-        if args.overlay:
-            img.set_data(render_overlay(
-                raw, env._last_state,
-                show_digger=args.show_digger,
-                show_emeralds=args.show_emeralds))
-        else:
-            img.set_data(raw[..., :3])
-        fig.canvas.draw_idle()
-        fig.canvas.flush_events()
+        disp.show(frame())
 
         score = info.get("score", 0)
         lives = info.get("lives", 0)
         if lives > 0: seen_alive = True
         if elapsed > 0:
             fps_ema = 0.9 * fps_ema + 0.1 * (args.frame_skip / elapsed)
-        fig.canvas.manager.set_window_title(
-            f"DIGGER heuristic -- score {score:>6d} -- lives {lives} -- "
-            f"a={ACTION_NAMES[action]:<5s} -- {fps_ema:5.1f} fps -- step {step_no}"
-        )
+        disp.set_title(
+            f"score {score:>6d} -- lives {lives} -- "
+            f"a={ACTION_NAMES[action]:<5s} -- {fps_ema:5.1f} fps -- step {step_no}")
 
         if done and seen_alive and lives == 0:
-            print(f"game over: score {score} steps {step_no}")
+            game_over = f"game over: score {score} steps {step_no}"
             break
         slack = target_dt - (time.monotonic() - now)
         if slack > 0: time.sleep(slack)
 
-    plt.close("all")
+    disp.close()
+    if game_over:
+        print(game_over)
     env.close()
 
 
@@ -1181,7 +1171,11 @@ def parse_args():
                    help="append JSONL death-forensics + bag-timing events "
                         "to this file (headless mode only)")
     p.add_argument("--live", action="store_true",
-                   help="open a matplotlib window and watch the policy play")
+                   help="watch the policy play")
+    p.add_argument("--display", choices=("auto", "kitty", "mpl"),
+                   default="auto",
+                   help="--live viewer: Kitty graphics in the terminal, "
+                        "a matplotlib window, or auto-detect (default)")
     p.add_argument("--overlay", action="store_true",
                    help="draw small markers for detected monsters/bags "
                         "(off by default; the digger sprite is already visible)")
