@@ -329,3 +329,23 @@ class SymbolicDiggerEnv:
 
     def close(self) -> None:
         self._env.close()
+
+
+def env_step_skipped(env: "SymbolicDiggerEnv", action: int, skip: int):
+    """Hold action across `skip` env frames; OR the one-frame death flags."""
+    total_r = 0.0
+    obs = None
+    info: dict = {}
+    done = False
+    death = False
+    for _ in range(skip):
+        obs, r, done_, info = env.step(action)
+        total_r += r
+        # One-frame death flags survive the skip if any sub-frame set them.
+        death = death or bool(info.get("death_event", False))
+        if done_:
+            done = True
+            break
+    info = dict(info, death_event=death,
+                death=death or bool(info.get("death", False)))
+    return obs, total_r, done, info

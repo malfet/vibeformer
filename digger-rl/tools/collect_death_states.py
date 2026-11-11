@@ -45,7 +45,7 @@ import numpy as np
 
 from tools.heuristic_agent import SmartHeuristic
 from tools.symbolic_env import SymbolicDiggerEnv
-from train_dagger import env_step_skipped
+from tools.symbolic_env import env_step_skipped
 
 
 def _policy_fn(name: str, checkpoint: Path | None, env, rng):

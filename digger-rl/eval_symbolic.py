@@ -29,7 +29,7 @@ import torch
 
 from tools.heuristic_agent import SmartHeuristic
 from tools.symbolic_env import SymbolicDiggerEnv
-from train_dagger import env_step_skipped
+from tools.symbolic_env import env_step_skipped
 from train_ppo import select_device
 from train_ppo_symbolic import IterAgent, SymbolicAgent
 

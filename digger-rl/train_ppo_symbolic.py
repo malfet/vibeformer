@@ -20,7 +20,7 @@ frames. Two reasons:
      pickups.
 
 Single env loop (DOSBox is one process per emulator instance).
-frame_skip applied via env_step_skipped, same as DAGGER.
+frame_skip applied via env_step_skipped, same as the trace generators.
 
 Run:
     python train_ppo_symbolic.py --total-timesteps 500000 \\
@@ -45,7 +45,7 @@ from torch.optim import Adam
 
 from tools.game_state import MHEIGHT, MWIDTH
 from tools.symbolic_env import SymbolicDiggerEnv
-from train_dagger import env_step_skipped
+from tools.symbolic_env import env_step_skipped
 from train_ppo import layer_init, select_device
 
 REPO = Path(__file__).parent.resolve()
@@ -115,7 +115,7 @@ class Config:
 
 
 class SymbolicAgent(nn.Module):
-    """Shared 3-conv body (same as PolicyNet in train_dagger), separate
+    """Shared 3-conv body, separate
     actor / critic heads. ~150k params at BASE_OBS_CHANNELS*frame_stack=24.
 
     Why share encoder: PPO needs both pi(a|s) and V(s); a shared trunk

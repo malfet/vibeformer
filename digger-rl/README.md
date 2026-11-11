@@ -23,7 +23,7 @@ ultimately with a *pixel-only* deployable agent.
 | Pixel PPO + live teacher anchor (no warmup) | 20 | 324 | 825 | live anchor only |
 | Symbolic PPO + shaping only (vanilla, seed=1) | 20 | 290 | 1050 | local-optimum basin at ~250 |
 | Symbolic PPO + shaping only (vanilla, seed=2) | 20 | 235 | 500 | same basin |
-| Symbolic Dreamer V3 (500k frames) | 20 | 250 | — | actor entropy collapse |
+| Symbolic Dreamer V3 (500k frames; code removed 2026-11-11) | 20 | 250 | — | actor entropy collapse |
 | Pixel PPO from scratch (exp4_long_500k) | 20 | 75 | — | classic NatureCNN, no teacher |
 
 **Caveat on evaluation noise.** Most numbers above are 10–20 episode
@@ -65,14 +65,16 @@ See **Lessons from PPO/DAGGER** below.
 | `train_ppo_symbolic.py` | Symbolic-obs PPO with the same recipe: BC traces + per-minibatch anchor + death/time penalty + resume-from-state. |
 | `tools/collect_death_states.py` | Harvests emulator save-states from N agent steps *before* each death (ring buffer of `retro_serialize` snapshots, ~1 ms / 678 KB each). Captures several lookbacks per death in one pass since collection is dominated by the ~25 s it takes the driver policy to die. `--probe` measures what fraction of the collected states a policy can escape — the ceiling for any curriculum built on them. |
 | `eval_symbolic.py` | Symbolic counterpart to `eval_checkpoint.py` (which only rebuilds the pixel NatureCNN). Runs N full 3-life games and reports **both** game score and per-life length in agent steps — the survival experiments need the second, every earlier scoreboard row quotes the first. `--policy random` / `--policy teacher` give same-session baselines. |
-| `train_dagger.py` / `train_dagger_pixel.py` | Earlier DAGGER trainers (multi-iter aggregating teacher rollouts). Superseded by the live-teacher anchor path in `train_ppo.py`. |
-| `train_dreamer*.py` | Dreamer V3-ish online and symbolic-obs world models. Plateaued; see lessons. |
 | `run_digger.py` | Manual play (matplotlib `--live`) + trace recording. **S / L** keys snapshot and restore emulator state (in-memory or disk via `--save-slot`). `--resume` boots straight into a saved scenario. |
 | `tools/game_state.py` | `GameState` dataclass + `extract_state_fast(frame)` — vectorised CV extractor, ~4 ms/frame. Now populates `digger.dir` and `BagPos.moving`. |
 | `tools/symbolic_env.py` | `SymbolicDiggerEnv` wraps `DiggerEnv`, emits `(6, 10, 15)` mask tensors. Supports `shaping_coef`, `time_penalty`, and `save_state` / `load_state`. |
 | `tools/heuristic_agent.py` | `SmartHeuristic v6.3`: v5 (BFS tunnel-distance safety, LoS FIRE, turn-to-fire) + phantom filter, under-bag transit rule, Dijkstra routing (v6), fall-column hazard model from bags.c ground truth (v6.2), retreat-and-ambush firing on chasers (v6.3, same-session 1399 vs 1242). `DeathBagLogger` (`--death-log`) emits JSONL death forensics + bag timing + level-up events. Ablation knobs: `--no-phantom-filter`, `--underbag`, `--routing`, `--fire-turn-min-dist`, `--safety-cap`, `--predict-monsters`. |
 | `tools/gen_symbolic_trace.py` | Generates BC traces from a chosen heuristic into `.npz` for offline BC. (Live teacher path in `train_ppo.py` makes this optional.) |
-| `probe_*.py` | One-off diagnostics: MPS-vs-CPU correctness, libretro state save/restore. |
+| `eval_checkpoint.py` / `run_ppo.py` | Headless N-game eval / matplotlib viewer for pixel `train_ppo.py` checkpoints. |
+| `tools/search_teacher.py` | `SearchTeacher`: SmartHeuristic overruled by in-emulator save/restore rollouts (Lesson 13). Strongest teacher; ~0.4 s/step. |
+| `tools/gen_search_trace.py` | Parallel search-teacher trace collector; stores 84x84, native-aspect and symbolic views per step. |
+| `tools/train_bc_traces.py` | Offline BC on search traces with a held-out file split (pixel or symbolic, optional `--prev-action`). |
+| `tools/make_report_figs.py` | Regenerates the figures in `docs/`. |
 | `interaction-log.txt` | Full chronological log of every prompt; the journey. |
 
 ## Lessons from PPO / DAGGER experiments
@@ -816,7 +818,7 @@ nobbin-dominated so this is currently a good trade
 - Score RAM offset: `0x282E0` (int32 LE). Lives: `0x259F2` (uint8).
 - Frame dimensions: 640×400 RGBA. Score bar takes top 32 px; play area is `(368, 640)`.
 - Palette: exactly 11 RGB triples, no antialiasing. See `PAL_*` constants in `game_state.py`.
-- `frame_skip = 4`, `frame_stack = 4`, `obs_size = 84` for pixel; 64 for Dreamer; none for symbolic.
+- `frame_skip = 4`, `frame_stack = 4`, `obs_size = 84` for pixel; none for symbolic.
 - Action space: `{NOOP, LEFT, RIGHT, UP, DOWN, FIRE}` with FIRE = F1 in the libretro keyboard layout.
 - `BASE_OBS_CHANNELS = 6` for symbolic: dirt / emerald / digger / monster / bag / cherry.
 

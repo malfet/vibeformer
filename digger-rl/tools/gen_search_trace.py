@@ -2,7 +2,7 @@
 
 The search teacher costs ~0.3 s per step, so collection runs as many
 independent processes, each writing its own .npz; `train_ppo.py
---bc-traces` takes them all. Format matches tools/gen_heuristic_trace.py
+--bc-traces` takes them all. Format matches the pixel `--bc-traces` format of train_ppo.py
 except that frames[t] is the frame the policy saw *when it chose*
 actions[t] (the trainer pairs frames[t] with actions[t]).
 
@@ -35,7 +35,7 @@ import torch
 from digger_env import DiggerEnv, preprocess_uint8
 from tools.search_teacher import SearchTeacher
 from tools.symbolic_env import SymbolicDiggerEnv, state_to_tensor
-from train_dagger import env_step_skipped
+from tools.symbolic_env import env_step_skipped
 
 
 def _resize_rgb(rgba: np.ndarray, h: int, w: int) -> np.ndarray:

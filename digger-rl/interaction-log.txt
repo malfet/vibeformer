@@ -339,3 +339,15 @@ Perhaps can you get back to basics, and tell me if you can resume a training/sim
 [2026-10-04] Sure, let's try training using  abetter death marker
 [2026-10-04] Sure (start on the search teacher)
 [2026-10-04] Let's train a pixel model to imitat teacher
+
+---
+Explore CLAUDE.md and README for this project. Let's delete all temporary checkpoints and probably start from a scratch by first of all cleaning up a project and perhaps publishing a doc to claude.ai/artifacts explaining it structure
+
+---
+But my goal is simple - have a model architecture and training script that could be used to teach AI to play digger. I eventually want to have something that can teach it from "first principles" but for now bootstrapping it with teacher and then doing some sort of RL to be better than teacher sounds go
+
+---
+Feels like traces belong to one of those abandonned experiments, that didn't really help, did they? If this is the case, one can delete traces
+
+---
+Push changes, and start a new training (but first update PyTorch to 2.15 in your local .venv)

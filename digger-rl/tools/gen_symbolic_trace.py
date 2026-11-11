@@ -29,7 +29,7 @@ import numpy as np
 
 from tools.heuristic_agent import DodgeMonsters, GreedyEmerald, SmartHeuristic
 from tools.symbolic_env import BASE_OBS_CHANNELS, SymbolicDiggerEnv
-from train_dagger import env_step_skipped
+from tools.symbolic_env import env_step_skipped
 
 
 def collect(num_steps: int, frame_skip: int, frame_stack: int,

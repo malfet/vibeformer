@@ -33,7 +33,7 @@ import torch
 from tools.heuristic_agent import SmartHeuristic
 from tools.symbolic_env import (BASE_OBS_CHANNELS, SymbolicDiggerEnv,
                                 egocentric_view, state_to_tensor)
-from train_dagger import env_step_skipped
+from tools.symbolic_env import env_step_skipped
 
 REPO = Path(__file__).resolve().parent.parent
 CKPT = REPO / "data" / "checkpoints"
