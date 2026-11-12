@@ -414,3 +414,7 @@ Have you fixed bug when restoring a game snapshot is somewhat delayed or somethi
 And update artifact with this new IMALA idea
 
 May be you can spend some time fixing the restore issue? Because emulator is 100% deterministic, isn't it?
+
+So where are we now?
+
+Yes, push, and start on the state archive
