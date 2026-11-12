@@ -362,6 +362,10 @@ class Config:
     obs_size: int = 84
     start_states: str | None = None   # dir of tools/level_states.py states
     start_prob: float = 0.0           # P(an episode starts from one of them)
+    archive_every: int = 0            # snapshot own play every N agent steps
+    archive_prob: float = 0.0         # P(a reset restores + perturbs one)
+    archive_size: int = 200           # snapshots kept per env worker
+    archive_perturb: int = 10         # up to N random actions after restore
     color: bool = True                # RGB by default (3*frame_stack channels); --no-color falls back to grayscale
     encoder_width: int = 1            # NatureCNN width multiplier; 2 = ~4x params
     arch: str = "nature"              # nature | impala (encoder)
@@ -914,6 +918,18 @@ def parse_args() -> Config:
     p.add_argument("--start-states", type=str, default=None,
                    help="dir of level states (tools/level_states.py); "
                         "episodes start from them with --start-prob")
+    p.add_argument("--archive-every", type=int, default=Config.archive_every,
+                   help="snapshot each env's own play every N agent steps "
+                        "into a per-worker archive (0 = off)")
+    p.add_argument("--archive-prob", type=float, default=Config.archive_prob,
+                   help="probability a reset (also after a death) restores "
+                        "an archived state instead; snapshots just before "
+                        "a death are drawn 4x as often")
+    p.add_argument("--archive-size", type=int, default=Config.archive_size)
+    p.add_argument("--archive-perturb", type=int,
+                   default=Config.archive_perturb,
+                   help="random actions played after an archive restore "
+                        "(0..N, uniformly)")
     p.add_argument("--start-prob", type=float, default=Config.start_prob,
                    help="probability an episode starts from a saved "
                         "level state instead of level 1")
@@ -1033,6 +1049,8 @@ def parse_args() -> Config:
         dagger_collect_steps=a.dagger_collect_steps,
         dagger_epochs=a.dagger_epochs,
         start_states=a.start_states, start_prob=a.start_prob,
+        archive_every=a.archive_every, archive_prob=a.archive_prob,
+        archive_size=a.archive_size, archive_perturb=a.archive_perturb,
         color=a.color, encoder_width=a.encoder_width,
         arch=a.arch, aug_shift=a.aug_shift,
         separate_critic=a.separate_critic, load_agent=a.load_agent,
@@ -1055,7 +1073,11 @@ def main() -> None:
                       episodic_life=cfg.episodic_life,
                       death_penalty=cfg.death_penalty,
                       start_states=cfg.start_states,
-                      start_prob=cfg.start_prob)
+                      start_prob=cfg.start_prob,
+                      archive_every=cfg.archive_every * cfg.frame_skip,
+                      archive_prob=cfg.archive_prob,
+                      archive_size=cfg.archive_size,
+                      archive_perturb=cfg.archive_perturb)
     vec = DiggerVecEnv(num_envs=cfg.num_envs, frame_skip=cfg.frame_skip,
                        frame_stack=cfg.frame_stack, obs_size=cfg.obs_size,
                        color=cfg.color, env_kwargs=env_kwargs)

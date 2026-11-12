@@ -131,7 +131,12 @@ class DiggerEnv:
                  death_penalty: float = 0.0,
                  cycles: str | None = "7800",
                  start_states: str | None = None,
-                 start_prob: float = 0.0):
+                 start_prob: float = 0.0,
+                 archive_every: int = 0,
+                 archive_prob: float = 0.0,
+                 archive_size: int = 200,
+                 archive_perturb: int = 10,
+                 archive_boost: float = 4.0):
         # 36000 frames ~= 8.5 minutes of in-game time at 70 fps. Plenty for
         # a Digger run; cap exists so an immortal idle policy doesn't loop
         # forever.
@@ -179,6 +184,22 @@ class DiggerEnv:
             raise ValueError("start_prob > 0 needs start_states")
         self._pool_p = np.array(weights) / sum(weights) if weights else None
         self._rng = np.random.default_rng()
+        # State archive (snapshot-and-perturb starts): every archive_every
+        # frames of live play the state goes into a bounded FIFO archive;
+        # any reset (also the soft one after a death) then, with
+        # probability archive_prob, restores a weighted-random snapshot and
+        # plays 0..archive_perturb random actions (4 frames each) from it.
+        # Snapshots taken shortly before a death get weight archive_boost,
+        # so hard situations come back more often. Needs exact restores:
+        # the lockstep core (Lesson 21).
+        self.archive_every = int(archive_every)
+        self.archive_prob = float(archive_prob)
+        self.archive_size = int(archive_size)
+        self.archive_perturb = int(archive_perturb)
+        self.archive_boost = float(archive_boost)
+        self._archive: list[list] = []        # [state, weight, frame]
+        self._frames_total = 0
+        self.archive_starts = 0
         self._core: _libretro.LibretroCore | None = None
         self._last_action = self.NOOP
         self._last_score = 0
@@ -203,6 +224,12 @@ class DiggerEnv:
         """
         SYS_DIR.mkdir(parents=True, exist_ok=True)
         SAVE_DIR.mkdir(parents=True, exist_ok=True)
+
+        if (self._archive and self._core is not None
+                and self._rng.random() < self.archive_prob):
+            frame = self._reset_from_archive()
+            if frame is not None:
+                return frame
 
         if (self.episodic_life and not self._real_game_over
                 and self._core is not None):
@@ -260,6 +287,43 @@ class DiggerEnv:
             self._steps = 0
             return frame
         return self._core.get_frame()
+
+    def _reset_from_archive(self) -> np.ndarray | None:
+        """Restore a weighted-random archived state, then perturb it.
+        Returns the frame, or None if the perturbation killed the digger
+        (the caller then resets as usual)."""
+        w = np.array([e[1] for e in self._archive], dtype=np.float64)
+        entry = self._archive[self._rng.choice(len(w), p=w / w.sum())]
+        self.load_state(entry[0])
+        for _ in range(self._rng.integers(0, self.archive_perturb + 1)):
+            self._apply_action(int(self._rng.integers(self.NUM_ACTIONS)))
+            for _ in range(4):
+                self._core.run()
+            if self.read_digger()["dying"] or self._read_lives() == 0:
+                return None
+        self._apply_action(self.NOOP)
+        self._last_score = self._read_score()
+        self._prev_lives = self._read_lives()
+        self._seen_alive = True
+        self._prev_dying = False
+        self._death_counted = False
+        self._real_game_over = False
+        self._steps = 0
+        self.archive_starts += 1
+        return self._core.get_frame()
+
+    def _archive_step(self, dying: bool, death_event: bool) -> None:
+        self._frames_total += 1
+        if death_event:
+            # The snapshots just before this death are the hard ones.
+            for e in self._archive:
+                if self._frames_total - e[2] <= 2 * self.archive_every:
+                    e[1] = self.archive_boost
+        if (self._frames_total % self.archive_every == 0 and not dying
+                and not self._real_game_over):
+            if len(self._archive) >= self.archive_size:
+                self._archive.pop(0)
+            self._archive.append([self.save_state(), 1.0, self._frames_total])
 
     def step(self, action: int) -> StepResult:
         """Apply `action`, advance one emulator frame, return the result."""
@@ -320,6 +384,8 @@ class DiggerEnv:
             # weird state.
             self._real_game_over = True
         done = agent_done or truncated
+        if self.archive_every:
+            self._archive_step(dig["dying"], death_event)
 
         return StepResult(
             obs=self._core.get_frame(),
