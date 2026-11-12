@@ -406,3 +406,11 @@ Where is this checkpoint?
 And do you think the model artitechture holds enough complexity to be able to learn how to play the game to be able to beat it?
 
 Sure, do that. But I also noticed that px128_bc1 often dies on the first level by being killed by the bag, while heaving pretty of headroom to avoid it. May be a bit more time can be dedicated to better dos checkpointing any try to learn to avoid near death scenarious, by say rolling back the step 10 steps back before death and strongly revarting outcomes when player survices for 20 steps (if possible)
+
+Can you explain gaps in GPU utilization?Also px128_ppo2 hits some sort of a strange conundrum of running back and forth to the last emerald and eventually getting eaten by monsters
+
+Have you fixed bug when restoring a game snapshot is somewhat delayed or something of the nature?
+
+And update artifact with this new IMALA idea
+
+May be you can spend some time fixing the restore issue? Because emulator is 100% deterministic, isn't it?

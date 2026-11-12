@@ -45,6 +45,11 @@ core:
 	@echo ">>> building DOSBox Pure libretro core (BUILD=$(MODE))"
 	$(MAKE) -C $(DOSBOX_PURE) -j$(NPROC) BUILD=$(MODE) $(STRIP_OVERRIDE) \
 	    CXX="$(CXX_FOR_CORE)"
+	@echo ">>> building the lockstep core (patches/dosbox-pure-lockstep.patch)"
+	git -C $(DOSBOX_PURE) apply --check ../../patches/dosbox-pure-lockstep.patch 2>/dev/null \
+	    && git -C $(DOSBOX_PURE) apply ../../patches/dosbox-pure-lockstep.patch || true
+	$(MAKE) -C $(DOSBOX_PURE) -j$(NPROC) BUILD=$(MODE) $(STRIP_OVERRIDE) \
+	    CXX="$(CXX_FOR_CORE)" OUTNAME=dosbox_pure_libretro_lockstep.dylib
 
 ext:
 	@echo ">>> installing dev deps from requirements.txt"

@@ -9,9 +9,9 @@ later is a rescue; the best-scoring one is kept, with the frames and
 actions it actually played, and play continues from its end so the
 next death comes from further into the level.
 
-Branches are recorded as they run, never replayed: repeated restores of
-one state do not replay identically (input timing around unserialize),
-so a found action sequence cannot be trusted to work twice.
+Branches are recorded as they run, not replayed. (With the stock core,
+repeated restores of one state did not replay identically; the lockstep
+core, now the default, fixes that, README Lesson 21.)
 
 Each rescue becomes a segment of a train_pixel.py trace: the 3 frames
 before the rollback point (real history, so the first rescue step has

@@ -21,6 +21,7 @@ from __future__ import annotations
 import collections
 import gc
 import multiprocessing as mp
+import os
 import pickle
 import re
 import struct
@@ -32,7 +33,22 @@ import numpy as np
 import _libretro
 
 REPO = Path(__file__).parent.resolve()
-CORE_PATH = REPO / "vendor" / "dosbox-pure" / "dosbox_pure_libretro.dylib"
+# Lockstep core (patches/dosbox-pure-lockstep.patch, built by `make core`):
+# stock DOSBox Pure starts emulating the next frame on its own thread and
+# returns from retro_run, so RAM reads, key events and serialize() land at
+# a host-timing-dependent point mid-frame. That made restores drift ~1
+# frame and repeated restores of one state diverge (README Lesson 21).
+# With DBP_LOCKSTEP set, each run() emulates exactly one whole frame and
+# restores replay byte-identically, for ~20% less emulator throughput.
+# DIGGER_LOCKSTEP=0 opts out; DIGGER_CORE overrides the library.
+_CORE_DIR = REPO / "vendor" / "dosbox-pure"
+LOCKSTEP = (os.environ.get("DIGGER_LOCKSTEP", "1") != "0"
+            and (_CORE_DIR / "dosbox_pure_libretro_lockstep.dylib").exists())
+if LOCKSTEP:
+    os.environ["DBP_LOCKSTEP"] = "1"           # read by the core at run()
+CORE_PATH = (Path(os.environ["DIGGER_CORE"]) if "DIGGER_CORE" in os.environ
+             else _CORE_DIR / ("dosbox_pure_libretro_lockstep.dylib"
+                               if LOCKSTEP else "dosbox_pure_libretro.dylib"))
 GAME_PATH = REPO / "data" / "DIGGER.EXE"
 SYS_DIR = REPO / "data" / "system"
 SAVE_DIR = REPO / "data" / "save"

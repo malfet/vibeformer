@@ -733,6 +733,54 @@ NOOPs for 10 steps in a probe process; "would kill" if FIRE kills more.
   can't see that, BC copies it, and PPO's kill reward is too rare (and
   anchored to the teacher) to unlearn it.
 
+### 21. Pixel students across all levels; restores made exact (2026-11-11)
+
+**Multi-level pixel imitation.** `collect.py --pixels` records frame
+traces with 75% of games started from `data/save/levels`. One life from
+each level start (8 runs per level, emeralds eaten):
+
+| Level | teacher | old pixel (L1 only, 84px) | 84px all levels | 128px BC | 128px + DAgger |
+|---|---|---|---|---|---|
+| 1 | 65% | 69% | 38% | 69% | **74%** |
+| 2-4 | 22-26% | 13-26% | 8-23% | 20-42% | 21-46% |
+| 5-10 | 21-36% | **0-2%** | 13-23% | 21-31% | 20-36% |
+
+- Training on every level fixed the collapse on unseen backgrounds.
+- **Resolution was the bottleneck**: 84x84 -> 128x128 took held-out
+  accuracy 69.3% -> 78.8% (47% -> 61% where the action changes).
+- **IMPALA encoder + random-shift augmentation** (`--arch impala
+  --aug-shift 4`, 2.2M params vs 4.8M) reached 87.2% held-out, but played
+  no better (1641 vs 1740 over 20 games; bag deaths 30% vs 15%): higher
+  accuracy on teacher states does not fix the student's own states
+  without DAgger or RL.
+
+**Deaths.** A bag kill leaves the death stage at 1 (DGR_DEATH_BAG ==
+alive), so deaths now key off `dob.alive` (word 24) and `deathbag` gives
+the cause; `evaluate.py` reports bag vs monster deaths.
+
+**Rescue traces did not help as imitation.** `tools/rescue.py` rolls back
+10/15/20 steps before each student death and records a branch that
+survives 20 steps (72% of 1200 deaths rescued). Fine-tuning on them,
+oversampled x3, changed nothing (1699 vs 1740; bag deaths 9 vs 9): many
+actions survive, so the labels say little about *why* the student died.
+
+**PPO from near-death starts learned to hide.** `px128_ppo1`: 50% level
+starts + 50% near-death starts, death penalty 100 (-2 scaled) vs +0.5
+per emerald. By 1.6M frames lives were 13% longer but greedy score fell
+2245 -> 1688 and level 1 clears 10/10 -> 3/10. Stopped; `px128_ppo2`
+drops the penalty and uses 20% *rescuable* near-death starts only.
+
+**Exact restores (lockstep core).** Stock DOSBox Pure ends `retro_run`
+by starting the next frame on its emulation thread, so RAM reads, key
+events and `serialize()` land at a host-timing-dependent point mid-frame.
+That was the ~1-frame drift per restore and why repeated restores of one
+state diverged (at a different step each run, worse under load).
+`patches/dosbox-pure-lockstep.patch` finishes the frame before returning
+when `DBP_LOCKSTEP` is set: restore-and-replay is byte-identical, and
+restoring every step no longer changes the game. It is now the default
+(`DIGGER_LOCKSTEP=0` opts out); emulator throughput drops ~20%.
+Separate `reset()`s still differ: each boot reads the host clock.
+
 ## Lessons ported from ../snake (2026-08-31)
 
 The snake project ran the same recipe on a much cheaper simulator and

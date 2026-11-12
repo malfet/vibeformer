@@ -1,0 +1,19 @@
+diff --git a/dosbox_pure_libretro.cpp b/dosbox_pure_libretro.cpp
+index 1030ff4..7ffabfd 100644
+--- a/dosbox_pure_libretro.cpp
++++ b/dosbox_pure_libretro.cpp
+@@ -3629,6 +3629,14 @@ void retro_run(void)
+ 	if (dbp_opengl_draw && voodoo_ogl_mainthread()) { view_width *= voodoo_ogl_scale; view_height *= voodoo_ogl_scale; }
+ 
+ 	DBP_ThreadControl(skip_emulate ? TCM_RESUME_FRAME : TCM_NEXT_FRAME);
++	// Lockstep (DBP_LOCKSTEP env var): finish the frame just started before
++	// returning, so each retro_run emulates exactly one whole frame and the
++	// emulation thread is parked at a frame boundary between calls. Without
++	// it the next frame runs concurrently with the frontend, so RAM reads,
++	// key events and serialize() land at a host-timing-dependent point
++	// mid-frame (non-reproducible restores, ~1 frame phase drift).
++	static const bool dbp_lockstep = (getenv("DBP_LOCKSTEP") != NULL);
++	if (dbp_lockstep && !skip_emulate) DBP_ThreadControl(TCM_FINISH_FRAME);
+ 
+ 	#ifndef DBP_STANDALONE
+ 	// submit audio

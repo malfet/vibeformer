@@ -5,9 +5,10 @@ tile-level line-of-sight check cannot see, so this asks the game itself:
 from a save state, play FIRE then NOOPs, and only NOOPs, for `horizon`
 agent steps; the shot "would kill" if the first kills more monsters.
 
-The probes run in a separate process. Restores are not timing-exact
-(each shifts the game's tick phase ~1 frame, README Lesson 20), so the
-played game must never be restored, and only one core fits a process.
+The probes run in a separate process. With the stock core restores were
+not timing-exact (README Lesson 20), so the played game must not be
+restored; the lockstep core (Lesson 21) fixes that, but only one core
+fits a process either way.
 
     oracle = FireOracle()
     if state.digger.can_fire and state.monsters:
