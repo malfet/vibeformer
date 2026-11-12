@@ -57,11 +57,18 @@ DIGGER_ROW_OFFSET = 0x259CE    # tile row v, 0..9
 DEATH_STAGE_OFFSET = 0x259E4   # 1 = alive; 3/5/2/4 = death sequence
 DEATH_TIMER_OFFSET = 0x259EA   # tombstone countdown (59 -> 0)
 DEATH_STAGE_ALIVE = 1
+# The stage alone misses bag deaths: DGR_DEATH_BAG is also 1, the value
+# the digger lives with, so a bag kill (killdigger(n, 1, bag)) leaves it
+# at 1 for the ~4 steps the bag takes to land. digdat.dob.alive (bool,
+# -1 / 0) and deathbag (the bag that did it, 0 for a monster) catch the
+# hit itself; at onset, stage 1 means a bag and 3 a monster.
+DIGGER_ALIVE_OFFSET = 0x259F8  # -1 alive, 0 from the hit on
+DEATH_BAG_OFFSET = 0x259E6     # nonzero: killed by that bag
 # A death begins ~100 agent steps (frame_skip=4) before `lives` drops:
 # bag/monster hit, animation, then the tombstone countdown. Input is
 # ignored for that whole stretch, so anything that keys off the lives
 # decrement (episodic-life dones, near-death snapshots) is late by that
-# much. Key off DEATH_STAGE leaving DEATH_STAGE_ALIVE instead.
+# much. Key off the alive flag instead.
 
 
 @dataclass
@@ -444,9 +451,13 @@ class DiggerEnv:
         m = self._core.read_memory_region(0)
         x, y, col, row = struct.unpack_from("<4h", m, DIGGER_X_OFFSET)
         stage = struct.unpack_from("<h", m, DEATH_STAGE_OFFSET)[0]
+        alive = struct.unpack_from("<h", m, DIGGER_ALIVE_OFFSET)[0] != 0
+        bag = struct.unpack_from("<h", m, DEATH_BAG_OFFSET)[0]
+        dying = stage != DEATH_STAGE_ALIVE or not alive
         return {"digger_xy": (x, y), "digger_rc": (row, col),
-                "death_stage": stage,
-                "dying": stage != DEATH_STAGE_ALIVE}
+                "death_stage": stage, "dying": dying,
+                "death_cause": ("bag" if bag else "monster") if dying
+                               else None}
 
     def read_level(self) -> int:
         m = self._core.read_memory_region(0)

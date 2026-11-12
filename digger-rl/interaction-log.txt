@@ -401,3 +401,8 @@ And perhaps in both --live and watch, pressing q should abort the playback
 Can you check if using ctypes (same as sciextractor playback) might be better. I see some weird clicks during the playback, not sure where they are coming from
 
 Great. Let's focus on improving the scores of pixel ppo on levels further down. I think this is where experimentations will help so that one can learn how to kill monsters with bags etc
+
+Where is this checkpoint?
+And do you think the model artitechture holds enough complexity to be able to learn how to play the game to be able to beat it?
+
+Sure, do that. But I also noticed that px128_bc1 often dies on the first level by being killed by the bag, while heaving pretty of headroom to avoid it. May be a bit more time can be dedicated to better dos checkpointing any try to learn to avoid near death scenarious, by say rolling back the step 10 steps back before death and strongly revarting outcomes when player survices for 20 steps (if possible)

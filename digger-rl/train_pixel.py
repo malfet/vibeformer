@@ -364,6 +364,8 @@ class Config:
     start_prob: float = 0.0           # P(an episode starts from one of them)
     color: bool = True                # RGB by default (3*frame_stack channels); --no-color falls back to grayscale
     encoder_width: int = 1            # NatureCNN width multiplier; 2 = ~4x params
+    arch: str = "nature"              # nature | impala (encoder)
+    aug_shift: int = 0                # BC: random +-N px shift per sample
     separate_critic: bool = False     # give the critic its own NatureCNN encoder
     load_agent: str = ""              # init weights from a saved checkpoint (e.g. a BC-only run)
     save_best: bool = False           # checkpoint whenever rolling mean game score improves
@@ -461,6 +463,37 @@ def _nature_cnn(in_channels: int, c1: int, c2: int, c3: int, fc: int,
     )
 
 
+class _ResBlock(nn.Module):
+    def __init__(self, ch: int):
+        super().__init__()
+        self.c1 = nn.Conv2d(ch, ch, 3, padding=1)
+        self.c2 = nn.Conv2d(ch, ch, 3, padding=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.c2(F.relu(self.c1(F.relu(x))))
+
+
+def _impala_cnn(in_channels: int, width: int, fc: int,
+                in_hw: tuple[int, int]) -> nn.Sequential:
+    """IMPALA's residual encoder (Espeholt et al. 2018): three stages
+    of conv3x3 + maxpool(3, stride 2) + two residual blocks, 16/32/32
+    channels (x width). Stride-1 3x3 convs keep sprite-sized detail that
+    NatureCNN's 8x8 stride-4 first layer averages away, and it
+    generalises better (Procgen)."""
+    layers: list[nn.Module] = []
+    h, w = in_hw
+    ch_in = in_channels
+    for ch in (16 * width, 32 * width, 32 * width):
+        layers += [nn.Conv2d(ch_in, ch, 3, padding=1),
+                   nn.MaxPool2d(3, stride=2, padding=1),
+                   _ResBlock(ch), _ResBlock(ch)]
+        h, w = (h + 1) // 2, (w + 1) // 2
+        ch_in = ch
+    layers += [nn.ReLU(), nn.Flatten(),
+               layer_init(nn.Linear(ch_in * h * w, fc)), nn.ReLU()]
+    return nn.Sequential(*layers)
+
+
 class Agent(nn.Module):
     """NatureCNN trunk + linear actor / critic heads.
 
@@ -478,15 +511,24 @@ class Agent(nn.Module):
 
     def __init__(self, num_actions: int, in_channels: int = 4, width: int = 1,
                  separate_critic: bool = False,
-                 in_hw: tuple[int, int] = (84, 84)):
+                 in_hw: tuple[int, int] = (84, 84), arch: str = "nature"):
         super().__init__()
         c1, c2, c3, fc = 32 * width, 64 * width, 64 * width, 512 * width
+        if arch == "impala":
+            fc = 256 * width
+
+            def make():
+                return _impala_cnn(in_channels, width, fc, in_hw)
+        elif arch == "nature":
+            def make():
+                return _nature_cnn(in_channels, c1, c2, c3, fc, in_hw)
+        else:
+            raise ValueError(f"unknown arch {arch!r} (nature | impala)")
         self.width = width
         self.separate_critic = separate_critic
-        self.encoder = _nature_cnn(in_channels, c1, c2, c3, fc, in_hw)
+        self.encoder = make()
         if separate_critic:
-            self.critic_encoder = _nature_cnn(in_channels, c1, c2, c3, fc,
-                                              in_hw)
+            self.critic_encoder = make()
         else:
             # Alias attribute so .value()/.act() can read the same path
             # regardless of mode; alias is a plain Python reference, not
@@ -705,6 +747,21 @@ def _bc_minibatch(per_frames: list[np.ndarray], per_actions: list[np.ndarray],
     return obs_t, acts_t, rets_t
 
 
+def random_shift(x: torch.Tensor, pad: int) -> torch.Tensor:
+    """Shift each sample by up to `pad` px in x and y (the same shift for
+    all of its stacked frames): replicate-pad, then crop at a random
+    offset (DrQ, Kostrikov et al. 2020)."""
+    n, _, h, w = x.shape
+    xp = F.pad(x, (pad, pad, pad, pad), mode="replicate")
+    ox = torch.randint(0, 2 * pad + 1, (n,), device=x.device)
+    oy = torch.randint(0, 2 * pad + 1, (n,), device=x.device)
+    rows = (oy[:, None] + torch.arange(h, device=x.device))[:, None, :, None]
+    cols = (ox[:, None] + torch.arange(w, device=x.device))[:, None, None, :]
+    idx = torch.arange(n, device=x.device)[:, None, None, None]
+    ch = torch.arange(x.shape[1], device=x.device)[None, :, None, None]
+    return xp[idx, ch, rows, cols]
+
+
 @torch.no_grad()
 def bc_val_accuracy(agent: "Agent", val_data: tuple, cfg: Config,
                     device: torch.device) -> tuple[float, float]:
@@ -777,6 +834,8 @@ def bc_pretrain(agent: "Agent", optim: Adam, bc_data: tuple,
             mb = perm[start:start + cfg.bc_batch_size]
             obs_t, acts_t, rets_t = _bc_minibatch(
                 per_frames, per_actions, norm_returns, index, mb, cfg, device)
+            if cfg.aug_shift:
+                obs_t = random_shift(obs_t, cfg.aug_shift)
             z = agent.encode(obs_t)
             logits = agent.actor(z)
             ce = F.cross_entropy(logits, acts_t)
@@ -915,6 +974,11 @@ def parse_args() -> Config:
                    help="student-driven steps collected per DAGGER iter.")
     p.add_argument("--dagger-epochs", type=int, default=Config.dagger_epochs,
                    help="CE epochs per DAGGER iter on the aggregated set.")
+    p.add_argument("--arch", choices=("nature", "impala"),
+                   default=Config.arch, help="pixel encoder")
+    p.add_argument("--aug-shift", type=int, default=Config.aug_shift,
+                   help="BC: shift each training sample by up to N px "
+                        "(replicate-padded random crop; DrQ-style)")
     p.add_argument("--encoder-width", type=int, default=Config.encoder_width,
                    help="NatureCNN channel/FC width multiplier (default 1 = "
                         "~1.7M params; 2 = ~6M params for richer encoder)")
@@ -970,6 +1034,7 @@ def parse_args() -> Config:
         dagger_epochs=a.dagger_epochs,
         start_states=a.start_states, start_prob=a.start_prob,
         color=a.color, encoder_width=a.encoder_width,
+        arch=a.arch, aug_shift=a.aug_shift,
         separate_critic=a.separate_critic, load_agent=a.load_agent,
         save_best=a.save_best, run_name=a.run_name,
     )
@@ -999,7 +1064,8 @@ def main() -> None:
                   in_channels=in_ch,
                   width=cfg.encoder_width,
                   separate_critic=cfg.separate_critic,
-                  in_hw=(cfg.obs_size, cfg.obs_size)).to(device)
+                  in_hw=(cfg.obs_size, cfg.obs_size),
+                  arch=cfg.arch).to(device)
     n_params = sum(p.numel() for p in agent.parameters())
     print(f"{tag}agent: width={cfg.encoder_width}, in_ch={in_ch} "
           f"({'color' if cfg.color else 'gray'}), params={n_params:,}  "

@@ -753,10 +753,12 @@ def extract_state_ram(mem: bytes) -> GameState:
         return np.frombuffer(mem, dtype="<i2", count=n, offset=off)
 
     state = GameState()
-    d = words(RAM_DIGGER, 24)
+    d = words(RAM_DIGGER, 25)
     col, row = _ram_tile(int(d[0]), int(d[1]))
     state.digger = DiggerPos(col=col, row=row, dir=int(d[7]),
-                             alive=int(d[14]) == 1,
+                             # word 24 is dob.alive: the stage alone
+                             # misses bag kills (see digger_env.py)
+                             alive=int(d[14]) == 1 and int(d[24]) != 0,
                              can_fire=int(d[9]) == 0 and int(d[23]) != 0,
                              x=int(d[0]), y=int(d[1]))
     state.lives = int(d[21])
