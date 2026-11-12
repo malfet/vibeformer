@@ -368,6 +368,11 @@ class Config:
     load_agent: str = ""              # init weights from a saved checkpoint (e.g. a BC-only run)
     save_best: bool = False           # checkpoint whenever rolling mean game score improves
     clip_reward: bool = True
+    reward_scale: float = 1.0         # x the per-step reward (with
+                                      # --no-clip-reward: score x 0.02 makes
+                                      # an emerald 0.5 and a kill 5)
+    value_warmup_updates: int = 0     # first N PPO updates fit only the
+                                      # critic head (encoder frozen)
     episodic_life: bool = False
     death_penalty: float = 0.0
     ent_coef_final: float | None = None  # if set, linearly anneal ent_coef -> this
@@ -376,6 +381,7 @@ class Config:
     # PPO starts; with --bc-value, also fit the critic on MC returns from the
     # traces so the random V doesn't immediately wipe out the BC policy.
     bc_traces: tuple[str, ...] = ()
+    bc_val: tuple[str, ...] = ()      # held-out traces: per-epoch accuracy
     bc_epochs: int = 5
     bc_batch_size: int = 64
     bc_value: bool = False
@@ -699,8 +705,32 @@ def _bc_minibatch(per_frames: list[np.ndarray], per_actions: list[np.ndarray],
     return obs_t, acts_t, rets_t
 
 
+@torch.no_grad()
+def bc_val_accuracy(agent: "Agent", val_data: tuple, cfg: Config,
+                    device: torch.device) -> tuple[float, float]:
+    """Argmax accuracy on held-out traces: overall, and on the steps
+    where the teacher's action differs from its previous one (turns,
+    shots; where copying the last action is no help)."""
+    per_frames, per_actions, _, index = val_data
+    agent.eval()
+    hit = n = hit_c = n_c = 0
+    for start in range(0, len(index), 512):
+        idxs = np.arange(start, min(start + 512, len(index)))
+        obs_t, acts_t, _ = _bc_minibatch(per_frames, per_actions, None,
+                                         index, idxs, cfg, device)
+        ok = (agent.actor(agent.encode(obs_t)).argmax(-1) == acts_t).cpu()
+        changed = torch.tensor([per_actions[index[i][0]][index[i][1]]
+                                != per_actions[index[i][0]][index[i][1] - 1]
+                                for i in idxs])
+        hit += int(ok.sum()); n += len(idxs)
+        hit_c += int(ok[changed].sum()); n_c += int(changed.sum())
+    agent.train()
+    return hit / max(n, 1), hit_c / max(n_c, 1)
+
+
 def bc_pretrain(agent: "Agent", optim: Adam, bc_data: tuple,
-                cfg: Config, device: torch.device) -> None:
+                cfg: Config, device: torch.device,
+                val_data: tuple | None = None) -> None:
     """Cross-entropy on (obs, action). Optionally MSE on critic vs MC return.
 
     Shares the PPO optimiser so Adam state carries over into the main loop.
@@ -735,6 +765,7 @@ def bc_pretrain(agent: "Agent", optim: Adam, bc_data: tuple,
           f"batch={cfg.bc_batch_size}{extra})", flush=True)
 
     rng = np.random.default_rng(cfg.seed)
+    best = (-1.0, None)                       # (val acc, agent state)
 
     for epoch in range(cfg.bc_epochs):
         perm = rng.permutation(M)
@@ -766,8 +797,18 @@ def bc_pretrain(agent: "Agent", optim: Adam, bc_data: tuple,
             v_sum += v_val
             nb += 1
         tail = f"  v_mse_norm {v_sum / nb:.3f}" if cfg.bc_value else ""
+        if val_data is not None:
+            va, va_c = bc_val_accuracy(agent, val_data, cfg, device)
+            tail += f"  val acc {va:.3f}  at changes {va_c:.3f}"
+            if va > best[0]:
+                best = (va, {k: v.detach().clone()
+                             for k, v in agent.state_dict().items()})
         print(f"  bc epoch {epoch + 1}/{cfg.bc_epochs}  "
               f"ce {ce_sum / nb:.3f}  acc {acc_sum / nb:.3f}{tail}",
+              flush=True)
+    if best[1] is not None:
+        agent.load_state_dict(best[1])
+        print(f"  bc: kept the best epoch (val acc {best[0]:.3f})",
               flush=True)
 
     # Absorb the (mean, std) normalisation into the critic's last linear so
@@ -821,6 +862,18 @@ def parse_args() -> Config:
                    help="one or more .npz playtraces from play.py "
                         "--record-playtrace; if set, BC-pretrain the actor "
                         "before PPO starts")
+    p.add_argument("--obs-size", type=int, default=Config.obs_size,
+                   help="square frame size the agent sees (traces must "
+                        "match: collect.py --pixel-size)")
+    p.add_argument("--reward-scale", type=float, default=Config.reward_scale,
+                   help="multiply each step's reward (use with "
+                        "--no-clip-reward, e.g. 0.02)")
+    p.add_argument("--value-warmup-updates", type=int,
+                   default=Config.value_warmup_updates,
+                   help="first N PPO updates train only the critic head")
+    p.add_argument("--bc-val", type=str, nargs="+", default=[],
+                   help="held-out traces: report accuracy after every BC "
+                        "epoch and keep the best epoch")
     p.add_argument("--bc-epochs", type=int, default=Config.bc_epochs,
                    help="behavioural-cloning epochs over the traces (default 5)")
     p.add_argument("--bc-batch-size", type=int, default=Config.bc_batch_size)
@@ -900,9 +953,12 @@ def parse_args() -> Config:
         frame_skip=a.frame_skip, frame_stack=a.frame_stack,
         save_every=a.save_every, anneal_lr=not a.no_anneal_lr,
         clip_reward=bool(a.clip_reward), episodic_life=a.episodic_life,
+        reward_scale=a.reward_scale, obs_size=a.obs_size,
+        value_warmup_updates=a.value_warmup_updates,
         ent_coef=a.ent_coef, ent_coef_final=a.ent_coef_final,
         death_penalty=a.death_penalty,
-        bc_traces=tuple(a.bc_traces), bc_epochs=a.bc_epochs,
+        bc_traces=tuple(a.bc_traces), bc_val=tuple(a.bc_val),
+        bc_epochs=a.bc_epochs,
         bc_batch_size=a.bc_batch_size, bc_value=a.bc_value,
         bc_anchor_coef=a.bc_anchor_coef, bc_anchor_final=a.bc_anchor_final,
         teacher_policy=a.teacher_policy,
@@ -942,7 +998,8 @@ def main() -> None:
     agent = Agent(num_actions=DiggerEnv.NUM_ACTIONS,
                   in_channels=in_ch,
                   width=cfg.encoder_width,
-                  separate_critic=cfg.separate_critic).to(device)
+                  separate_critic=cfg.separate_critic,
+                  in_hw=(cfg.obs_size, cfg.obs_size)).to(device)
     n_params = sum(p.numel() for p in agent.parameters())
     print(f"{tag}agent: width={cfg.encoder_width}, in_ch={in_ch} "
           f"({'color' if cfg.color else 'gray'}), params={n_params:,}  "
@@ -976,8 +1033,10 @@ def main() -> None:
     if cfg.bc_traces:
         traces = _load_traces(cfg.bc_traces, cfg)
         bc_data = _build_bc_index(traces, cfg)
+        val_data = (_build_bc_index(_load_traces(cfg.bc_val, cfg), cfg)
+                    if cfg.bc_val else None)
         if cfg.bc_epochs > 0:
-            bc_pretrain(agent, optim, bc_data, cfg, device)
+            bc_pretrain(agent, optim, bc_data, cfg, device, val_data)
     anchor_rng = np.random.default_rng(cfg.seed + 17)
 
     # Live teacher labeling. Required by --teacher-policy. Only the
@@ -1131,6 +1190,7 @@ def main() -> None:
             actions_np = action.cpu().numpy()
             obs_np, rewards, dones, infos = vec.step(actions_np)
             global_step += cfg.frame_skip * B
+            rewards = rewards * cfg.reward_scale
             if cfg.time_penalty > 0:
                 rewards = rewards - cfg.time_penalty
             rew_buf[step] = torch.from_numpy(rewards).to(device)
@@ -1235,7 +1295,19 @@ def main() -> None:
                 ent = entropy.mean()
                 loss = pg_loss - current_ent_coef * ent + cfg.vf_coef * v_loss
 
-                if anchor_active and current_anchor > 0:
+                if update <= cfg.value_warmup_updates:
+                    # Critic-only warmup (as in train_symbolic.py): fit V on
+                    # a frozen encoder so the untrained critic after BC
+                    # neither drags the shared features nor feeds the
+                    # actor noise advantages.
+                    with torch.no_grad():
+                        z = (agent._critic_encode(flat_obs[mb])
+                             if agent.separate_critic
+                             else agent.encode(flat_obs[mb]))
+                    v_loss = 0.5 * ((agent.critic(z).squeeze(-1)
+                                     - flat_ret[mb]) ** 2).mean()
+                    loss = cfg.vf_coef * v_loss
+                elif anchor_active and current_anchor > 0:
                     if teacher is not None:
                         # Live labels: the rollout already paired each
                         # state with the teacher's chosen action.

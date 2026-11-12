@@ -72,7 +72,8 @@ def load_pixel_agent(path, device) -> tuple[torch.nn.Module, dict]:
     agent = Agent(num_actions=DiggerEnv.NUM_ACTIONS,
                   in_channels=cfg["frame_stack"] * (3 if cfg["color"] else 1),
                   width=cfg["encoder_width"],
-                  separate_critic=cfg.get("separate_critic", False))
+                  separate_critic=cfg.get("separate_critic", False),
+                  in_hw=(cfg["obs_size"], cfg["obs_size"]))
     agent.load_state_dict(ckpt["agent"])
     return agent.to(device).eval(), cfg
 

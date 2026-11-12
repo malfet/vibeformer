@@ -399,3 +399,5 @@ Yes, I can hear the sound, pretty cool
 And perhaps in both --live and watch, pressing q should abort the playback
 
 Can you check if using ctypes (same as sciextractor playback) might be better. I see some weird clicks during the playback, not sure where they are coming from
+
+Great. Let's focus on improving the scores of pixel ppo on levels further down. I think this is where experimentations will help so that one can learn how to kill monsters with bags etc
