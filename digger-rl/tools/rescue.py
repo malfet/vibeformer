@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import pickle
 import time
 from pathlib import Path
 
@@ -60,8 +61,23 @@ def main() -> None:
                    help="a rescue is alive this many steps after rollback")
     p.add_argument("--start-states", default="data/save/levels")
     p.add_argument("--start-prob", type=float, default=0.75)
+    p.add_argument("--pool-dir", type=Path, default=None,
+                   help="also save the --rollback states before each death "
+                        "as start states (level_states.py format), for "
+                        "PPO episodes that start just before a death")
+    p.add_argument("--pool-rescued-only", action="store_true",
+                   help="save a --pool-dir state only when a branch from it "
+                        "survived (states a policy can learn to escape)")
+    p.add_argument("--pool-only", action="store_true",
+                   help="only save --pool-dir states; skip the branch search")
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
+    if (args.pool_only or args.pool_rescued_only) and args.pool_dir is None:
+        p.error("--pool-only / --pool-rescued-only need --pool-dir")
+    if args.pool_only and args.pool_rescued_only:
+        p.error("--pool-rescued-only needs the branch search (no --pool-only)")
+    if args.pool_dir is not None:
+        args.pool_dir.mkdir(parents=True, exist_ok=True)
 
     torch.manual_seed(args.seed)
     env = SymbolicDiggerEnv(max_steps=10**9, clip_reward=False,
@@ -134,6 +150,27 @@ def main() -> None:
         stats["deaths"] += 1
         cause = info.get("death_cause") or "monster"
         stats[f"death_{cause}"] += 1
+        level = env._env.read_level()
+
+        def save_pool(back: int) -> None:
+            h = history[len(history) - back]
+            name = (f"L{level}_nd{args.seed}_{stats['deaths']}"
+                    f"_{cause}_b{back}.pkl")
+            with open(args.pool_dir / name, "wb") as fh:
+                pickle.dump(dict(state=h[0], level=level, step=-back,
+                                 lives=h[4], score=h[3], cause=cause), fh)
+            stats["pool_states"] += 1
+
+        if args.pool_dir is not None and not args.pool_rescued_only:
+            for back in args.rollback:
+                if back <= len(history):
+                    save_pool(back)
+        if args.pool_only:
+            env.reset()
+            student.reset()
+            history.clear()
+            obs = env.current_obs()
+            continue
         best = None
         for back in args.rollback:
             if back + 3 > len(history):
@@ -148,6 +185,8 @@ def main() -> None:
             if best is not None:
                 stats[f"rescued_at_{back}"] += 1
                 stats[f"rescued_{cause}"] += 1
+                if args.pool_rescued_only:
+                    save_pool(back)
                 break
         if best is None:
             stats["unrescued"] += 1
@@ -169,6 +208,9 @@ def main() -> None:
                   f"segments {sum(out['resets'])}  {el:.0f}s", flush=True)
 
     env.close()
+    if not out["frames"]:
+        print(f"\n{dict(stats)}\nno rescue segments written")
+        return
     frames = np.stack(out["frames"])
     scores = np.array(out["scores"], np.int32)
     prev = np.concatenate([[scores[0]], scores[:-1]])

@@ -141,15 +141,27 @@ class DiggerEnv:
         # at ~6x less emulation cost. 2750 (286-12) is cheaper still but
         # starves the game: monsters arrive ~30-80 frames late.
         self.cycles = cycles
-        # start_states: a directory of tools/level_states.py pickles. On a
-        # hard reset, with probability start_prob the game continues from
-        # one of them (a random level start or mid-level state) instead of
-        # level 1, so training sees later levels' layouts and backgrounds.
+        # start_states: directories of tools/level_states.py-format
+        # pickles, "DIR" or "DIR=W,DIR=W" (weights pick the directory, then
+        # a file uniformly; e.g. level starts vs tools/rescue.py near-death
+        # states). On a hard reset, with probability start_prob the game
+        # continues from one of them instead of level 1, so training sees
+        # later levels and the situations a student dies in.
         self.start_prob = float(start_prob)
-        self._start_files = (sorted(Path(start_states).glob("L*.pkl"))
-                             if start_states else [])
-        if self.start_prob > 0 and not self._start_files:
-            raise ValueError(f"no L*.pkl start states in {start_states!r}")
+        self._start_pools: list[list[Path]] = []
+        weights = []
+        for part in (start_states or "").split(","):
+            if not part:
+                continue
+            d, _, w = part.partition("=")
+            files = sorted(Path(d).glob("L*.pkl"))
+            if not files:
+                raise ValueError(f"no L*.pkl start states in {d!r}")
+            self._start_pools.append(files)
+            weights.append(float(w or 1.0))
+        if self.start_prob > 0 and not self._start_pools:
+            raise ValueError("start_prob > 0 needs start_states")
+        self._pool_p = np.array(weights) / sum(weights) if weights else None
         self._rng = np.random.default_rng()
         self._core: _libretro.LibretroCore | None = None
         self._last_action = self.NOOP
@@ -222,8 +234,10 @@ class DiggerEnv:
         self._death_counted = False
         self._real_game_over = False
         self._steps = 0
-        if self._start_files and self._rng.random() < self.start_prob:
-            f = self._start_files[self._rng.integers(len(self._start_files))]
+        if self._start_pools and self._rng.random() < self.start_prob:
+            pool = self._start_pools[self._rng.choice(len(self._start_pools),
+                                                      p=self._pool_p)]
+            f = pool[self._rng.integers(len(pool))]
             with open(f, "rb") as fh:
                 d = pickle.load(fh)
             frame = self.load_state(d["state"]["env"])

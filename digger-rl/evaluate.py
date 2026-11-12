@@ -85,6 +85,7 @@ def main() -> None:
     life_lengths: list[int] = []
     clean_l1 = 0
     any_l1 = 0
+    causes: collections.Counter = collections.Counter()
 
     for ep in range(args.episodes):
         obs = env.reset()
@@ -110,6 +111,7 @@ def main() -> None:
                 clean_l1 += clean_game
             prev_em = n_em
             if info.get("death_event", False):
+                causes[info.get("death_cause") or "monster"] += 1
                 died_yet = True
                 life_lengths.append(steps_this_life)
                 steps_this_life = 0
@@ -142,6 +144,8 @@ def main() -> None:
               f"max {max(life_lengths)}  n={len(life_lengths)} agent steps")
     print(f"level 1    : cleared without dying {clean_l1}/{args.episodes}  "
           f"cleared at all {any_l1}/{args.episodes}")
+    print(f"deaths     : {sum(causes.values())} "
+          f"({', '.join(f'{k} {v}' for k, v in sorted(causes.items()))})")
 
 
 def evaluate_levels(env, policy, args, label: str) -> None:
