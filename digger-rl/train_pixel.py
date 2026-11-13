@@ -29,7 +29,7 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 from torch.optim import Adam
 
-from digger_env import DiggerEnv, DiggerVecEnv
+from digger_env import DiggerEnv, DiggerVecEnv, stack_offsets
 from tools.game_state import extract_state_ram
 from tools.heuristic_agent import DodgeMonsters, GreedyEmerald, SmartHeuristic
 
@@ -359,6 +359,7 @@ class Config:
     max_grad_norm: float = 0.5
     frame_skip: int = 4
     frame_stack: int = 4
+    frame_offsets: tuple = ()         # stacked frames (0 = newest); () = last frame_stack
     obs_size: int = 84
     start_states: str | None = None   # dir of tools/level_states.py states
     start_prob: float = 0.0           # P(an episode starts from one of them)
@@ -705,10 +706,10 @@ def _build_bc_index(traces: list[dict], cfg: Config
         # frames [t-k+1..t], so a reset on any of (t-k+2)..t would mean
         # pre-reset and post-reset frames are mixed in the same input window.
         # resets[k] = True means a reset happened between sample k-1 and k.
+        span = stack_offsets(cfg.frame_stack, cfg.frame_offsets)[0]
         skipped = 0
-        for t in range(cfg.frame_stack - 1, n):
-            lo = max(0, t - cfg.frame_stack + 2)
-            if bool(resets[lo:t + 1].any()):
+        for t in range(span, n):
+            if bool(resets[t - span + 1:t + 1].any()):
                 skipped += 1
                 continue
             index.append((i, t))
@@ -730,13 +731,14 @@ def _bc_minibatch(per_frames: list[np.ndarray], per_actions: list[np.ndarray],
     for color (RGB triplets laid out frame-by-frame).
     """
     bs = len(idxs)
+    offs = stack_offsets(cfg.frame_stack, cfg.frame_offsets)
     channels = cfg.frame_stack * (3 if cfg.color else 1)
     obs = np.empty((bs, channels, cfg.obs_size, cfg.obs_size), dtype=np.uint8)
     acts = np.empty(bs, dtype=np.int64)
     rets = np.empty(bs, dtype=np.float32) if per_returns is not None else None
     for j, ix in enumerate(idxs):
         ti, t = index[ix]
-        win = per_frames[ti][t - cfg.frame_stack + 1: t + 1]
+        win = per_frames[ti][[t - o for o in offs]]
         if cfg.color:
             # (stack_k, H, W, 3) -> (stack_k*3, H, W)
             win = win.transpose(0, 3, 1, 2).reshape(
@@ -898,6 +900,11 @@ def parse_args() -> Config:
                    help="parallel envs (subprocess workers if >1)")
     p.add_argument("--frame-skip", type=int, default=Config.frame_skip)
     p.add_argument("--frame-stack", type=int, default=Config.frame_stack)
+    p.add_argument("--frame-offsets", default="",
+                   help="comma list of past frames to stack, 0 = newest, "
+                        "e.g. 0,1,2,3,6,10,16,24 (overrides --frame-stack). "
+                        "With --load-agent from a shorter stack, the new "
+                        "frames' input weights start at zero")
     p.add_argument("--save-every", type=int, default=Config.save_every)
     p.add_argument("--no-anneal-lr", action="store_true")
     p.add_argument("--clip-reward", default=Config.clip_reward,
@@ -1025,12 +1032,15 @@ def parse_args() -> Config:
                         "to run several train_pixel invocations in parallel "
                         "without checkpoint filename collisions")
     a = p.parse_args()
+    offs = [int(o) for o in a.frame_offsets.split(",") if o.strip()]
     return Config(
         total_timesteps=a.total_timesteps,
         device=str(select_device(a.force_cpu)),
         learning_rate=a.lr, seed=a.seed,
         num_steps=a.num_steps, num_envs=a.num_envs,
-        frame_skip=a.frame_skip, frame_stack=a.frame_stack,
+        frame_skip=a.frame_skip,
+        frame_stack=(len(stack_offsets(0, offs)) if offs else a.frame_stack),
+        frame_offsets=stack_offsets(0, offs) if offs else (),
         save_every=a.save_every, anneal_lr=not a.no_anneal_lr,
         clip_reward=bool(a.clip_reward), episodic_life=a.episodic_life,
         reward_scale=a.reward_scale, obs_size=a.obs_size,
@@ -1058,6 +1068,24 @@ def parse_args() -> Config:
     )
 
 
+def _widen_first_conv(sd: dict, own: dict, tag: str) -> dict:
+    """Load a checkpoint trained on a shorter frame stack: its first
+    conv sees the newest frames, which come last in the stack, so the
+    extra older frames are prepended with zero weights. The widened
+    agent then acts exactly as the loaded one until it learns to use
+    them."""
+    for k, w in sd.items():
+        if (w.dim() == 4 and k in own and own[k].dim() == 4
+                and own[k].shape[1] > w.shape[1]):
+            extra = own[k].shape[1] - w.shape[1]
+            sd[k] = torch.cat([w.new_zeros(w.shape[0], extra,
+                                           *w.shape[2:]), w], 1)
+            print(f"{tag}load-agent: {k} widened {w.shape[1]} -> "
+                  f"{own[k].shape[1]} input channels (new ones zero)",
+                  flush=True)
+    return sd
+
+
 def main() -> None:
     cfg = parse_args()
     torch.manual_seed(cfg.seed)
@@ -1080,7 +1108,8 @@ def main() -> None:
                       archive_perturb=cfg.archive_perturb)
     vec = DiggerVecEnv(num_envs=cfg.num_envs, frame_skip=cfg.frame_skip,
                        frame_stack=cfg.frame_stack, obs_size=cfg.obs_size,
-                       color=cfg.color, env_kwargs=env_kwargs)
+                       color=cfg.color, env_kwargs=env_kwargs,
+                       frame_offsets=cfg.frame_offsets)
     in_ch = cfg.frame_stack * (3 if cfg.color else 1)
     agent = Agent(num_actions=DiggerEnv.NUM_ACTIONS,
                   in_channels=in_ch,
@@ -1096,7 +1125,7 @@ def main() -> None:
     if cfg.load_agent:
         ckpt = torch.load(cfg.load_agent, map_location=device,
                           weights_only=False)
-        sd = ckpt["agent"]
+        sd = _widen_first_conv(ckpt["agent"], agent.state_dict(), tag)
         missing, unexpected = agent.load_state_dict(sd, strict=False)
         if unexpected:
             raise SystemExit(f"--load-agent: unexpected keys {unexpected}")

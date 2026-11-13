@@ -23,7 +23,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from digger_env import DiggerEnv, preprocess_uint8
+from digger_env import DiggerEnv, preprocess_uint8, stack_offsets
 from tools.heuristic_agent import SmartHeuristic
 from tools.symbolic_env import SymbolicDiggerEnv
 
@@ -132,7 +132,9 @@ class _Pixel(_Net):
     def __init__(self, env, agent, cfg, device, argmax):
         super().__init__(agent, device, argmax)
         self.env, self.cfg = env, cfg
-        self.stack = collections.deque(maxlen=cfg["frame_stack"])
+        self.offs = stack_offsets(cfg["frame_stack"],
+                                  cfg.get("frame_offsets", ()))
+        self.stack = collections.deque(maxlen=self.offs[0] + 1)
         self.refill = True
 
     def reset(self) -> None:
@@ -152,7 +154,7 @@ class _Pixel(_Net):
         else:
             self.stack.append(fr)
         planes = [f.transpose(2, 0, 1) if f.ndim == 3 else f[None]
-                  for f in self.stack]
+                  for f in (self.stack[-1 - o] for o in self.offs)]
         x = torch.from_numpy(np.concatenate(planes, 0)).to(self.device)
         return self._act(x.float().div_(255.0).unsqueeze(0))
 

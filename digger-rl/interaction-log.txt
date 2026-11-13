@@ -418,3 +418,7 @@ May be you can spend some time fixing the restore issue? Because emulator is 100
 So where are we now?
 
 Yes, push, and start on the state archive
+So did ppo3 is the best so far? And still what is the next strategies to prevent it from loosing lives And be better with firing.
+Let's do 3 and then 4
+So what's the status?
+Ok, please find best checkpoint so far and publish it as artifact into the current repo

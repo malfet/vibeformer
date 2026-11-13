@@ -649,22 +649,29 @@ def preprocess_uint8(rgba: np.ndarray, size: int = 84,
 
 
 class FrameStack:
-    """Rolling stack of the last k preprocessed frames.
+    """Rolling stack of preprocessed frames.
 
     Output is (channels, H, W) where channels = k for grayscale or k*3 for
     color (so a 4-frame color stack is 12 channels, with RGB triplets laid
-    out frame-by-frame: [r0 g0 b0 r1 g1 b1 ...]).
+    out frame-by-frame: [r0 g0 b0 r1 g1 b1 ...]), oldest frame first.
+
+    `offsets` picks which past frames to stack (0 = newest), e.g.
+    (0, 1, 2, 3, 6, 10, 16, 24) adds a sparse longer history to the
+    last 4; the default is the last k frames.
     """
 
-    def __init__(self, k: int = 4, size: int = 84, color: bool = False):
-        self.k = k
+    def __init__(self, k: int = 4, size: int = 84, color: bool = False,
+                 offsets=None):
+        self.offsets = stack_offsets(k, offsets)
+        self.k = len(self.offsets)
         self.size = size
         self.color = color
-        self.frames: collections.deque[np.ndarray] = collections.deque(maxlen=k)
+        self.frames: collections.deque[np.ndarray] = collections.deque(
+            maxlen=self.offsets[0] + 1)
 
     def reset(self, frame: np.ndarray) -> np.ndarray:
         self.frames.clear()
-        for _ in range(self.k):
+        for _ in range(self.frames.maxlen):
             self.frames.append(frame)
         return self._stacked()
 
@@ -673,12 +680,17 @@ class FrameStack:
         return self._stacked()
 
     def _stacked(self) -> np.ndarray:
-        arr = np.stack(self.frames, axis=0)
+        arr = np.stack([self.frames[-1 - o] for o in self.offsets], axis=0)
         if not self.color:
             return arr                                     # (k, H, W)
         # (k, H, W, 3) -> (k, 3, H, W) -> (k*3, H, W)
         return arr.transpose(0, 3, 1, 2).reshape(
             self.k * 3, self.size, self.size)
+
+
+def stack_offsets(k: int, offsets=None) -> tuple[int, ...]:
+    """Frame offsets of a stack (0 = newest), oldest first."""
+    return tuple(sorted(set(offsets) if offsets else range(k), reverse=True))
 
 
 def _env_step_skipped(env: DiggerEnv, action: int, skip: int):
@@ -703,10 +715,11 @@ def _env_step_skipped(env: DiggerEnv, action: int, skip: int):
 
 
 def _vec_worker(conn, env_kwargs, frame_skip, obs_size, frame_stack,
-                color) -> None:
+                color, frame_offsets=None) -> None:
     """One DiggerEnv per subprocess; pipe protocol = (cmd, payload)."""
     env = DiggerEnv(**env_kwargs)
-    stack = FrameStack(k=frame_stack, size=obs_size, color=color)
+    stack = FrameStack(k=frame_stack, size=obs_size, color=color,
+                       offsets=frame_offsets)
     obs = stack.reset(preprocess_uint8(env.reset(), obs_size, color))
     try:
         while True:
@@ -750,7 +763,7 @@ class DiggerVecEnv:
                  frame_stack: int = 4, obs_size: int = 84,
                  color: bool = False,
                  env_kwargs: dict | None = None,
-                 ctx: str = "spawn"):
+                 ctx: str = "spawn", frame_offsets=None):
         self.num_envs = num_envs
         self.frame_skip = frame_skip
         self.frame_stack = frame_stack
@@ -761,7 +774,8 @@ class DiggerVecEnv:
         self._inproc = num_envs == 1
         if self._inproc:
             self._env = DiggerEnv(**env_kwargs)
-            self._stack = FrameStack(k=frame_stack, size=obs_size, color=color)
+            self._stack = FrameStack(k=frame_stack, size=obs_size, color=color,
+                                     offsets=frame_offsets)
             self._conns = self._procs = []
         else:
             mp_ctx = mp.get_context(ctx)
@@ -770,7 +784,8 @@ class DiggerVecEnv:
                 parent, child = mp_ctx.Pipe(duplex=True)
                 p = mp_ctx.Process(target=_vec_worker, daemon=True,
                                    args=(child, env_kwargs, frame_skip,
-                                         obs_size, frame_stack, color))
+                                         obs_size, frame_stack, color,
+                                         frame_offsets))
                 p.start()
                 child.close()
                 self._conns.append(parent)

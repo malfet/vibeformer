@@ -34,6 +34,7 @@ from pathlib import Path
 
 import torch
 
+from tools.bag_kills import squashed
 from tools.policies import env_kwargs, make_policy
 from tools.symbolic_env import SymbolicDiggerEnv, env_step_skipped
 from train_pixel import select_device
@@ -86,6 +87,7 @@ def main() -> None:
     clean_l1 = 0
     any_l1 = 0
     causes: collections.Counter = collections.Counter()
+    bag_kills = 0
 
     for ep in range(args.episodes):
         obs = env.reset()
@@ -96,6 +98,7 @@ def main() -> None:
         levelled = False
         clean_game = False
         prev_em = None
+        crushed = squashed(env)
         while True:
             a = policy(obs)
             obs, _, done, info = env_step_skipped(env, a, args.frame_skip)
@@ -110,6 +113,9 @@ def main() -> None:
                 clean_game = not died_yet
                 clean_l1 += clean_game
             prev_em = n_em
+            now = squashed(env)
+            bag_kills += max(0, now - crushed)
+            crushed = now
             if info.get("death_event", False):
                 causes[info.get("death_cause") or "monster"] += 1
                 died_yet = True
@@ -146,6 +152,8 @@ def main() -> None:
           f"cleared at all {any_l1}/{args.episodes}")
     print(f"deaths     : {sum(causes.values())} "
           f"({', '.join(f'{k} {v}' for k, v in sorted(causes.items()))})")
+    print(f"bag kills  : {bag_kills} "
+          f"({bag_kills / args.episodes:.1f} per game)")
 
 
 def evaluate_levels(env, policy, args, label: str) -> None:

@@ -27,6 +27,20 @@ The earlier BC run (`bc_v1`) scored 2765 against a same-day teacher of
 3098 (Lesson 17). The PPO student is the first policy that beats its
 teacher (Lesson 19).
 
+### Pixel agents (2026-11-13, 128x128 RGB, IMPALA encoder)
+
+Pixel-only PPO now beats every symbolic policy above (Lesson 22). 20
+sampled games, plus 10 greedy (argmax) games:
+
+| Policy | Score | Greedy | Life | L1 clean | Bag kills/game |
+|---|---:|---:|---:|---:|---:|
+| **`px128_bag1` (published: `checkpoints/digger_px128_bag1.pt`)** | **4325** ±239 | **5323** ±123 | **342** | **14/20** | **7.4** |
+| `px128_ppo3` (+ state archive) | 3951-4133 | 5138 ±262 | 314-328 | 8-10/20 | 3.8 |
+| `px128_ppo2` | 3103 ±349 | 4833 ±471 | 281 | 8/20 | - |
+| IMPALA BC student (`px128_impala1`) | 1641 ±176 | 1470 | 202 | 1/20 | - |
+
+    python watch.py checkpoints/digger_px128_bag1.pt --sound
+
 Earlier scoreboards (CV state, pixel PPO, Dreamer, DQN) are in the
 lessons below; every number before Lesson 15 used the misaligned CV
 state.
@@ -59,6 +73,8 @@ trainer (`tools/policies.py` tells them apart by their config).
 | `tools/search_teacher.py` | `SearchTeacher`: the heuristic overruled by emulator rollouts (Lesson 13). Stronger but 0.4 s/step. |
 | `tools/policies.py` | Loads any policy spec for `watch.py` / `evaluate.py`. |
 | `tools/display.py` | Kitty graphics + keyboard protocol viewer, matplotlib fallback. |
+| `tools/bag_kills.py` | Start states shortly before bag kills that depend on the digger's play (Lesson 22). |
+| `tools/rescue.py` | Roll back before student deaths and search for surviving branches; near-death start pools (Lesson 21). |
 | `tools/collect_death_states.py` | Save states N steps before each death; `--probe` checks escapability. |
 | `tools/make_report_figs.py` | Regenerates `docs/*.png`. |
 | `interaction-log.txt` | Every prompt, in order. |
@@ -780,6 +796,40 @@ when `DBP_LOCKSTEP` is set: restore-and-replay is byte-identical, and
 restoring every step no longer changes the game. It is now the default
 (`DIGGER_LOCKSTEP=0` opts out); emulator throughput drops ~20%.
 Separate `reset()`s still differ: each boot reads the host clock.
+
+### 22. Pixel PPO past the teacher; bag-kill starts help, extra memory does not yet (2026-11-13)
+
+All runs start from the IMPALA BC student (`px128_impala1`) or from the
+previous run, 4M frames each, 8 envs, reward = score x 0.02 unclipped,
+episodic life, half the episodes from a start pool.
+
+| Run | Change | Sampled | Greedy | Bag deaths | Bag kills/game |
+|---|---|---:|---:|---:|---:|
+| `px128_ppo2` | no death penalty; 20% *rescuable* near-death starts; BC anchor 0.3 -> 0 | 3103 | 4833 | 14/60 | - |
+| `px128_ppo3` | + state archive (`--archive-every 50`, snapshot own play, perturb, boost pre-death snapshots) | 4133 | 5138 | 2/60 | 3.8 |
+| `px128_ppo4` | `ppo3` + 4M more frames (control) | 3898 | 4128 | 2/60 | 3.5 |
+| `px128_mem1` | `ppo3` + 8 frames at offsets 0,1,2,3,6,10,16,24 | 3438 | 3650 | 6/60 | 6.3 |
+| **`px128_bag1`** | `ppo3` + 20% bag-kill starts | **4325** | **5323** | **0/60** | **7.4** |
+
+- **The state archive removed bag deaths** (23% -> 3% of deaths). Its
+  pre-death boost replays the moments before the agent's own deaths.
+- **Shooting barely matters.** The fire oracle over 4 `ppo2` games: of
+  2842 steps with the gun ready, a shot would have killed within 10 steps
+  in 4. The bullet stops at the first dirt pixel.
+- **More frames of history (`--frame-offsets`) learned bag kills (6.3 per
+  game) but lost emeralds** on later levels (16-25% vs 25-47%). The new
+  input channels start at zero (`_widen_first_conv`, identical play at
+  step 0), and 4M frames were not enough to work them in.
+- **Plain continuation (`ppo4`) did not help**: `ppo3` is a plateau for
+  this recipe, not an under-trained run.
+- **Bag-kill starts worked.** `tools/bag_kills.py` plays `ppo3`, and at
+  each bag kill (a monster's `death` field set to 1, which only
+  `squashmonster` does) probes the states 6/12/20 steps earlier with
+  NOOPs: 271 kills that happen anyway are dropped, 179 states where the
+  kill depends on the play are kept. As 20% of starts: bag kills doubled
+  (3.8 -> 7.4 per game), no bag deaths in 60 lives, best score so far.
+- Still open: **all 60 deaths are monsters**, and no later level is
+  cleared in one life (best: 74% of level 2's emeralds).
 
 ## Lessons ported from ../snake (2026-08-31)
 
