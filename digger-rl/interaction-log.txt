@@ -428,3 +428,4 @@ Try again
 In the meantime, can you rework README for digger RL to start with model architecture and then explain training steps (succinctly for checkpoint it has right now)
 Did you commit the change (as patch) to dosbox-pure? And do you still need it. And since you've published checkpoint, let's create (and push) the tag, say digger-v0.1
 Go ahead with exit2 once the traces are done. Also let's think about some interesting visualization ideas to add to watch, specifically outputting log probs (or may be somehow visualize input matrix network is seeing. And I want to have an option to record a playback as say mp4 or something to publish to youtube later
+Few questions about hud - network does not see color, only black in white? I.e. input is 128x128x4, not 128x128x3x4?

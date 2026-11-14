@@ -104,8 +104,10 @@ class Hud:
         newest = frames[-1]
         if self.sal is not None:
             newest = self._heat(newest, self.sal)
-        d.text((8, 2), f"network input  {len(frames)} x {x.shape[1]}x"
-               f"{x.shape[2]}{'  + saliency' if self.sal is not None else ''}",
+        kind = "RGB" if x.shape[0] == 3 * len(frames) else "gray"
+        d.text((8, 2), f"input {len(frames)} x {kind} {x.shape[1]}x"
+               f"{x.shape[2]} = {x.shape[0]} ch"
+               f"{'  + saliency' if self.sal is not None else ''}",
                font=self.small, fill=DIM)
         img.paste(Image.fromarray(newest).resize((192, 192), Image.NEAREST),
                   (8, 18))
