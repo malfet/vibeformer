@@ -4,7 +4,10 @@
 just acted on (`_Net.last_x` / `last_logits`) and draws a 320x400 panel:
 
   - the network's input: the newest of the stacked 128x128 frames,
-    enlarged, and the older ones beside it;
+    enlarged;
+  - motion across the stack: where each moving 8x8 block of the newest
+    frame was in the oldest one, found by block matching as a video
+    encoder would, drawn as arrows over the dimmed frame;
   - each action's probability and log-probability, the chosen one
     highlighted;
   - the critic's value and the policy entropy, with the value's recent
@@ -27,6 +30,8 @@ from PIL import Image, ImageDraw, ImageFont
 from tools.heuristic_agent import ACTION_NAMES
 
 W, H = 320, 400
+VIEW = 150                        # input / motion views, px on the panel
+BLOCK, REACH = 8, 6               # block matching: block size, search radius
 BG = (18, 18, 24)
 FG = (220, 220, 220)
 DIM = (120, 120, 130)
@@ -71,6 +76,55 @@ class Hud:
             self.sal = (s / top).clamp(0, 1).cpu().numpy()
         self.panel = self._draw(x[0].cpu().numpy(), logp, action, value)
 
+    # ---- motion -------------------------------------------------------------
+
+    @staticmethod
+    def motion(old: np.ndarray, new: np.ndarray) -> list[tuple]:
+        """Block matching from `new` back to `old` (HxWx3 uint8): for each
+        BLOCK x BLOCK tile of `new` that changed, the shift (dy, dx) within
+        +-REACH whose patch of `old` matches it best. Neighbouring tiles
+        that moved alike (one sprite straddling tiles) are merged. Returns
+        (y, x, dy, dx) per moving thing: centre now, and the displacement
+        since `old`."""
+        a = old.astype(np.int16).sum(2)
+        b = new.astype(np.int16).sum(2)
+        h, w = b.shape
+        nb = (h // BLOCK, BLOCK, w // BLOCK, BLOCK)
+        pad = np.pad(a, REACH, mode="edge")
+        shifts = [(dy, dx) for dy in range(-REACH, REACH + 1)
+                  for dx in range(-REACH, REACH + 1)]
+        sad = np.stack([
+            np.abs(b - pad[REACH - dy:REACH - dy + h, REACH - dx:REACH - dx + w])
+            .reshape(nb).sum((1, 3)) for dy, dx in shifts])   # (S, h/B, w/B)
+        still = sad[shifts.index((0, 0))]
+        # Prefer short shifts on ties; a move has to beat standing still.
+        cost = sad + 4 * np.array([abs(dy) + abs(dx) for dy, dx in shifts]
+                                  )[:, None, None]
+        best = cost.argmin(0)
+        moved = {}
+        for i, j in zip(*np.nonzero(still > 40 * BLOCK)):
+            k = best[i, j]
+            if sad[k, i, j] * 2 < still[i, j] and shifts[k] != (0, 0):
+                moved[i, j] = shifts[k]
+        out = []
+        while moved:                     # flood-fill groups of alike tiles
+            group, todo = [], [next(iter(moved))]
+            while todo:
+                t = todo.pop()
+                if t not in moved:
+                    continue
+                v = moved.pop(t)
+                group.append((*t, *v))
+                for di in (-1, 0, 1):
+                    for dj in (-1, 0, 1):
+                        n = (t[0] + di, t[1] + dj)
+                        if n in moved and max(abs(moved[n][0] - v[0]),
+                                              abs(moved[n][1] - v[1])) <= 2:
+                            todo.append(n)
+            i, j, dy, dx = np.mean(group, 0)
+            out.append((i * BLOCK + BLOCK / 2, j * BLOCK + BLOCK / 2, dy, dx))
+        return out
+
     # ---- drawing ------------------------------------------------------------
 
     def _frames(self, x: np.ndarray) -> list[np.ndarray]:
@@ -94,21 +148,33 @@ class Hud:
         d = ImageDraw.Draw(img)
         frames = self._frames(x)
         newest = frames[-1]
-        if self.sal is not None:
-            newest = self._heat(newest, self.sal)
         kind = "RGB" if x.shape[0] == 3 * len(frames) else "gray"
         d.text((8, 2), f"input {len(frames)} x {kind} {x.shape[1]}x"
-               f"{x.shape[2]} = {x.shape[0]} ch"
-               f"{'  + saliency' if self.sal is not None else ''}",
-               font=self.small, fill=DIM)
-        img.paste(Image.fromarray(newest).resize((192, 192), Image.NEAREST),
+               f"{x.shape[2]} = {x.shape[0]} ch", font=self.small, fill=DIM)
+        view = self._heat(newest, self.sal) if self.sal is not None else newest
+        img.paste(Image.fromarray(view).resize((VIEW, VIEW), Image.NEAREST),
                   (8, 18))
-        older = frames[:-1][::-1][:3]                 # t-1, t-2, t-3
-        for k, f in enumerate(older):
-            y = 18 + k * 66
-            img.paste(Image.fromarray(f).resize((60, 60), Image.NEAREST),
-                      (212, y))
-            d.text((276, y + 22), f"t-{k + 1}", font=self.small, fill=DIM)
+        if self.sal is not None:
+            d.text((8, 18 + VIEW + 2), "saliency", font=self.small, fill=DIM)
+
+        # Motion view: the newest frame dimmed, arrows from where each
+        # moving block was in the oldest frame to where it is now.
+        mx = W - 8 - VIEW
+        img.paste(Image.fromarray(newest // 3).resize((VIEW, VIEW),
+                                                      Image.NEAREST), (mx, 18))
+        k = VIEW / newest.shape[0]
+        for cy, cx, dy, dx in self.motion(frames[0], newest):
+            x1, y1 = mx + cx * k, 18 + cy * k
+            x0, y0 = x1 - dx * k * 2, y1 - dy * k * 2   # arrows drawn 2x long
+            d.line((x0, y0, x1, y1), fill=ACCENT, width=2)
+            n = np.hypot(dx, dy)
+            ux, uy = dx / n, dy / n
+            d.polygon([(x1 + 3 * ux, y1 + 3 * uy),
+                       (x1 - 4 * ux - 4 * uy, y1 - 4 * uy + 4 * ux),
+                       (x1 - 4 * ux + 4 * uy, y1 - 4 * uy - 4 * ux)],
+                      fill=ACCENT)
+        d.text((mx, 18 + VIEW + 2), f"motion t-{len(frames) - 1} -> t",
+               font=self.small, fill=DIM)
 
         y0 = 220
         probs = logp.exp()

@@ -431,3 +431,4 @@ Go ahead with exit2 once the traces are done. Also let's think about some intere
 Few questions about hud - network does not see color, only black in white? I.e. input is 128x128x4, not 128x128x3x4?
 Explain the saliency mask once again
 Can you move saliency to just HUD part of the display (I.e. 128x128 rather than main screen)
+May be another thing - instead of drawing t-1, t-2, t-3 paint some sort of motion vectors
