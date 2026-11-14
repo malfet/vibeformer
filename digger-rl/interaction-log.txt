@@ -432,3 +432,5 @@ Few questions about hud - network does not see color, only black in white? I.e. 
 Explain the saliency mask once again
 Can you move saliency to just HUD part of the display (I.e. 128x128 rather than main screen)
 May be another thing - instead of drawing t-1, t-2, t-3 paint some sort of motion vectors
+I don't think I need arrows in the vector field, but may be a way to visualize by simply overlaying one over another, but use different color palette or something when values do not match
+And no need to render, I can just run watch
