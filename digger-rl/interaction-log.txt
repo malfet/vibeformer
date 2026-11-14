@@ -426,3 +426,4 @@ Do it
 Are they done?
 Try again
 In the meantime, can you rework README for digger RL to start with model architecture and then explain training steps (succinctly for checkpoint it has right now)
+Did you commit the change (as patch) to dosbox-pure? And do you still need it. And since you've published checkpoint, let's create (and push) the tag, say digger-v0.1
