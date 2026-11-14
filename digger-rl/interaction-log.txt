@@ -436,3 +436,4 @@ I don't think I need arrows in the vector field, but may be a way to visualize b
 And no need to render, I can just run watch
 Also, explain value and enthropy graphs you are plotting?
 And may be displaying just p, as log p is obvious
+Ok, I like it, the only thing I would like you to change is replace p with log(p)
