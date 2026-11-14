@@ -5,12 +5,21 @@
     python watch.py data/checkpoints/RUN/ppo_digger_final.pt --argmax
     python watch.py search --overlay
     python watch.py teacher --dos-ckpt L5      # from level 5's start
+    python watch.py checkpoints/digger_px128_exit1.pt --hud --saliency
+    python watch.py checkpoints/digger_px128_exit1.pt --hud --saliency \
+        --record digger.mp4 --display none --speed 0   # headless, fast
 
 The policy is a spec from tools/policies.py (teacher, search, random, or a
 checkpoint from either trainer). Frames show inline in Kitty / Ghostty /
 WezTerm, else in a matplotlib window (--display). Q quits, P pauses,
 +/- change the speed. --sound plays the game's audio (needs
 sounddevice).
+
+For pixel checkpoints, --hud adds a panel with the network's input,
+each action's probability / log-probability and the value estimate;
+--saliency paints the pixels that drive the chosen action (tools/hud.py).
+--record writes every emulator frame, as shown, with the game's sound to
+an mp4 (tools/recorder.py).
 """
 
 from __future__ import annotations
@@ -18,14 +27,17 @@ from __future__ import annotations
 import argparse
 import time
 
+import numpy as np
 import torch
 
 from digger_env import load_dos_ckpt
 from tools.display import open_display
 from tools.game_state import render_overlay
 from tools.heuristic_agent import ACTION_NAMES
+from tools.hud import Hud
 from tools.sound import open_sound
-from tools.policies import env_kwargs, make_policy
+from tools.policies import env_kwargs, make_policy, _Pixel
+from tools.recorder import Recorder
 from tools.symbolic_env import SymbolicDiggerEnv, env_step_skipped
 from train_pixel import select_device
 
@@ -38,6 +50,9 @@ def main() -> None:
     p.add_argument("policy", help="teacher | search | random | checkpoint path")
     p.add_argument("--games", type=int, default=1,
                    help="full 3-life games to play before exiting")
+    p.add_argument("--max-steps", type=int, default=0,
+                   help="end each game after this many agent steps "
+                        "(0 = play it out); handy for short clips")
     p.add_argument("--argmax", action="store_true",
                    help="argmax instead of sampling (checkpoints only)")
     p.add_argument("--speed", type=float, default=1.0,
@@ -45,8 +60,19 @@ def main() -> None:
     p.add_argument("--overlay", action="store_true",
                    help="mark the monsters and bags the policy's state has")
     p.add_argument("--frame-skip", type=int, default=4)
-    p.add_argument("--display", choices=("auto", "kitty", "mpl"),
-                   default="auto")
+    p.add_argument("--display", choices=("auto", "kitty", "mpl", "none"),
+                   default="auto", help="none: no window (with --record)")
+    p.add_argument("--hud", action="store_true",
+                   help="side panel: network input, action log-probs, "
+                        "value (pixel checkpoints)")
+    p.add_argument("--saliency", action="store_true",
+                   help="highlight the pixels driving the chosen action "
+                        "(pixel checkpoints)")
+    p.add_argument("--record", default=None, metavar="OUT.mp4",
+                   help="record every frame shown, with sound, to an mp4")
+    p.add_argument("--record-scale", type=int, default=2,
+                   help="integer upscale of the recording (2 = 1920x800 "
+                        "with --hud)")
     p.add_argument("--sound", action="store_true",
                    help="play the game's audio (needs sounddevice)")
     p.add_argument("--dos-ckpt", default=None, metavar="STATE",
@@ -63,6 +89,14 @@ def main() -> None:
     policy = make_policy(args.policy, env, select_device(args.force_cpu),
                          argmax=args.argmax, seed=args.seed)
 
+    hud = None
+    if args.hud or args.saliency:
+        if not isinstance(policy, _Pixel):
+            raise SystemExit("--hud / --saliency need a pixel checkpoint")
+        hud = Hud(saliency=args.saliency)
+    rec = Recorder(args.record, scale=args.record_scale) if args.record \
+        else None
+
     start = None
     if args.dos_ckpt is not None:
         start, desc = load_dos_ckpt(args.dos_ckpt)
@@ -70,7 +104,26 @@ def main() -> None:
 
     def frame():
         raw = env._env._core.get_frame()
-        return render_overlay(raw, env._last_state) if args.overlay else raw
+        raw = render_overlay(raw, env._last_state) if args.overlay else raw
+        if hud is None:
+            return raw
+        rgb = hud.overlay(np.ascontiguousarray(raw[..., :3]))
+        if not args.hud:
+            return rgb
+        panel = hud.panel
+        if panel.shape[0] != rgb.shape[0]:
+            panel = np.pad(panel, ((0, max(0, rgb.shape[0] - panel.shape[0])),
+                                   (0, 0), (0, 0)))[:rgb.shape[0]]
+        return np.concatenate([rgb, panel], 1)
+
+    def on_frame():
+        # Every emulator frame: the video frame and the audio it made.
+        rec.frame(np.ascontiguousarray(frame()[..., :3]))
+        core = env._env._core
+        pcm = np.frombuffer(core.take_audio(), np.int16)
+        rec.audio(pcm, rate)
+        if snd is not None:
+            snd.feed(pcm.reshape(-1, 2))
 
     snd = None
     speed, paused, quit_ = args.speed, False, False
@@ -89,9 +142,17 @@ def main() -> None:
             obs = env.reset()
             if args.sound:
                 snd = open_sound(env._env._core)
+            if rec is not None:
+                core = env._env._core
+                rate = int(core.get_av_info()[5]) or 48000
+                core.enable_audio(True)
             if start is not None:
                 obs = env.load_state({"env": start})
+                if rec is not None:
+                    env._env._core.take_audio()
             policy.reset()
+            if hud is not None:
+                hud.reset()
             step, score, a = 0, 0, 0
             while disp.is_open and not quit_:
                 for key, pressed in disp.poll():
@@ -114,14 +175,17 @@ def main() -> None:
                         snd.flush()
                 else:
                     a = policy(obs)
+                    if hud is not None:
+                        hud.update(policy, a)
                     obs, _, done, info = env_step_skipped(
-                        env, a, args.frame_skip)
+                        env, a, args.frame_skip,
+                        on_frame=on_frame if rec is not None else None)
                     policy.observe(info)
-                    if snd is not None:
+                    if snd is not None and rec is None:
                         snd.feed()
                     step += 1
                     score = int(info.get("score", score))
-                    if done:
+                    if done or step == args.max_steps:
                         break
                 disp.show(frame())
                 disp.set_title(
@@ -142,6 +206,11 @@ def main() -> None:
     if snd is not None:
         snd.close()
         snd = None
+    if rec is not None:
+        out = rec.close()
+        if out is not None:
+            print(f"recorded {rec.frames} frames "
+                  f"({rec.frames / 70.087:.0f} s) to {out}")
     env.close()
     for i, s in enumerate(results):
         print(f"game {i + 1}: score {s}")

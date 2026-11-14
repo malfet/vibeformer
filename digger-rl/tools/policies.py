@@ -113,6 +113,7 @@ class _Net(_Policy):
     @torch.no_grad()
     def _act(self, x: torch.Tensor) -> int:
         logits = self.agent.actor(self.agent.encode(x))
+        self.last_x, self.last_logits = x, logits[0]   # for watch.py --hud
         if self.argmax:
             return int(logits.argmax(-1).item())
         return int(torch.distributions.Categorical(

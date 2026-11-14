@@ -56,7 +56,9 @@ def open_display(kind: str = "auto", title: str = "DIGGER"):
         return KittyDisplay(title)
     if kind == "mpl":
         return MplDisplay(title)
-    raise ValueError(f"unknown display {kind!r} (auto | kitty | mpl)")
+    if kind == "none":
+        return NullDisplay()
+    raise ValueError(f"unknown display {kind!r} (auto | kitty | mpl | none)")
 
 
 class _Display:
@@ -308,3 +310,21 @@ class MplDisplay(_Display):
 
     def close(self) -> None:
         self._plt.close(self._fig)
+
+
+class NullDisplay(_Display):
+    """No window (headless recording)."""
+
+    is_open = True
+
+    def show(self, frame: np.ndarray) -> None:
+        pass
+
+    def set_title(self, text: str) -> None:
+        pass
+
+    def poll(self) -> list[tuple[str, bool]]:
+        return []
+
+    def close(self) -> None:
+        pass

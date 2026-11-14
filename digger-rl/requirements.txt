@@ -4,3 +4,4 @@ setuptools
 matplotlib>=3.8
 torch>=2.4
 sounddevice  # optional: play.py / watch.py --sound
+imageio-ffmpeg  # optional: watch.py --record without a system ffmpeg

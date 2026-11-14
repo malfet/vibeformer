@@ -344,8 +344,10 @@ class SymbolicDiggerEnv:
         self._env.close()
 
 
-def env_step_skipped(env: "SymbolicDiggerEnv", action: int, skip: int):
-    """Hold action across `skip` env frames; OR the one-frame death flags."""
+def env_step_skipped(env: "SymbolicDiggerEnv", action: int, skip: int,
+                     on_frame=None):
+    """Hold action across `skip` env frames; OR the one-frame death flags.
+    `on_frame()` runs after every emulator frame (video recording)."""
     total_r = 0.0
     obs = None
     info: dict = {}
@@ -353,6 +355,8 @@ def env_step_skipped(env: "SymbolicDiggerEnv", action: int, skip: int):
     death = False
     for _ in range(skip):
         obs, r, done_, info = env.step(action)
+        if on_frame is not None:
+            on_frame()
         total_r += r
         # One-frame death flags survive the skip if any sub-frame set them.
         death = death or bool(info.get("death_event", False))

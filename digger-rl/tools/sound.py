@@ -51,9 +51,11 @@ class Sound:
             latency="low", callback=self._callback)
         self._stream.start()
 
-    def feed(self) -> None:
-        """Queue the audio the core produced since the last call."""
-        pcm = np.frombuffer(self._core.take_audio(), np.int16)
+    def feed(self, pcm: np.ndarray | None = None) -> None:
+        """Queue the audio the core produced since the last call, or
+        `pcm` (int16 samples) when someone else takes it from the core."""
+        if pcm is None:
+            pcm = np.frombuffer(self._core.take_audio(), np.int16)
         if not pcm.size:
             return
         with self._lock:
