@@ -12,8 +12,7 @@ just acted on (`_Net.last_x` / `last_logits`) and draws a 320x400 panel:
 
 With `saliency=True` it also computes |d log pi(a|x) / dx|: the input
 pixels whose change would most change the probability of the chosen
-action (Simonyan et al. 2013). `overlay()` paints that map onto the game
-frame and the panel shows it on the input.
+action (Simonyan et al. 2013), painted onto the panel's input view.
 """
 
 from __future__ import annotations
@@ -84,17 +83,10 @@ class Hud:
         return out
 
     def _heat(self, rgb: np.ndarray, sal: np.ndarray) -> np.ndarray:
-        if sal.shape != rgb.shape[:2]:
-            sal = np.asarray(Image.fromarray((sal * 255).astype(np.uint8))
-                             .resize(rgb.shape[1::-1], Image.BILINEAR),
-                             np.float32) / 255
         # Cyan, not red: Digger's dirt is red. Weak gradients stay clear.
         a = np.clip((sal - 0.15) / 0.85, 0, 1)[..., None] * 0.8
         hot = np.array([0, 255, 255], np.float32)
         return (rgb * (1 - a) + hot * a).astype(np.uint8)
-
-    def overlay(self, rgb: np.ndarray) -> np.ndarray:
-        return self._heat(rgb, self.sal) if self.sal is not None else rgb
 
     def _draw(self, x: np.ndarray, logp: torch.Tensor, action: int,
               value: float) -> np.ndarray:

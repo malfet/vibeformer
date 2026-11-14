@@ -17,7 +17,8 @@ sounddevice).
 
 For pixel checkpoints, --hud adds a panel with the network's input,
 each action's probability / log-probability and the value estimate;
---saliency paints the pixels that drive the chosen action (tools/hud.py).
+--saliency paints the pixels that drive the chosen action onto the
+panel's input view (tools/hud.py; implies --hud).
 --record writes every emulator frame, as shown, with the game's sound to
 an mp4 (tools/recorder.py).
 """
@@ -67,7 +68,7 @@ def main() -> None:
                         "value (pixel checkpoints)")
     p.add_argument("--saliency", action="store_true",
                    help="highlight the pixels driving the chosen action "
-                        "(pixel checkpoints)")
+                        "on the HUD's input view (implies --hud)")
     p.add_argument("--record", default=None, metavar="OUT.mp4",
                    help="record every frame shown, with sound, to an mp4")
     p.add_argument("--record-scale", type=int, default=2,
@@ -107,9 +108,7 @@ def main() -> None:
         raw = render_overlay(raw, env._last_state) if args.overlay else raw
         if hud is None:
             return raw
-        rgb = hud.overlay(np.ascontiguousarray(raw[..., :3]))
-        if not args.hud:
-            return rgb
+        rgb = np.ascontiguousarray(raw[..., :3])
         panel = hud.panel
         if panel.shape[0] != rgb.shape[0]:
             panel = np.pad(panel, ((0, max(0, rgb.shape[0] - panel.shape[0])),
