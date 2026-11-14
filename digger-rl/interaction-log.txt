@@ -438,3 +438,4 @@ Also, explain value and enthropy graphs you are plotting?
 And may be displaying just p, as log p is obvious
 Ok, I like it, the only thing I would like you to change is replace p with log(p)
 Commit this
+Let's spend some time working on README.md. First I want a block diagram near table. Next you can move Build step outside of `How published checkpoint was trained` (May be somewhere towards the bottom) and perhaps move previous attempts etc to HISTORY.md. I.e. README.MD should focus on network archtecture (almost there need few refinement), training pipeline and various custom steps that were taken afterwards. For example, did you really collect traces, or have you trained initial batch of network on the techers predicitions? And you didn't really spend much attention on explaning step reward metric (as I suspect this is how you train PPO, by optimizing the reward, right?
