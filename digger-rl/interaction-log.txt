@@ -434,3 +434,5 @@ Can you move saliency to just HUD part of the display (I.e. 128x128 rather than 
 May be another thing - instead of drawing t-1, t-2, t-3 paint some sort of motion vectors
 I don't think I need arrows in the vector field, but may be a way to visualize by simply overlaying one over another, but use different color palette or something when values do not match
 And no need to render, I can just run watch
+Also, explain value and enthropy graphs you are plotting?
+And may be displaying just p, as log p is obvious

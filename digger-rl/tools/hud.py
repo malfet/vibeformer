@@ -9,7 +9,7 @@ just acted on (`_Net.last_x` / `last_logits`) and draws a 320x400 panel:
     the pixels that differ from the newest frame in one false colour per
     age (t-3 blue, t-2 violet, t-1 magenta) and the newest's changed
     pixels in their true colour over a dimmed static background;
-  - each action's probability and log-probability, the chosen one
+  - each action's probability, the chosen one
     highlighted;
   - the critic's value and the policy entropy, with the value's recent
     history as a sparkline.
@@ -148,15 +148,12 @@ class Hud:
             y = y0 + i * 20
             col = ACCENT if i == action else FG
             d.text((8, y + 2), name, font=self.font, fill=col)
-            d.rectangle((62, y + 3, 62 + 140, y + 15), outline=(50, 50, 60))
-            d.rectangle((62, y + 3, 62 + int(140 * float(probs[i])), y + 15),
+            d.rectangle((62, y + 3, 62 + 200, y + 15), outline=(50, 50, 60))
+            d.rectangle((62, y + 3, 62 + int(200 * float(probs[i])), y + 15),
                         fill=ACCENT if i == action else BAR)
-            d.text((246, y + 3), f"{float(probs[i]):.2f}", font=self.small,
+            d.text((310, y + 3), f"{float(probs[i]):.2f}", font=self.small,
                    fill=col, anchor="ra")
-            d.text((310, y + 3), f"{float(logp[i]):.2f}", font=self.small,
-                   fill=col, anchor="ra")
-        d.text((246, y0 - 14), "p", font=self.small, fill=DIM, anchor="ra")
-        d.text((310, y0 - 14), "log p", font=self.small, fill=DIM, anchor="ra")
+        d.text((310, y0 - 14), "p", font=self.small, fill=DIM, anchor="ra")
 
         ent = float(-(probs * logp).sum())
         d.text((8, 344), f"value {value:6.2f}    entropy {ent:4.2f}",

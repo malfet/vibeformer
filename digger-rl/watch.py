@@ -16,7 +16,7 @@ WezTerm, else in a matplotlib window (--display). Q quits, P pauses,
 sounddevice).
 
 For pixel checkpoints, --hud adds a panel with the network's input,
-each action's probability / log-probability and the value estimate;
+each action's probability and the value estimate;
 --saliency paints the pixels that drive the chosen action onto the
 panel's input view (tools/hud.py; implies --hud).
 --record writes every emulator frame, as shown, with the game's sound to
@@ -64,7 +64,7 @@ def main() -> None:
     p.add_argument("--display", choices=("auto", "kitty", "mpl", "none"),
                    default="auto", help="none: no window (with --record)")
     p.add_argument("--hud", action="store_true",
-                   help="side panel: network input, action log-probs, "
+                   help="side panel: network input, action probabilities, "
                         "value (pixel checkpoints)")
     p.add_argument("--saliency", action="store_true",
                    help="highlight the pixels driving the chosen action "

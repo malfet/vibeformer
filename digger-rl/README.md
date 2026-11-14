@@ -228,7 +228,7 @@ state.
 |---|---|
 | `python play.py --live` | Play yourself: arrows move, F / Control / F1 fire. S/L save/load the emulator state; `--dos-ckpt L5` starts at level 5's start (or from any state pickle); `--sound` plays the audio. |
 | `python watch.py POLICY` | Watch a policy play (inline in Kitty / Ghostty / WezTerm, else matplotlib). P pauses, +/- change speed; `--dos-ckpt`, `--sound` as in play.py. |
-| `python watch.py CKPT --hud --saliency --record out.mp4` | Pixel checkpoints: side panel with the network's input, its 4-frame stack overlaid as an onion skin (older frames' differences in false colour), action probabilities / log-probs, value and entropy; `--saliency` (implies `--hud`) paints the pixels driving the chosen action in cyan on the panel's input view. `--record` writes every frame with sound to a 1920x800 70 fps mp4; add `--display none --speed 0` to render headless. |
+| `python watch.py CKPT --hud --saliency --record out.mp4` | Pixel checkpoints: side panel with the network's input, its 4-frame stack overlaid as an onion skin (older frames' differences in false colour), action probabilities, value and entropy; `--saliency` (implies `--hud`) paints the pixels driving the chosen action in cyan on the panel's input view. `--record` writes every frame with sound to a 1920x800 70 fps mp4; add `--display none --speed 0` to render headless. |
 | `python evaluate.py POLICY --episodes 20` | Score, life length, and level-1 clears over N full games. |
 | `python evaluate.py POLICY --levels data/save/levels` | Per level 1-10: clears, emeralds eaten, score in one life from each saved level start. |
 | `python -m tools.level_states` | Build save states at the start of (and inside) levels 1-10 by poking the level counter. |
