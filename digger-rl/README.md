@@ -7,12 +7,12 @@ with PPO; it now scores well above the teacher.
 
 The current best policy is published in the repo:
 
-    python watch.py checkpoints/digger_px128_bag1.pt --sound
-    python evaluate.py checkpoints/digger_px128_bag1.pt --episodes 20
+    python watch.py checkpoints/digger_px128_exit1.pt --sound
+    python evaluate.py checkpoints/digger_px128_exit1.pt --episodes 20
 
 ## Model
 
-`checkpoints/digger_px128_bag1.pt` is the pixel `Agent` from
+`checkpoints/digger_px128_exit1.pt` is the pixel `Agent` from
 `train_pixel.py` with the IMPALA encoder (`--arch impala`), 2.2M
 parameters.
 
@@ -141,7 +141,7 @@ python -m tools.bag_kills data/checkpoints/px128_ppo3/ppo_digger_final.pt \
   --out-dir data/save/bag_kills --kills 150 --seed 0
 ```
 
-**7. PPO from bag-kill starts** (`px128_bag1`, published), 4M more
+**7. PPO from bag-kill starts** (`px128_bag1`), 4M more
 frames from step 5: start pool 50% level starts, 30% near-death, 20%
 bag kills; no imitation loss; entropy 0.005 -> 0.001. Bag kills doubled
 (3.8 -> 7.4 per game), and no life was lost to a bag in 60 lives.
@@ -156,10 +156,37 @@ python train_pixel.py --obs-size 128 --arch impala \
   --archive-perturb 10 --lr 1e-4 --save-best --run-name px128_bag1
 ```
 
-The published file is `px128_bag1`'s final checkpoint, with only the
+**8. Expert iteration on search-corrected play** (`px128_exit1`,
+published). The step 7 policy plays with a search in the loop: whenever
+a monster is within 4 tiles, its greedy action is rolled out 30 steps
+in the emulator (exact restores make one rollout per action enough). If
+the digger dies, every action is tried (held 3 steps, then the policy)
+and the best by (survived, steps survived, score) is played and
+recorded. With the search, the same network dies once per ~1050 steps
+instead of ~340. PPO then trains on its own play as before, with an
+imitation loss on the 80k recorded steps, weighted 0.5 -> 0.1.
+
+```bash
+for s in 0 1 2 3; do
+  python -m tools.policy_search data/checkpoints/px128_bag1/ppo_digger_final.pt \
+    --out data/traces/px128_search_$s.npz --steps 20000 --seed $s &
+done; wait
+python train_pixel.py --obs-size 128 --arch impala \
+  --load-agent data/checkpoints/px128_bag1/ppo_digger_final.pt \
+  --total-timesteps 4000000 --num-envs 8 --no-clip-reward --reward-scale 0.02 \
+  --episodic-life --value-warmup-updates 5 \
+  --bc-traces data/traces/px128_search_{0,1,2,3}.npz --bc-epochs 0 \
+  --bc-anchor-coef 0.5 --bc-anchor-final 0.1 \
+  --ent-coef 0.005 --ent-coef-final 0.001 \
+  --start-states data/save/levels=0.6,data/save/bag_kills=0.2,data/save/near_death_rescued=0.2 \
+  --start-prob 0.5 --archive-every 50 --archive-prob 0.3 --archive-size 200 \
+  --archive-perturb 10 --lr 1e-4 --save-best --run-name px128_exit1
+```
+
+The published file is `px128_exit1`'s final checkpoint, with only the
 weights and the config kept.
 
-PPO settings shared by steps 5 and 7: 8 envs x 128 steps per update, 4
+PPO settings shared by steps 5, 7 and 8: 8 envs x 128 steps per update, 4
 epochs of 4 minibatches, clip 0.1, gamma 0.99, GAE lambda 0.95, value
 coefficient 0.5, gradient norm clipped at 0.5.
 
@@ -169,12 +196,14 @@ Score is a full 3-life game; life is agent steps per life; "L1 clean"
 counts games that cleared level 1 without losing a life. Numbers from
 different sessions drift by up to about ±400.
 
-**Pixel agents** (2026-11-13), 20 sampled games and 10 greedy (argmax)
+**Pixel agents** (2026-11-14), 20 sampled games and 10 greedy (argmax)
 games each:
 
 | Policy | Score | Greedy | Life | L1 clean | Bag kills/game |
 |---|---:|---:|---:|---:|---:|
-| **`px128_bag1` (published)** | **4325** ±239 | **5323** ±123 | **342** | **14/20** | **7.4** |
+| **`px128_exit1` (published, step 8)** | **5240** ±224 | **5520** ±231 | **372** | **16/20** | **7.7** |
+| `px128_bag1` (step 7) | 4325 ±239 | 5323 ±123 | 342 | 14/20 | 7.4 |
+| `px128_esc1` (step 7 + escape starts, levels 4-10 weighted) | 3754 ±103 | 3840 ±165 | 291 | 12/20 | 1.3 |
 | `px128_ppo3` (step 5) | 3951-4133 | 5138 ±262 | 314-328 | 8-10/20 | 3.8 |
 | `px128_ppo2` (step 5 without the archive) | 3103 ±349 | 4833 ±471 | 281 | 8/20 | - |
 | IMPALA BC student (step 3) | 1641 ±176 | 1470 | 202 | 1/20 | - |
