@@ -1,48 +1,196 @@
 # Digger RL
 
-Learning to play the 1983 DOS game **DIGGER**, running in DOSBox Pure
-through a libretro pybind11 binding. The approach: bootstrap a student
-from a hand-written teacher (behavioural cloning, then DAgger), then
-fine-tune it with PPO to get past the teacher. Learning from first
-principles (no teacher) and a pixel-only agent are later goals.
+An agent that plays the 1983 DOS game **DIGGER** from pixels alone. The
+game runs in DOSBox Pure through a libretro pybind11 binding. The policy
+is bootstrapped by imitating a hand-written teacher and then improved
+with PPO; it now scores well above the teacher.
 
-## Current scoreboard (2026-11-11, symbolic state from RAM)
+The current best policy is published in the repo:
 
-Same session where it matters; cross-session numbers drift by up to
-~±400. Score is a full 3-life game; life is agent steps per life (4
-frames each); "L1 clean" is games that cleared level 1 without losing a
-life (the project goal).
+    python watch.py checkpoints/digger_px128_bag1.pt --sound
+    python evaluate.py checkpoints/digger_px128_bag1.pt --episodes 20
 
-Same session, 20 games each (2 seeds):
+## Model
 
-| Policy | Score | Life | L1 clean |
-|---|---:|---:|---:|
-| **PPO fine-tune of `dagger3` (`ppo_ft1`, final)** | 3662 ±161 | **331** | **16/20** |
-| **PPO fine-tune of `dagger3` (`ppo_ft1`, best)** | **3752** ±196 | 330 | 11/20 |
-| SmartHeuristic v6.4 teacher | 3269 ±241 | 290 | 13/20 |
-| DAgger round 3 student (`dagger3`, 700k steps) | 2858 ±175 | 264 | 7/20 |
-| Pixel student (`pixel_dagger_v1`, BC + 3 DAgger, 10 games) | 1513 ±109 | 188 | 0/10 |
+`checkpoints/digger_px128_bag1.pt` is the pixel `Agent` from
+`train_pixel.py` with the IMPALA encoder (`--arch impala`), 2.2M
+parameters.
 
-The earlier BC run (`bc_v1`) scored 2765 against a same-day teacher of
-3098 (Lesson 17). The PPO student is the first policy that beats its
-teacher (Lesson 19).
+**Input.** The 640x400 RGB frame, area-downscaled to 128x128
+(`preprocess_uint8`). The last 4 frames are stacked into a (12, 128,
+128) tensor, scaled to [0, 1]. The stack is refilled with the current
+frame after a reset or a death. Nothing else is given: no RAM, no
+symbolic state.
 
-### Pixel agents (2026-11-13, 128x128 RGB, IMPALA encoder)
+**Network.**
 
-Pixel-only PPO now beats every symbolic policy above (Lesson 22). 20
-sampled games, plus 10 greedy (argmax) games:
+| Stage | Layers | Output |
+|---|---|---|
+| 1 | conv 3x3, 16 ch -> maxpool 3x3 / 2 -> 2 residual blocks | 16 x 64 x 64 |
+| 2 | conv 3x3, 32 ch -> maxpool 3x3 / 2 -> 2 residual blocks | 32 x 32 x 32 |
+| 3 | conv 3x3, 32 ch -> maxpool 3x3 / 2 -> 2 residual blocks | 32 x 16 x 16 |
+| head | ReLU -> flatten (8192) -> FC 256 -> ReLU | 256 |
+| actor | linear 256 -> 6 | action logits |
+| critic | linear 256 -> 1 | value |
+
+A residual block is `x + conv3x3(relu(conv3x3(relu(x))))`. Actor and
+critic share the trunk. The 3x3 stride-1 convolutions keep sprite-sized
+detail that NatureCNN's 8x8 stride-4 first layer averaged away: at the
+same resolution, held-out imitation accuracy rose from 78.8% to 87.2%,
+with half the parameters (Lesson 21).
+
+**Actions.** NOOP, LEFT, RIGHT, UP, DOWN, FIRE, each held for 4
+emulator frames (`frame_skip`), so the agent acts about 17 times a
+second.
+
+## How the published checkpoint was trained
+
+Each step's output feeds the next. PPO steps count emulator frames
+(4M frames = 1M decisions, about 70 minutes on 8 env workers).
+
+**0. Build** the core (with the lockstep patch that makes save-state
+restores exact, Lesson 21) and the binding: `make`.
+
+**1. Level start states.** Save states at the start of, and inside,
+levels 1-10 (87 states), made by poking the level counter into a save
+state just before level 1 ends. These let training and evaluation start
+on any level, so the agent sees every level's background colours.
+
+```bash
+python -m tools.level_states --policy data/checkpoints/ppo_ft1/ppo_sym_final.pt \
+  --levels 1-10 --per-level 4 --mid-max 3
+```
+
+**2. Teacher traces.** The teacher (`SmartHeuristic`, a hand-written
+planner that reads game RAM) plays 8 x 40k steps, 75% of games from a
+level start state, with 5% random actions so that recoveries are in the
+data. The traces store 128x128 frames and the teacher's actions.
+
+```bash
+for i in $(seq 0 7); do
+  python collect.py --pixels --pixel-size 128 --out data/traces/px128_bc_$i.npz \
+    --steps 40000 --explore 0.05 --seed $((i+100)) \
+    --start-states data/save/levels --start-prob 0.75 &
+done; wait
+```
+
+**3. Behavioural cloning.** Cross-entropy on the teacher's actions,
+random +-4 px shifts as augmentation, and the best epoch kept on a
+held-out trace (87.2% accuracy). This student plays below the teacher
+(1641 vs ~3000): it was only trained on states the teacher visits.
+
+```bash
+python train_pixel.py --total-timesteps 0 --obs-size 128 --arch impala \
+  --aug-shift 4 --bc-traces data/traces/px128_bc_{0..6}.npz \
+  --bc-val data/traces/px128_bc_7.npz --bc-epochs 15 --bc-batch-size 256 \
+  --run-name px128_impala1
+```
+
+**4. Near-death start states.** The student plays. At each death the
+game is rolled back 10, 15 or 20 steps, and the teacher and fixed moves
+are tried from there. States where some branch is still alive 20 steps
+later are kept (605 states): situations the agent can learn to escape.
+The unescapable ones taught it to hide instead (Lesson 21).
+
+```bash
+for i in $(seq 0 7); do
+  python -m tools.rescue --student data/checkpoints/px128_impala1/ppo_digger_bc_only.pt \
+    --out data/traces/px128_rescue2_$i.npz --deaths 100 --seed $((i+500)) \
+    --pool-dir data/save/near_death_rescued --pool-rescued-only &
+done; wait
+```
+
+**5. PPO with a state archive** (`px128_ppo3`), 4M frames from the BC
+student:
+- Reward is the score change x 0.02 (an emerald is +0.5), unclipped. An
+  episode ends when a life is lost; there is no explicit death penalty.
+- Half of the episodes start from a saved state: 60% level starts, 40%
+  near-death states.
+- The state archive snapshots the agent's own play every 50 steps. 30%
+  of resets restore a snapshot and play up to 10 random actions;
+  snapshots just before a death are drawn 4x more often.
+- The critic is trained alone for the first 10 updates. An imitation
+  loss on the teacher traces keeps the policy close to the BC student
+  early on; its weight anneals from 0.3 to 0.
+- Entropy 0.01 -> 0.001, lr 1e-4.
+
+Bag deaths fell from 23% of deaths to 3%, and the score rose from 1641
+to about 4100 (sampled) and 5140 (greedy).
+
+```bash
+python train_pixel.py --obs-size 128 --arch impala \
+  --load-agent data/checkpoints/px128_impala1/ppo_digger_bc_only.pt \
+  --total-timesteps 4000000 --num-envs 8 --no-clip-reward --reward-scale 0.02 \
+  --episodic-life --value-warmup-updates 10 \
+  --bc-traces data/traces/px128_bc_0.npz data/traces/px128_bc_1.npz --bc-epochs 0 \
+  --bc-anchor-coef 0.3 --bc-anchor-final 0.0 \
+  --ent-coef 0.01 --ent-coef-final 0.001 \
+  --start-states data/save/levels=0.6,data/save/near_death_rescued=0.4 \
+  --start-prob 0.5 --archive-every 50 --archive-prob 0.3 --archive-size 200 \
+  --archive-perturb 10 --lr 1e-4 --save-best --run-name px128_ppo3
+```
+
+**6. Bag-kill start states.** The step 5 policy plays. At each monster
+crushed by a bag, the states 6, 12 and 20 steps earlier are replayed
+with the digger standing still. If the monster is crushed anyway, the
+state is dropped; otherwise the kill depended on the digger's play, and
+the state is kept (179 states, mostly levels 2-3).
+
+```bash
+python -m tools.bag_kills data/checkpoints/px128_ppo3/ppo_digger_final.pt \
+  --out-dir data/save/bag_kills --kills 150 --seed 0
+```
+
+**7. PPO from bag-kill starts** (`px128_bag1`, published), 4M more
+frames from step 5: start pool 50% level starts, 30% near-death, 20%
+bag kills; no imitation loss; entropy 0.005 -> 0.001. Bag kills doubled
+(3.8 -> 7.4 per game), and no life was lost to a bag in 60 lives.
+
+```bash
+python train_pixel.py --obs-size 128 --arch impala \
+  --load-agent data/checkpoints/px128_ppo3/ppo_digger_final.pt \
+  --total-timesteps 4000000 --num-envs 8 --no-clip-reward --reward-scale 0.02 \
+  --episodic-life --value-warmup-updates 5 --ent-coef 0.005 --ent-coef-final 0.001 \
+  --start-states data/save/levels=0.5,data/save/near_death_rescued=0.3,data/save/bag_kills=0.2 \
+  --start-prob 0.5 --archive-every 50 --archive-prob 0.3 --archive-size 200 \
+  --archive-perturb 10 --lr 1e-4 --save-best --run-name px128_bag1
+```
+
+The published file is `px128_bag1`'s final checkpoint, with only the
+weights and the config kept.
+
+PPO settings shared by steps 5 and 7: 8 envs x 128 steps per update, 4
+epochs of 4 minibatches, clip 0.1, gamma 0.99, GAE lambda 0.95, value
+coefficient 0.5, gradient norm clipped at 0.5.
+
+## Scoreboard
+
+Score is a full 3-life game; life is agent steps per life; "L1 clean"
+counts games that cleared level 1 without losing a life. Numbers from
+different sessions drift by up to about ±400.
+
+**Pixel agents** (2026-11-13), 20 sampled games and 10 greedy (argmax)
+games each:
 
 | Policy | Score | Greedy | Life | L1 clean | Bag kills/game |
 |---|---:|---:|---:|---:|---:|
-| **`px128_bag1` (published: `checkpoints/digger_px128_bag1.pt`)** | **4325** ±239 | **5323** ±123 | **342** | **14/20** | **7.4** |
-| `px128_ppo3` (+ state archive) | 3951-4133 | 5138 ±262 | 314-328 | 8-10/20 | 3.8 |
-| `px128_ppo2` | 3103 ±349 | 4833 ±471 | 281 | 8/20 | - |
-| IMPALA BC student (`px128_impala1`) | 1641 ±176 | 1470 | 202 | 1/20 | - |
+| **`px128_bag1` (published)** | **4325** ±239 | **5323** ±123 | **342** | **14/20** | **7.4** |
+| `px128_ppo3` (step 5) | 3951-4133 | 5138 ±262 | 314-328 | 8-10/20 | 3.8 |
+| `px128_ppo2` (step 5 without the archive) | 3103 ±349 | 4833 ±471 | 281 | 8/20 | - |
+| IMPALA BC student (step 3) | 1641 ±176 | 1470 | 202 | 1/20 | - |
 
-    python watch.py checkpoints/digger_px128_bag1.pt --sound
+**Symbolic agents** (2026-11-11), which read a 13-plane map decoded
+from game RAM; 20 games each:
 
-Earlier scoreboards (CV state, pixel PPO, Dreamer, DQN) are in the
-lessons below; every number before Lesson 15 used the misaligned CV
+| Policy | Score | Life | L1 clean |
+|---|---:|---:|---:|
+| PPO fine-tune of `dagger3` (`ppo_ft1`, final) | 3662 ±161 | 331 | 16/20 |
+| PPO fine-tune of `dagger3` (`ppo_ft1`, best) | 3752 ±196 | 330 | 11/20 |
+| SmartHeuristic v6.4 teacher | 3269 ±241 | 290 | 13/20 |
+| DAgger round 3 student (`dagger3`) | 2858 ±175 | 264 | 7/20 |
+
+Earlier scoreboards (CV state, NatureCNN pixels, Dreamer, DQN) are in
+the lessons below; every number before Lesson 15 used the misaligned CV
 state.
 
 ## Entrypoints
@@ -74,12 +222,13 @@ trainer (`tools/policies.py` tells them apart by their config).
 | `tools/policies.py` | Loads any policy spec for `watch.py` / `evaluate.py`. |
 | `tools/display.py` | Kitty graphics + keyboard protocol viewer, matplotlib fallback. |
 | `tools/bag_kills.py` | Start states shortly before bag kills that depend on the digger's play (Lesson 22). |
+| `tools/policy_search.py` | The pixel policy with emulator-rollout search at risky moments; records search-corrected traces for expert iteration. |
 | `tools/rescue.py` | Roll back before student deaths and search for surviving branches; near-death start pools (Lesson 21). |
 | `tools/collect_death_states.py` | Save states N steps before each death; `--probe` checks escapability. |
 | `tools/make_report_figs.py` | Regenerates `docs/*.png`. |
 | `interaction-log.txt` | Every prompt, in order. |
 
-## Model architectures
+## Symbolic agents (the earlier path)
 
 **Symbolic observation** (`state_to_tensor`), 13 planes of 10x15 per
 frame, 4 frames stacked into (52, 10, 15): dirt, emerald, digger,
@@ -93,15 +242,10 @@ channels): 3x conv3x3 (32, 64, 64, ReLU, padding 1) -> flatten -> FC 128
 `--arch iter` is a weight-tied iterative variant (232k params, used in
 the survival experiments).
 
-**Pixel `Agent`** (`train_pixel.py`): NatureCNN on 4 stacked 84x84
-frames (gray or color): conv 8x8/4 (32), 4x4/2 (64), 3x3/1 (64) -> FC
-512 -> actor and critic heads; `--separate-critic` gives the critic its
-own trunk, `--encoder-width` scales the channels.
+The pixel `Agent` also has a NatureCNN encoder (`--arch nature`, the
+default: conv 8x8/4, 4x4/2, 3x3/1 -> FC 512), used before Lesson 21.
 
-Actions: NOOP, LEFT, RIGHT, UP, DOWN, FIRE, each held for 4 emulator
-frames (`frame_skip`).
-
-## Training approaches
+### Symbolic training
 
 1. **Behavioural cloning.** `collect.py` records (obs, teacher action);
    `train_symbolic.py --total-timesteps 0 --bc-traces ... --bc-val ...`
@@ -117,8 +261,6 @@ frames (`frame_skip`).
    teacher labels annealed 0.3 -> 0.05, score x 0.02 as reward,
    episodes ending at death onset, low lr / entropy, keep the best
    checkpoint.
-4. **Pixels** (next): the same teacher labels, but the student sees
-   84x84 frames (`train_pixel.py` live-teacher DAgger).
 
 ## Lessons from PPO / DAGGER experiments
 
@@ -991,7 +1133,7 @@ python evaluate.py teacher --episodes 20    # same-session baseline
 python evaluate.py data/checkpoints/dagger3/ppo_sym_final.pt --episodes 20
 ```
 
-### Symbolic BC -> DAgger -> PPO (the current recipe)
+### Symbolic BC -> DAgger -> PPO
 
 ```bash
 # 1. BC on teacher traces (~2 min to collect 200k steps on 8 cores).
@@ -1054,7 +1196,7 @@ python train_symbolic.py --resume-from data/save/right_edge.pkl ...
 - RAM (region 0): score `0x282E0` (int32), digger record `0x259C8`,
   emeralds `0x25A3E`, monsters `0x25AD6`, bags `0x25D1A`, dirt field
   `0x2600C` (layouts in Lesson 15).
-- `frame_skip = 4`, `frame_stack = 4`; pixel `obs_size = 84`.
+- `frame_skip = 4`, `frame_stack = 4`; pixel `obs_size` 128 (84 before Lesson 21).
 - Actions `{NOOP, LEFT, RIGHT, UP, DOWN, FIRE}`; FIRE is F1.
 - The game turns the digger only at tile boundaries (`digger.c`
   updatedigger): plan from `heading_tile`, not the rounded tile.

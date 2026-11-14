@@ -422,3 +422,7 @@ So did ppo3 is the best so far? And still what is the next strategies to prevent
 Let's do 3 and then 4
 So what's the status?
 Ok, please find best checkpoint so far and publish it as artifact into the current repo
+Do it
+Are they done?
+Try again
+In the meantime, can you rework README for digger RL to start with model architecture and then explain training steps (succinctly for checkpoint it has right now)
