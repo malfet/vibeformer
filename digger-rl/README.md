@@ -20,27 +20,24 @@ attempts, reward experiments, and the lessons from each) is in
 `train_pixel.py` with the IMPALA encoder (`--arch impala`): an
 actor-critic network with 2.2M parameters.
 
+```mermaid
+flowchart TB
+    F["frames t-3, t-2, t-1, t<br/>640x400 RGB each"]
+    I["input 12 x 128 x 128<br/>(4 frames x RGB)"]
+    S1["stage 1: conv3x3 12→16 · maxpool 3/2 · res · res<br/>16 x 64 x 64"]
+    S2["stage 2: conv3x3 16→32 · maxpool 3/2 · res · res<br/>32 x 32 x 32"]
+    S3["stage 3: conv3x3 32→32 · maxpool 3/2 · res · res<br/>32 x 16 x 16"]
+    FC["ReLU · flatten 8192 · FC → 256 · ReLU<br/>(shared)"]
+    A["actor: linear 256 → 6<br/>softmax π(a|s)"]
+    C["critic: linear 256 → 1<br/>value V(s)"]
+    F -- "area-downscale to 128x128, / 255, stack" --> I
+    I --> S1 --> S2 --> S3 --> FC
+    FC --> A
+    FC --> C
 ```
-  emulator frames t-3, t-2, t-1, t   (640x400 RGB each)
-            │  area-downscale each to 128x128, keep RGB, / 255
-            ▼
-  input 12 x 128 x 128   (4 frames x RGB, oldest first)
-            │
-  ┌─────────▼──────────────────────────────────────────┐
-  │ stage 1   conv3x3 12→16 · maxpool 3/2 · res · res  │  16 x 64 x 64
-  │ stage 2   conv3x3 16→32 · maxpool 3/2 · res · res  │  32 x 32 x 32
-  │ stage 3   conv3x3 32→32 · maxpool 3/2 · res · res  │  32 x 16 x 16
-  └─────────┬──────────────────────────────────────────┘
-            │  ReLU · flatten (8192)
-            ▼
-     FC 8192 → 256 · ReLU          shared by both heads
-       ┌────┴─────────────┐
-       ▼                  ▼
-  actor 256 → 6      critic 256 → 1
-  softmax: π(a|s)    value V(s)
 
-  res = x + conv3x3(ReLU(conv3x3(ReLU(x))))      (channels unchanged)
-```
+A residual block (`res`) is `x + conv3x3(ReLU(conv3x3(ReLU(x))))`,
+keeping the channel count.
 
 | Block | Layers | Output | Parameters |
 |---|---|---|---:|
@@ -137,22 +134,22 @@ workers.
 
 ## How the published checkpoint was trained
 
-```
- [1] level start states (L1-10)
- [2] teacher plays, frames + its actions recorded (320k steps)
-          │
- [3] behavioural cloning ─────────────► BC student               1641
-          │                                 │ plays; rewind before deaths
-          │                            [4] near-death start states (605)
-          ▼                                 │
- [5] PPO + state archive ◄──────────────────┘                    4133
-          │ plays; rewind before bag kills
-          ├──► [6] bag-kill start states (179)
-          ▼                │
- [7] PPO from bag-kill starts ◄───────┘                          4325
-          │ plays with an emulator search at risky moments
-          ▼
- [8] PPO + imitation of the search-corrected play (published)    5240
+```mermaid
+flowchart TB
+    L["1. level start states, L1-10"]
+    T["2. teacher demonstrations<br/>320k frames + actions"]
+    BC["3. behavioural cloning<br/>BC student: 1641"]
+    ND["4. near-death start states (605)"]
+    P5["5. PPO + state archive<br/>ppo3: 4133"]
+    BK["6. bag-kill start states (179)"]
+    P7["7. PPO from bag-kill starts<br/>bag1: 4325"]
+    SR["search-corrected play, 80k steps"]
+    P8["8. PPO + imitation of the search<br/>exit1 (published): 5240"]
+    T --> BC --> P5 --> P7 --> P8
+    BC -- "plays; rewind before deaths" --> ND --> P5
+    L --> P5
+    P5 -- "plays; rewind before bag kills" --> BK --> P7
+    P7 -- "plays with emulator search" --> SR --> P8
 ```
 
 Each step's output feeds the next. Steps 1, 4, 6 and 8 are custom tools
