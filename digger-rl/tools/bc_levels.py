@@ -7,8 +7,11 @@ Answers two questions with the same machinery:
   - which encoder head generalises across levels?
     (same levels, different `arch`)
 
+  - does the network need RGB? (`input`: rgb, or one channel per frame)
+
 Traces must carry `levels` (collect.py records it). Each run is
-`name:arch:levels`, levels as "1-3" or "1,2,3,5"; every run is cut to
+`name:arch:levels[:input]`, levels as "1-3" or "1,2,3,5", input one of
+INPUTS; every run is cut to
 the same number of training samples (`--samples`, default: the smallest
 run's pool), so only the choice of levels or arch differs. The best
 epoch is picked on validation accuracy over the run's own levels, never
@@ -38,6 +41,25 @@ from train_pixel import (Agent, Config, _bc_minibatch, _build_bc_index,
                          _load_traces, random_shift)
 
 
+# One channel per frame instead of RGB. Both are linear in RGB, so they
+# commute with the area downscale and apply to stored 128x128 traces.
+# Luma merges three of the 8 colours Digger uses (dark green, bright red,
+# brown all land at ~0.30); "pal" is a linear map fitted to the palette
+# that keeps all 8 apart (0, .09, .19, .28, .37, .72, .91, 1).
+INPUTS = {"rgb": None,
+          "luma": (0.299, 0.587, 0.114),
+          "pal": (0.1846, 0.7231, 0.0923)}
+
+
+def to_input(x: torch.Tensor, kind: str) -> torch.Tensor:
+    w = INPUTS[kind]
+    if w is None:
+        return x
+    n, c, h, wd = x.shape
+    return torch.einsum("nkchw,c->nkhw", x.view(n, c // 3, 3, h, wd),
+                        torch.tensor(w, device=x.device))
+
+
 def parse_levels(spec: str) -> set[int]:
     out: set[int] = set()
     for part in spec.split(","):
@@ -55,7 +77,8 @@ def load(paths: list[str], cfg: Config):
 
 
 @torch.no_grad()
-def per_level_acc(agent, data, lv, cfg, device) -> dict[int, float]:
+def per_level_acc(agent, data, lv, cfg, device,
+                  kind: str = "rgb") -> dict[int, float]:
     frames, actions, _, index = data
     agent.eval()
     ok = np.zeros(len(index), bool)
@@ -63,6 +86,7 @@ def per_level_acc(agent, data, lv, cfg, device) -> dict[int, float]:
         idxs = np.arange(s, min(s + 512, len(index)))
         obs, acts, _ = _bc_minibatch(frames, actions, None, index, idxs,
                                      cfg, device)
+        obs = to_input(obs, kind)
         ok[idxs] = (agent.actor(agent.encode(obs)).argmax(-1)
                     == acts).cpu().numpy()
     agent.train()
@@ -96,22 +120,25 @@ def main() -> None:
 
     runs = []
     for spec in args.run:
-        name, arch, levels = spec.split(":")
+        name, arch, levels, *kind = spec.split(":")
+        kind = kind[0] if kind else "rgb"
+        assert kind in INPUTS, kind
         lvls = parse_levels(levels)
         pool = np.nonzero(np.isin(tlv, list(lvls)))[0]
-        runs.append((name, arch, lvls, pool))
+        runs.append((name, arch, lvls, pool, kind))
     n = args.samples or min(len(r[3]) for r in runs)
     print(f"{n} training samples per run", flush=True)
 
     results = {}
-    for name, arch, lvls, pool in runs:
+    for name, arch, lvls, pool, kind in runs:
         rng = np.random.default_rng(args.seed)
         pick = rng.choice(pool, size=min(n, len(pool)), replace=False)
         rcfg = Config(obs_size=128, color=True, frame_stack=4, arch=arch,
                       aug_shift=args.aug_shift, seed=args.seed,
                       run_name=f"bc_levels_{name}")
         torch.manual_seed(args.seed)
-        agent = Agent(DiggerEnv.NUM_ACTIONS, 12, in_hw=(128, 128),
+        agent = Agent(DiggerEnv.NUM_ACTIONS, 12 if kind == "rgb" else 4,
+                      in_hw=(128, 128),
                       arch=arch).to(device)
         optim = Adam(agent.parameters(), lr=args.lr, eps=1e-5)
         nparam = sum(q.numel() for q in agent.parameters())
@@ -123,6 +150,7 @@ def main() -> None:
                 obs, acts, _ = _bc_minibatch(train[0], train[1], None,
                                              train[3], perm[s:s + args.batch],
                                              rcfg, device)
+                obs = to_input(obs, kind)
                 if args.aug_shift:
                     obs = random_shift(obs, args.aug_shift)
                 loss = F.cross_entropy(agent.actor(agent.encode(obs)), acts)
@@ -130,7 +158,7 @@ def main() -> None:
                 loss.backward()
                 nn.utils.clip_grad_norm_(agent.parameters(), 0.5)
                 optim.step()
-            acc = per_level_acc(agent, val, vlv, rcfg, device)
+            acc = per_level_acc(agent, val, vlv, rcfg, device, kind)
             w = {l: (vlv == l).sum() for l in acc}
             seen = (sum(acc[l] * w[l] for l in acc if l in lvls)
                     / max(1, sum(w[l] for l in acc if l in lvls)))
@@ -144,22 +172,27 @@ def main() -> None:
                         acc, ep + 1)
         out = args.out_dir / name
         out.mkdir(parents=True, exist_ok=True)
-        torch.save({"agent": best[1], "step": 0, "config": rcfg.__dict__},
+        # luma is what color=False preprocessing gives, so evaluate.py
+        # can play it; a "pal" checkpoint is for the table only.
+        ccfg = dict(rcfg.__dict__, color=kind == "rgb", input=kind)
+        torch.save({"agent": best[1], "step": 0, "config": ccfg},
                    out / "ppo_digger_bc_only.pt")
-        results[name] = dict(arch=arch, levels=sorted(lvls), params=nparam,
+        results[name] = dict(arch=arch, input=kind, levels=sorted(lvls),
+                             params=nparam,
                              epoch=best[3], seen=best[0], per_level=best[2])
         del agent, optim
 
     levels = sorted({l for r in results.values() for l in r["per_level"]})
     print("\nval accuracy per level at each run's best epoch "
           "(* = not trained on)")
-    print(f"{'run':<14}{'arch':<14}{'params':>9} "
+    print(f"{'run':<14}{'arch':<14}{'input':<6}{'params':>9} "
           + "".join(f"{'L' + str(l):>7}" for l in levels))
     for name, r in results.items():
         cells = "".join(
             f"{r['per_level'].get(l, float('nan')):6.3f}"
             + ("*" if l not in r["levels"] else " ") for l in levels)
-        print(f"{name:<14}{r['arch']:<14}{r['params']:>9} {cells}")
+        print(f"{name:<14}{r['arch']:<14}{r['input']:<6}{r['params']:>9} "
+              f"{cells}")
     args.out_dir.mkdir(parents=True, exist_ok=True)
     (args.out_dir / "results.json").write_text(json.dumps(results, indent=1))
 

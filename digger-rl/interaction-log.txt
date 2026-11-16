@@ -447,3 +447,4 @@ So, what's the progress.. And what would be the next steps
 Let's not publish, I want to make a few changes to a symbolic extractor state machine. Can it detect "Digger is dead"/Dead music playing sequence. Very first change I want to make is to wait exiting from a game when last life is dead until dead state is over. Then I want to change teacher to only do nops while digger is in death state
 Can you suggest why hes1 was not super helpful. Also I'm curious if one FC layer taking up 90% of the network weights is a good design. And was IMPALA experiment kind of failure. If som, hypothesize as to why
 Let's run cheap alternatives tests. Also I wonder if network will learn to better generalize against the levels if training with teacher will be done across all 10 levels
+I'm also curious whether it's worth to have RGB inputs or change them into single channel (considering that game's EGA paletter is very discrete)
