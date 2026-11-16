@@ -216,6 +216,15 @@ class GameState:
     score: int = 0
     lives: int = 0
 
+    # The death sequence (RAM only; the CV extractors leave these at the
+    # defaults). `dying` is true from the hit until the digger respawns,
+    # or until the game ends on the last life: input is ignored all that
+    # time, and the dirge plays (it starts in DEATH_ANIM and the
+    # tombstone waits for it to finish). `death_stage` is the game's
+    # digdat.deathstage, see DEATH_STAGES.
+    dying: bool = False
+    death_stage: int = 1
+
 
 # ---- CV extractor ---------------------------------------------------------
 # Strategy:
@@ -742,6 +751,14 @@ def heading_tile(digger: DiggerPos) -> tuple[int, int, bool]:
     return v, h, False
 
 
+# digdat.deathstage (digger.c). A monster death runs MONSTER -> ARC ->
+# ANIM -> TOMBSTONE, a bag death BAG -> ANIM -> TOMBSTONE; then the
+# digger respawns at BAG (which doubles as "alive": a bag hit only shows
+# in dob.alive), or the game ends.
+DEATH_STAGES = {1: "bag/alive", 2: "anim", 3: "monster", 4: "tombstone",
+                5: "arc", 6: "done"}
+
+
 def extract_state_ram(mem: bytes) -> GameState:
     """GameState straight from game RAM (`core.read_memory_region(0)`).
 
@@ -762,6 +779,8 @@ def extract_state_ram(mem: bytes) -> GameState:
                              can_fire=int(d[9]) == 0 and int(d[23]) != 0,
                              x=int(d[0]), y=int(d[1]))
     state.lives = int(d[21])
+    state.death_stage = int(d[14])
+    state.dying = not state.digger.alive
 
     em = np.frombuffer(mem, dtype=np.int8, count=MWIDTH * MHEIGHT,
                        offset=RAM_EMFIELD)

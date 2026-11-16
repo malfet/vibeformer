@@ -293,6 +293,10 @@ class SmartHeuristic:
         self._fire_cd = 0
 
     def __call__(self, state) -> int:
+        if state.dying:
+            # Input is ignored until the respawn: label it NOOP rather
+            # than whatever the planner makes of a dead digger.
+            return DiggerEnv.NOOP
         action = self._decide(state)
         if action == DiggerEnv.FIRE:
             self._fire_cd = self.fire_cooldown_steps

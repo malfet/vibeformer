@@ -365,9 +365,11 @@ class DiggerEnv:
             self._death_counted = True
         if lives_dropped:
             self._death_counted = False
-        # Onset on the last life seals the game: report game over now
-        # rather than ~100 steps later when `lives` reaches 0.
-        if onset_event and lives <= 1:
+        # With episodic lives, onset on the last life seals the game: the
+        # agent's episode ends here, and reset() reboots. Without, the
+        # game runs on through the death sequence (animation, dirge,
+        # tombstone) and ends when `lives` reaches 0.
+        if self.episodic_life and onset_event and lives <= 1:
             real_game_over = self._real_game_over = True
 
         if death_event and self.death_penalty != 0.0:
