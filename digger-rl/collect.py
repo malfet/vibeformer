@@ -73,6 +73,7 @@ def collect(num_steps: int, frame_skip: int, frame_stack: int,
     lives_buf = np.zeros((num_steps,), dtype=np.int32)
     pre_score = np.zeros((num_steps,), dtype=np.int32)
     reset_buf = np.zeros((num_steps,), dtype=bool)
+    level_buf = np.zeros((num_steps,), dtype=np.int16)
     rng = np.random.default_rng(seed)
     if student is not None:
         # DAgger: the student drives, the teacher only labels. Imported
@@ -101,6 +102,7 @@ def collect(num_steps: int, frame_skip: int, frame_stack: int,
         else:
             obs_buf[t] = cur_obs
         lives_buf[t] = env._last_state.lives
+        level_buf[t] = env._env.read_level()
         pre_score[t] = env._env._read_score()
         reset_buf[t], new_episode = new_episode, False
         action = teacher(env._last_state)
@@ -150,6 +152,7 @@ def collect(num_steps: int, frame_skip: int, frame_stack: int,
         raw = (score_buf - pre_score).astype(np.float32)
         return dict(frames=obs_buf, actions=act_buf, raw_rewards=raw,
                     scores=score_buf, lives=lives_buf, resets=reset_buf,
+                    levels=level_buf,
                     frame_skip=np.int32(frame_skip),
                     obs_size=np.int32(pixel_size), color=np.bool_(True),
                     teacher=np.array(teacher_name, dtype=object))

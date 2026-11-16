@@ -478,13 +478,39 @@ class _ResBlock(nn.Module):
         return x + self.c2(F.relu(self.c1(F.relu(x))))
 
 
+class _CoordPool(nn.Module):
+    """Head for the IMPALA stages without a per-position FC: append
+    x / y coordinate planes to the feature map, mix with a 3x3 conv, then
+    global max- and mean-pool. Each channel can learn "thing at position"
+    from the coordinates, but the weights are shared across positions."""
+
+    def __init__(self, ch: int, out: int):
+        super().__init__()
+        self.conv = nn.Conv2d(ch + 2, out, 3, padding=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        n, _, h, w = x.shape
+        ys = torch.linspace(-1, 1, h, device=x.device)
+        xs = torch.linspace(-1, 1, w, device=x.device)
+        yy, xx = torch.meshgrid(ys, xs, indexing="ij")
+        coords = torch.stack([xx, yy]).expand(n, 2, h, w)
+        z = F.relu(self.conv(torch.cat([F.relu(x), coords], 1)))
+        return torch.cat([z.amax((2, 3)), z.mean((2, 3))], 1)
+
+
 def _impala_cnn(in_channels: int, width: int, fc: int,
-                in_hw: tuple[int, int]) -> nn.Sequential:
+                in_hw: tuple[int, int], head: str = "fc") -> nn.Sequential:
     """IMPALA's residual encoder (Espeholt et al. 2018): three stages
     of conv3x3 + maxpool(3, stride 2) + two residual blocks, 16/32/32
     channels (x width). Stride-1 3x3 convs keep sprite-sized detail that
     NatureCNN's 8x8 stride-4 first layer averages away, and it
-    generalises better (Procgen)."""
+    generalises better (Procgen).
+
+    `head` maps the last feature map to the `fc`-d feature:
+      fc     flatten -> linear (16x16 grid at 128 px: 2.1M weights)
+      pool8  one more max-pool to 8x8 first (0.5M weights)
+      coord  _CoordPool: coordinates + shared conv + global pooling
+             (no per-position weights)"""
     layers: list[nn.Module] = []
     h, w = in_hw
     ch_in = in_channels
@@ -494,6 +520,14 @@ def _impala_cnn(in_channels: int, width: int, fc: int,
                    _ResBlock(ch), _ResBlock(ch)]
         h, w = (h + 1) // 2, (w + 1) // 2
         ch_in = ch
+    if head == "coord":
+        pool = 2 * ch_in * 2
+        layers += [_CoordPool(ch_in, 2 * ch_in),
+                   layer_init(nn.Linear(pool, fc)), nn.ReLU()]
+        return nn.Sequential(*layers)
+    if head == "pool8":
+        layers.append(nn.MaxPool2d(3, stride=2, padding=1))
+        h, w = (h + 1) // 2, (w + 1) // 2
     layers += [nn.ReLU(), nn.Flatten(),
                layer_init(nn.Linear(ch_in * h * w, fc)), nn.ReLU()]
     return nn.Sequential(*layers)
@@ -519,11 +553,13 @@ class Agent(nn.Module):
                  in_hw: tuple[int, int] = (84, 84), arch: str = "nature"):
         super().__init__()
         c1, c2, c3, fc = 32 * width, 64 * width, 64 * width, 512 * width
-        if arch == "impala":
+        if arch.startswith("impala"):
             fc = 256 * width
+            head = {"impala": "fc", "impala_pool8": "pool8",
+                    "impala_coord": "coord"}[arch]
 
             def make():
-                return _impala_cnn(in_channels, width, fc, in_hw)
+                return _impala_cnn(in_channels, width, fc, in_hw, head)
         elif arch == "nature":
             def make():
                 return _nature_cnn(in_channels, c1, c2, c3, fc, in_hw)
@@ -997,7 +1033,8 @@ def parse_args() -> Config:
                    help="student-driven steps collected per DAGGER iter.")
     p.add_argument("--dagger-epochs", type=int, default=Config.dagger_epochs,
                    help="CE epochs per DAGGER iter on the aggregated set.")
-    p.add_argument("--arch", choices=("nature", "impala"),
+    p.add_argument("--arch", choices=("nature", "impala", "impala_pool8",
+                                      "impala_coord"),
                    default=Config.arch, help="pixel encoder")
     p.add_argument("--aug-shift", type=int, default=Config.aug_shift,
                    help="BC: shift each training sample by up to N px "
