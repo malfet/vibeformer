@@ -225,6 +225,12 @@ class GameState:
     dying: bool = False
     death_stage: int = 1
 
+    # gamedat (main.c): the 1-based level, and levdone, set once the last
+    # emerald is eaten or the last monster killed while the digger lives;
+    # the level counter moves on ~57 steps later (RAM only).
+    level: int = 0
+    level_done: bool = False
+
 
 # ---- CV extractor ---------------------------------------------------------
 # Strategy:
@@ -706,6 +712,7 @@ def extract_state_fast(frame_rgba: np.ndarray) -> GameState:
 # tile (h, v) has its sprite at x = h*20 + 12, y = v*18 + 18. The frame is
 # 2x that, so a tile is 40x36 px starting at (24, 36). That is NOT the
 # TILE_W x TILE_H grid the CV extractor above assumes.
+RAM_GAME = 0x2599E       # gamedat[0]: level, levdone
 RAM_DIGGER = 0x259C8     # x,y,h,v,rx,ry,mdir,dir,_,recharge,fx,fy,fdir,_,deathstage
 RAM_DIGGER_NOTFIRING = RAM_DIGGER + 2 * 23
 RAM_EMFIELD = 0x25A3E    # int8[150], nonzero = emerald
@@ -781,6 +788,8 @@ def extract_state_ram(mem: bytes) -> GameState:
     state.lives = int(d[21])
     state.death_stage = int(d[14])
     state.dying = not state.digger.alive
+    g = words(RAM_GAME, 2)
+    state.level, state.level_done = int(g[0]), bool(g[1])
 
     em = np.frombuffer(mem, dtype=np.int8, count=MWIDTH * MHEIGHT,
                        offset=RAM_EMFIELD)

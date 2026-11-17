@@ -61,6 +61,10 @@ LIVES_OFFSET = 0x259F2  # uint8
 # gamedat[curplayer].level (main.c), int16, 1-based. Found as the only
 # byte equal to the level at every level start of 8 games (levels 1-3).
 LEVEL_OFFSET = 0x2599E
+# gamedat.levdone, the int16 right after it: -1 from the moment the last
+# emerald is eaten or the last monster killed (main.c checklevdone),
+# ~57 agent steps before the level counter moves on.
+LEVEL_DONE_OFFSET = LEVEL_OFFSET + 2
 
 # The digger's own record sits right next to LIVES_OFFSET (same struct).
 # Located by scanning for the spawn values (x=152, y=180, col=7, row=9)
@@ -427,7 +431,7 @@ class DiggerEnv:
     def _in_gameplay(self) -> bool:
         m = self._core.read_memory_region(0)
         stage = struct.unpack_from("<h", m, DEATH_STAGE_OFFSET)[0]
-        return 0 < m[LIVES_OFFSET] <= 5 and stage == DEATH_STAGE_ALIVE
+        return 0 < m[LIVES_OFFSET] < 100 and stage == DEATH_STAGE_ALIVE
 
     def _apply_action(self, action: int) -> None:
         if action == self._last_action:
@@ -561,30 +565,53 @@ class DiggerEnv:
         m = self._core.read_memory_region(0)
         return struct.unpack_from("<h", m, LEVEL_OFFSET)[0]
 
+    def level_done(self) -> bool:
+        m = self._core.read_memory_region(0)
+        return struct.unpack_from("<h", m, LEVEL_DONE_OFFSET)[0] != 0
+
     def poke_level(self, level: int) -> None:
         """Overwrite the level counter in the running game.
 
+        The game only reads the counter when it builds a level (layout,
+        background, monster count and speed: main.c levplan / levof10),
+        so poke level N-1 shortly before the current level ends to get a
+        properly built level N.
+        """
+        self._poke(LEVEL_OFFSET, level)
+        if self.read_level() != level:
+            raise RuntimeError("level poke did not take")
+
+    def poke_lives(self, lives: int) -> None:
+        """Set the lives counter (digdat.lives, int16) in the running
+        game. The game decrements it at each death and ends at 0; the
+        lives display shows "X<n>" above 5. Redrawn at the next death."""
+        if not 0 < lives < 100:
+            raise ValueError(f"lives {lives} out of range 1..99")
+        self._poke(LIVES_OFFSET, lives)
+        self._prev_lives = lives
+        if self._read_lives() != lives:
+            raise RuntimeError("lives poke did not take")
+
+    def _poke(self, offset: int, value: int) -> None:
+        """Write an int16 into game RAM.
+
         There is no memory-write API, so this patches the RAM image inside
         a serialize() blob (it is stored uncompressed, though not as one
-        contiguous copy of region 0: the bytes around the counter are
-        located by content) and unserializes it. The game only reads the
-        counter when it builds a level (layout, background, monster count
-        and speed: main.c levplan / levof10), so poke level N-1 shortly
-        before the current level ends to get a properly built level N.
-        Like any restore this costs ~1 frame of timing phase.
+        contiguous copy of region 0: the bytes around the word are
+        located by content) and unserializes it. Like any restore this
+        costs ~1 frame of timing phase.
         """
         m = bytes(self._core.read_memory_region(0))
-        lo, hi = LEVEL_OFFSET - 64, LEVEL_OFFSET + 64
+        lo, hi = offset - 64, offset + 64
         blob = bytearray(self._core.serialize())
         at = blob.find(m[lo:hi])
         if at < 0 or blob.find(m[lo:hi], at + 1) >= 0:
-            raise RuntimeError("level counter not uniquely found in state")
-        struct.pack_into("<h", blob, at + LEVEL_OFFSET - lo, level)
+            raise RuntimeError(f"RAM word {offset:#x} not uniquely found "
+                               "in state")
+        struct.pack_into("<h", blob, at + offset - lo, value)
         held = list(self._core.get_held_keys())
         self._core.unserialize(bytes(blob))
         self._core.set_held_keys_raw(held)
-        if self.read_level() != level:
-            raise RuntimeError("level poke did not take")
 
     def _read_score(self) -> int:
         m = self._core.read_memory_region(0)

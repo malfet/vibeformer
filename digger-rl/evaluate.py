@@ -18,7 +18,9 @@ checkpoint from train_symbolic.py or train_pixel.py. Reports:
 With --levels DIR (states from tools/level_states.py) it instead plays one
 life from every saved level start and reports, per level: how often the
 level is cleared before the first death, the share of its emeralds eaten,
-and the score gained.
+and the score gained. With --lives N as well, each attempt instead
+starts with N lives and plays on through deaths until the level is
+cleared or the lives run out; it then also reports the lives used.
 
 Cross-session numbers drift; compare against a same-session teacher run.
 """
@@ -62,6 +64,10 @@ def main() -> None:
                    help="evaluate per level from the level starts in DIR")
     p.add_argument("--max-steps", type=int, default=3000,
                    help="--levels: steps allowed per level attempt")
+    p.add_argument("--lives", type=int, default=0,
+                   help="--levels: start each attempt with this many lives "
+                        "and play on until cleared or out of lives "
+                        "(0 = one life, the default)")
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
@@ -169,36 +175,46 @@ def evaluate_levels(env, policy, args, label: str) -> None:
         level = d["level"]
         for _ in range(args.episodes):
             obs = env.load_state(d["state"])
+            if args.lives:
+                env._env.poke_lives(args.lives)
             policy.reset()
             n0 = int(env._last_state.emeralds.sum())
             score0 = score = d["score"]
-            n_left, cleared = n0, False
+            n_left, cleared, deaths = n0, False, 0
             for _ in range(args.max_steps):
                 a = policy(obs)
                 obs, _, done, info = env_step_skipped(env, a, args.frame_skip)
                 policy.observe(info)
                 score = int(info.get("score", score))
-                if env._env.read_level() != level:
+                if env._env.level_done() or env._env.read_level() != level:
                     cleared = True
                     break
                 n_left = int(env._last_state.emeralds.sum())
-                if done or info.get("death_event", False) \
-                        or info.get("dying", False):
+                deaths += bool(info.get("death_event", False))
+                if done or (not args.lives and (
+                        info.get("death_event", False)
+                        or info.get("dying", False))):
                     break
             eaten = 1.0 if cleared else 1 - n_left / max(n0, 1)
-            res[level].append((cleared, eaten, score - score0))
+            res[level].append((cleared, eaten, score - score0, deaths))
             print(f"  [{label}] L{level} {f.stem}: "
                   f"{'CLEAR' if cleared else 'died '} "
-                  f"eaten {eaten:4.0%} +{score - score0}", flush=True)
+                  f"eaten {eaten:4.0%} +{score - score0}"
+                  + (f" deaths {deaths}" if args.lives else ""), flush=True)
     print(f"\n=== {label} per level ({args.episodes} x "
-          f"{len(starts)} starts, one life each"
-          f"{', argmax' if args.argmax else ', stochastic'}) ===")
-    print("level  n  cleared  emeralds eaten  score gained")
+          f"{len(starts)} starts, "
+          + (f"{args.lives} lives each" if args.lives else "one life each")
+          + f"{', argmax' if args.argmax else ', stochastic'}) ===")
+    print("level  n  cleared  emeralds eaten  score gained"
+          + ("  deaths (cleared)" if args.lives else ""))
     for level in sorted(res):
         r = res[level]
-        print(f"{level:5d} {len(r):2d}  {sum(c for c, _, _ in r):3d}/{len(r):<3d}"
-              f"  {statistics.mean(e for _, e, _ in r):13.0%}"
-              f"  {statistics.mean(p for _, _, p in r):12.0f}")
+        won = [k for c, _, _, k in r if c]
+        print(f"{level:5d} {len(r):2d}  {sum(c for c, *_ in r):3d}/{len(r):<3d}"
+              f"  {statistics.mean(e for _, e, _, _ in r):13.0%}"
+              f"  {statistics.mean(p for _, _, p, _ in r):12.0f}"
+              + (f"  {statistics.mean(won) if won else float('nan'):16.1f}"
+                 if args.lives else ""))
 
 
 if __name__ == "__main__":
