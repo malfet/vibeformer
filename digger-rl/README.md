@@ -355,7 +355,9 @@ trainer (`tools/policies.py` tells them apart by their config).
 | `tools/policies.py` | Loads any policy spec for `watch.py` / `evaluate.py`. |
 | `tools/display.py` | Kitty graphics + keyboard protocol viewer, matplotlib fallback. |
 | `tools/bag_kills.py` | Start states shortly before bag kills that depend on the digger's play ([Lesson 22](HISTORY.md#22-pixel-ppo-past-the-teacher-bag-kill-starts-help-extra-memory-does-not-yet-2026-11-13)). |
-| `tools/policy_search.py` | The pixel policy with emulator-rollout search at risky moments; records search-corrected traces for expert iteration. |
+| `tools/policy_search.py` | The pixel policy with emulator-rollout search at risky moments and when it loops without scoring (`--stuck`, [Lesson 28](HISTORY.md#28-stuck-search-fixes-greedy-loops-level-done-and-lives-2026-11-16)); records search-corrected traces for expert iteration. |
+| `tools/bc_levels.py` | BC on chosen levels, heads and input formats, scored per level on held-out traces ([Lessons 25](HISTORY.md#25-the-2m-weight-fc-layer-memorises-layouts-small-heads-generalise-2026-11-15), [26](HISTORY.md#26-rgb-is-worth-keeping-but-only-just-2026-11-15)). |
+| `tools/hesitation.py` | Start states where a policy is unsure or dithers ([Lesson 23](HISTORY.md#23-a-second-expert-iteration-round-helps-hesitation-starts-do-not-2026-11-15)). |
 | `tools/rescue.py` | Roll back before student deaths and search for surviving branches; near-death start pools ([Lesson 21](HISTORY.md#21-pixel-students-across-all-levels-restores-made-exact-2026-11-11)). |
 | `tools/collect_death_states.py` | Save states N steps before each death; `--probe` checks escapability. |
 | `tools/make_report_figs.py` | Regenerates `docs/*.png`. |

@@ -767,6 +767,199 @@ episodic life, half the episodes from a start pool.
 - Still open: **all 60 deaths are monsters**, and no later level is
   cleared in one life (best: 74% of level 2's emeralds).
 
+### 23. A second expert-iteration round helps; hesitation starts do not (2026-11-15)
+
+`px128_exit2` repeats README step 8 from `exit1`, with new search traces
+(`search2_*`) plus two of the old ones as the anchor: **5580** ±184
+sampled, 5778 greedy, 409 steps per life (exit1: 5240 / 5520 / 372).
+Per level, in one life: L1 100% of emeralds, L2 73%, L3 72%, L4 26%.
+
+`px128_hes1` adds `tools/hesitation.py` starts to that run: states where
+the policy's entropy is >= 1.2 (238) or where it stays on <= 2 tiles for
+20 steps without scoring (62), as 20% of starts. Final 5588 ±298
+sampled, 6135 greedy: within noise of exit2, better on L5 and worse on
+L3, L7, L8. Why it did little:
+
+- **High entropy mostly marks ties**, two equally good routes, not
+  mistakes. Deaths happen at low entropy, where the policy is sure and
+  wrong.
+- 20% of starts, of which most are from L2-3, is a small share of the
+  signal, and route choices pay off seconds later.
+- No control run, so a small effect could not be seen anyway.
+
+A start state alone does not say what to do there; the search-labelled
+version of the same idea is Lesson 28's stuck search.
+
+### 24. The teacher waits out its own death (2026-11-15)
+
+`GameState` now carries `dying` and `death_stage` (digdat.deathstage:
+monster -> arc -> anim -> tombstone, or bag -> anim -> tombstone; the
+dirge starts in anim). Input is ignored for those ~100 steps, so
+`SmartHeuristic` returns NOOP while dying instead of labelling noise.
+Without `--episodic-life` the last death now plays out until `lives`
+reaches 0 instead of ending the game at onset. All traces from here on
+(`lv_*`) use this teacher.
+
+### 25. The 2M-weight FC layer memorises layouts; small heads generalise (2026-11-15)
+
+The IMPALA encoder ends in a 16x16x32 map flattened into FC 256: 2.1M of
+its 2.2M weights, one per position. `tools/bc_levels.py` tests what that
+costs: BC on chosen levels, scored per level on held-out traces, every
+run cut to the same 148k samples. Teacher traces: `lv_{0..9}` (30k
+steps from each level's starts), validation `lv_val_{0,1}`. L4 and L8
+have layouts no other level shares (`levplan`: L9-10 reuse L6-7's).
+
+| Run | Head | Params | Trained on | Mean, trained levels | L4 | L8 |
+|---|---|---:|---|---:|---:|---:|
+| `early` | FC | 2.2M | L1-3 | 0.841 | 0.463* | 0.468* |
+| `spread` | FC | 2.2M | all but L4, L8 | 0.830 | 0.606* | 0.648* |
+| `spread_pool8` | extra maxpool to 8x8, FC | 625k | all but L4, L8 | 0.847 | 0.673* | 0.730* |
+| `spread_coord` | coordinate planes, conv, global max+mean pool | 153k | all but L4, L8 | **0.868** | **0.749*** | **0.829*** |
+| `all` | FC | 2.2M | all | 0.844 | 0.820 | 0.847 |
+
+\* = never trained on. BC accuracy (agreement with the teacher).
+
+- **More levels in the teacher data help a lot**: trained on L1-3 only,
+  the student scores 0.45-0.55 everywhere else.
+- **The smaller the head, the better it transfers**: `coord` gets 0.83
+  on L8 without ever seeing it, close to `all`, which trained on it, and
+  it is also best on the levels it did see.
+- **Play agrees** (one life from each level start, 8 per level): mean
+  emeralds eaten per life, teacher 33.6%, `spread` 25.1%, `pool8` 32.2%,
+  `coord` 33.2%; on the unseen L4/L8, `coord` 35%/34% vs `spread`
+  17%/20%.
+
+### 26. RGB is worth keeping, but only just (2026-11-15)
+
+Every level uses the same 8 colours: black, dark red, red, brown, dark
+green, green, yellow, white. Standard luma maps dark green (emeralds),
+red and brown to ~0.30. A linear gray fitted to the palette,
+(0.1846, 0.7231, 0.0923), keeps all 8 apart (0, .09, .19, .28, .37,
+.72, .91, 1); being linear, it commutes with the area downscale.
+`bc_levels.py` `spread` with one channel per frame:
+
+| Input | Mean, trained levels | L4* | L8* |
+|---|---:|---:|---:|
+| RGB (12 ch) | 0.830 | 0.606 | 0.648 |
+| luma (4 ch) | 0.815 | 0.595 | 0.611 |
+| palette gray (4 ch) | 0.834 | 0.602 | 0.619 |
+
+Luma costs a little, as the merged colours predict; palette gray
+matches RGB. Either saves 1,152 weights in the first conv, so RGB stays.
+The head (Lesson 25) matters far more than the input format.
+
+### 27. Rebuilt from scratch on the small heads: pool8 is the keeper (2026-11-16)
+
+The same pipeline for each head: BC on `lv_{0..9}` (15 epochs), PPO
+(4M frames; starts: levels 0.5, near-death 0.3, bag kills 0.2; teacher
+anchor 0.3 -> 0), then expert-iteration rounds (search traces as the
+anchor, 0.5 -> 0.1). The near-death and bag-kill pools from the old
+network are reused.
+
+| Run | Params | Frames | Sampled | Greedy | Life | L1 clean | Bag kills | Emeralds/level |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `exit2` (FC, Lesson 23) | 2.2M | 16M | 5580 | 5778 | 409 | 16/20 | 8.6 | 51.4% |
+| `coord_bc` | 153k | 0 | 1929 | | 228 | 2/20 | 0.9 | |
+| `coord_exit1` | 153k | 8M | 3605 | 4240 | 348 | 2/20 | 6.1 | 51.2% |
+| `coord_exit2` | 153k | 12M | 3971 | 5572 | 351 | 3/20 | 7.6 | 52.4% |
+| `pool8_bc` | 625k | 0 | 1634 | | 196 | 2/20 | 0.8 | |
+| `pool8_ppo1` | 625k | 4M | 4531 | | 310 | 12/20 | 1.5 | |
+| `pool8_exit1` | 625k | 8M | 5758 | 4773 | 349 | 12/20 | 3.0 | 51.8% |
+| `pool8_exit2` | 625k | 12M | 5798 | 5638 | 368 | 14/20 | 3.7 | 50.6% |
+
+Life is steps per life (sampled), L1 clean is level 1 cleared without
+dying in 20 sampled games, emeralds/level the mean share eaten in one
+life over the 10 levels.
+
+- **All heads reach the same per-level skill** (~51% of a level's
+  emeralds per life) with similar training. They differ in where.
+- **`coord` loses level 1**: 65% of L1's emeralds against 100% for the
+  FC network, and every game starts there, so its full-game score lags.
+  It is far better on L4 and L7. Pooling the map to 128 numbers stops
+  layout memorisation, including the useful kind: a clean route through
+  level 1.
+- **`pool8` keeps both**: a 4x4 grid of features is enough for the L1
+  route (95%), and it transfers better than the FC network.
+- **`coord` samples badly**: 3971 sampled vs 5572 greedy.
+
+### 28. Stuck search fixes greedy loops; level-done and lives (2026-11-16)
+
+`tools/policy_search.py --stuck 20` also searches when the digger has
+been on <= 2 tiles for 20 steps without scoring. Every action is held 8
+steps and ranked by (survived, score gained, new tiles). Holding for 3
+steps, as the monster search does, changed almost nothing: the greedy
+policy walked straight back into the loop. In the 80k steps for
+`pool8_exit2`, 5,609 were stuck and 636 got a different label; that
+round lifted greedy play from 4773 to 5638 and greedy L1 clean from 2/10
+to 6/10, while sampled play, whose randomness already broke loops,
+stayed put.
+
+`DiggerEnv.level_done()` reads gamedat.levdone, the word after the level
+counter: -1 from the moment the last emerald is eaten, ~57 steps before
+the level counter moves on. `poke_lives(n)` sets 1-99 lives.
+`evaluate.py --levels DIR --lives N` plays each level start until it is
+cleared or N lives are gone. Level 5 with 10 lives, 8 attempts:
+
+| Policy | Cleared | Lives lost per clear | Emeralds eaten |
+|---|---:|---:|---:|
+| teacher | 8/8 | 4.0 | 100% |
+| `coord_exit2` | 7/8 | 4.1 | 100% |
+| `pool8_exit1` | 7/8 | 5.4 | 100% |
+| `exit2` (FC) | 1/8 | 3.0 | 92-99% |
+
+`exit2` eats nearly everything and then dies ten times in a row with a
+few emeralds left: layout memory from L1 pulling it the wrong way on a
+mostly dug-out level 5. Nobody clears it cleanly; even the teacher loses
+3-5 lives.
+
+### 29. Where the training time goes, and a bag-kill round that needs its anchor (2026-11-17)
+
+**Time.** One round was ~2.5 h: ~75 min of search traces (4 CPU
+processes at 0.2-0.3 s/step, each search up to 7 rollouts of 30 steps)
+and ~75 min of PPO. On a quiet machine a PPO update (4096 frames, 8
+envs) is 1.9 s of rollout and 2.7 s of learning. Learning is real GPU
+work: 16 minibatches of 1024 128x128 frames forward and backward. A
+rollout step is ~20 ms, of which the 8 emulators take 8 ms; the rest is
+two GPU round trips per step. New in `train_pixel.py`:
+
+- `--amp`: bf16 autocast and channels_last in the update, 1.4x per
+  minibatch in isolation, 2.7 -> 1.7 s per update in training.
+- 16 envs x 64 steps (the same 1024-sample batches) spreads the
+  per-step overhead: 894 -> ~1160 frames/s with `--amp`.
+- `--overlap` (step half the envs while the policy acts on the other
+  half) gained nothing, since the emulators are not what it waits on.
+- Categorical argument validation is off (a device sync every step).
+- The log line shows `roll`/`learn` seconds per update.
+
+Search is CPU-bound and embarrassingly parallel, so more workers
+(10 x 8k steps instead of 4 x 20k) is the cheap win there.
+
+**Bag-kill round.** `pool8_exit2` makes 3.7 bag kills a game against
+`exit2`'s 8.6, so `tools/bag_kills.py` was rerun on its play (267
+starts in `data/save/bag_kills_p8`) and PPO trained from there as the
+old `bag1` did: no anchor, 20% bag-kill starts. Two things changed at
+once, so a two-run ablation followed:
+
+| Run | Anchor | Settings | Sampled | Greedy | Life | L1 clean (s / g) | Bag kills (s / g) | Emeralds/level |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| `pool8_exit2` (start) | | | 5798 | 5638 | 368 | 14/20 / 6/10 | 3.7 / 3.8 | 50.6% |
+| `pool8_bag1` | none | amp, 16x64 | 4505 | 4908 | 312 | 10/20 / 6/10 | 2.2 / 2.9 | 44% |
+| **`pool8_bagA`** | search traces 0.3 -> 0.1 | amp, 16x64 | **6476** | **6903** | **406** | **15/20** / 5/10 | 3.4 / 4.9 | **52.7%** |
+| `pool8_bagB` | none | fp32, 8x128 | 5370 | 6768 | 344 | 9/20 / **10/10** | 3.2 / **7.3** | 40.8% |
+
+- **`pool8_bagA` is the best pixel agent so far**, ahead of `exit2` by
+  ~900 sampled and ~1100 greedy with a quarter of the weights.
+- **Keep the anchor after expert iteration.** Without it the policy
+  drifts (entropy rose to 0.6-0.8 mid-run): it sharpens its best line
+  (B's greedy play clears L1 10/10 and makes 7.3 bag kills) but loses
+  sampled score and the later levels (41% vs 53%).
+- **Without the anchor, the old settings did much better than the new
+  ones** (B vs `bag1`). A likely cause is the 64-step rollouts: GAE
+  bootstraps from the critic twice as often, and bag kills pay seconds
+  after the setup. With the anchor, the new settings are fine. One seed
+  each.
+- Bag kills are still the gap with `exit2`.
+
 ## Lessons ported from ../snake (2026-08-31)
 
 The snake project ran the same recipe on a much cheaper simulator and
