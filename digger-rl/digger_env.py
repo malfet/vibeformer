@@ -843,9 +843,18 @@ class DiggerVecEnv:
                     np.array([r], dtype=np.float32),
                     np.array([done], dtype=bool),
                     [info])
-        for c, a in zip(self._conns, actions):
+        self.step_async(actions)
+        return self.step_wait()
+
+    # Split-phase stepping over a slice of the workers, so the caller can
+    # run the policy on one group while another group's emulators run
+    # (train_pixel.py --overlap). Subprocess workers only.
+    def step_async(self, actions, envs: slice = slice(None)) -> None:
+        for c, a in zip(self._conns[envs], actions):
             c.send(("step", int(a)))
-        results = [c.recv() for c in self._conns]
+
+    def step_wait(self, envs: slice = slice(None)):
+        results = [c.recv() for c in self._conns[envs]]
         for i, r in enumerate(results):
             if isinstance(r, tuple) and len(r) == 2 and r[0] == "error":
                 raise RuntimeError(f"vec worker {i} failed: {r[1]}")

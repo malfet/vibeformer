@@ -26,7 +26,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributions import Categorical
+from torch.distributions import Categorical, Distribution
+
+# Argument validation syncs with the device on every Categorical: ~15% of
+# rollout time on MPS. The logits come from our own network.
+Distribution.set_default_validate_args(False)
 from torch.optim import Adam
 
 from digger_env import DiggerEnv, DiggerVecEnv, stack_offsets
@@ -338,6 +342,8 @@ class Config:
     learning_rate: float = 2.5e-4
     num_steps: int = 128              # policy steps per rollout
     num_envs: int = 1                 # parallel envs (subprocess if >1)
+    overlap: bool = False             # act on half the envs while the other half step
+    amp: bool = False                 # bf16 autocast + channels_last in the PPO update
     anneal_lr: bool = True
     gamma: float = 0.99
     gae_lambda: float = 0.95
@@ -934,6 +940,11 @@ def parse_args() -> Config:
     p.add_argument("--num-steps", type=int, default=Config.num_steps)
     p.add_argument("--num-envs", type=int, default=Config.num_envs,
                    help="parallel envs (subprocess workers if >1)")
+    p.add_argument("--amp", action="store_true",
+                   help="bf16 autocast and channels_last for the PPO update")
+    p.add_argument("--overlap", action="store_true",
+                   help="split the envs in two groups and run the policy on "
+                        "one while the other's emulators step")
     p.add_argument("--frame-skip", type=int, default=Config.frame_skip)
     p.add_argument("--frame-stack", type=int, default=Config.frame_stack)
     p.add_argument("--frame-offsets", default="",
@@ -1074,7 +1085,7 @@ def parse_args() -> Config:
         total_timesteps=a.total_timesteps,
         device=str(select_device(a.force_cpu)),
         learning_rate=a.lr, seed=a.seed,
-        num_steps=a.num_steps, num_envs=a.num_envs,
+        num_steps=a.num_steps, num_envs=a.num_envs, overlap=a.overlap, amp=a.amp,
         frame_skip=a.frame_skip,
         frame_stack=(len(stack_offsets(0, offs)) if offs else a.frame_stack),
         frame_offsets=stack_offsets(0, offs) if offs else (),
@@ -1290,12 +1301,24 @@ def main() -> None:
     # that case).
     teacher_buf = torch.full((N, B), -1, dtype=torch.long, device=device)
 
+    # --overlap: two env groups stepped in turn (see the rollout)
+    groups = ([slice(0, B // 2), slice(B // 2, B)]
+              if cfg.overlap and B >= 2 and teacher is None
+              else [slice(0, B)])
     obs_np = vec.reset()  # (B, k, H, W) uint8
     obs_t = torch.from_numpy(obs_np).to(device).float().mul_(1.0 / 255.0)
     done_t = torch.zeros(B, device=device)
 
     global_step = 0
     update = 0
+    t_roll = t_learn = 0.0      # seconds in rollouts / updates, for the log
+    # --amp: bf16 autocast for the PPO update's forward passes; with
+    # channels_last weights about 1.4x faster per minibatch on MPS.
+    def amp():
+        return torch.autocast(device.type, dtype=torch.bfloat16,
+                              enabled=cfg.amp)
+    if cfg.amp:
+        agent.to(memory_format=torch.channels_last)
     ep_returns_per_env = np.zeros(B, dtype=np.float32)
     ep_lengths_per_env = np.zeros(B, dtype=np.int64)
     ep_returns: collections.deque[float] = collections.deque(maxlen=20)
@@ -1321,10 +1344,11 @@ def main() -> None:
         else:
             current_anchor = cfg.bc_anchor_coef
 
+        t_phase = time.monotonic()
         # ---- Rollout ----
-        for step in range(N):
-            obs_buf[step] = obs_t
-            done_buf[step] = done_t
+        def act_group(step: int, sl: slice) -> np.ndarray:
+            obs_buf[step, sl] = obs_t[sl]
+            done_buf[step, sl] = done_t[sl]
 
             # Live teacher labeling: read the game state from RAM
             # *before* the student acts, query the heuristic, and stash
@@ -1336,38 +1360,57 @@ def main() -> None:
                 teacher_buf[step, 0] = t_action
 
             with torch.no_grad():
-                action, logp, _, value = agent.act(obs_t)
-            act_buf[step] = action
-            logp_buf[step] = logp
-            val_buf[step] = value
+                action, logp, _, value = agent.act(obs_t[sl])
+            act_buf[step, sl] = action
+            logp_buf[step, sl] = logp
+            val_buf[step, sl] = value
+            return action.cpu().numpy()
 
-            actions_np = action.cpu().numpy()
-            obs_np, rewards, dones, infos = vec.step(actions_np)
-            global_step += cfg.frame_skip * B
+        def absorb(step: int, sl: slice, obs_np, rewards, dones, infos):
+            nonlocal global_step
+            global_step += cfg.frame_skip * len(dones)
             rewards = rewards * cfg.reward_scale
             if cfg.time_penalty > 0:
                 rewards = rewards - cfg.time_penalty
-            rew_buf[step] = torch.from_numpy(rewards).to(device)
-            ep_returns_per_env += rewards
-            ep_lengths_per_env += cfg.frame_skip
+            rew_buf[step, sl] = torch.from_numpy(rewards).to(device)
+            ep_returns_per_env[sl] += rewards
+            ep_lengths_per_env[sl] += cfg.frame_skip
 
-            for i, d in enumerate(dones):
+            for j, d in enumerate(dones):
+                i = (sl.start or 0) + j
                 if d:
                     ep_returns.append(float(ep_returns_per_env[i]))
                     print(f"{tag}  ep_end env={i} return={ep_returns_per_env[i]:.0f} "
                           f"length={ep_lengths_per_env[i]} "
-                          f"score={infos[i].get('score', 0)} "
-                          f"lives={infos[i].get('lives', 0)}", flush=True)
+                          f"score={infos[j].get('score', 0)} "
+                          f"lives={infos[j].get('lives', 0)}", flush=True)
                     ep_returns_per_env[i] = 0.0
                     ep_lengths_per_env[i] = 0
-                    if bool(infos[i].get("real_done", d)):
-                        game_scores.append(float(infos[i].get("score", 0)))
+                    if bool(infos[j].get("real_done", d)):
+                        game_scores.append(float(infos[j].get("score", 0)))
                     if teacher is not None:
                         teacher.reset()
 
-            done_t = torch.from_numpy(dones.astype(np.float32)).to(device)
-            obs_t = torch.from_numpy(obs_np).to(device).float().mul_(1.0 / 255.0)
+            done_t[sl] = torch.from_numpy(dones.astype(np.float32)).to(device)
+            obs_t[sl] = torch.from_numpy(obs_np).to(device).float().mul_(1.0 / 255.0)
 
+        if len(groups) == 1:
+            for step in range(N):
+                absorb(step, groups[0],
+                       *vec.step(act_group(step, groups[0])))
+        else:
+            # Pipelined: while one group's emulators run, the policy acts
+            # on the other. Each env still sees the same step sequence.
+            for step in range(N):
+                for sl in groups:
+                    if step > 0:
+                        absorb(step - 1, sl, *vec.step_wait(sl))
+                    vec.step_async(act_group(step, sl), sl)
+            for sl in groups:
+                absorb(N - 1, sl, *vec.step_wait(sl))
+
+        t_roll += time.monotonic() - t_phase
+        t_phase = time.monotonic()
         # ---- Pre-update diagnostics on the full rollout (N*B samples) ----
         flat_obs = obs_buf.reshape(-1, *obs_buf.shape[2:])
         flat_act = act_buf.reshape(-1)
@@ -1426,62 +1469,65 @@ def main() -> None:
             mb_size = total // cfg.num_minibatches
             for start in range(0, total, mb_size):
                 mb = b_inds[start:start + mb_size]
-                _, new_logp, entropy, new_val = agent.act(flat_obs[mb], flat_act[mb])
-                ratio = (new_logp - flat_logp[mb]).exp()
+                with amp():
+                    _, new_logp, entropy, new_val = agent.act(flat_obs[mb], flat_act[mb])
+                    new_logp, entropy, new_val = (new_logp.float(), entropy.float(),
+                                                  new_val.float())
+                    ratio = (new_logp - flat_logp[mb]).exp()
 
-                mb_adv = flat_adv[mb]
-                if cfg.norm_adv:
-                    mb_adv = (mb_adv - mb_adv.mean()) / (mb_adv.std() + 1e-8)
+                    mb_adv = flat_adv[mb]
+                    if cfg.norm_adv:
+                        mb_adv = (mb_adv - mb_adv.mean()) / (mb_adv.std() + 1e-8)
 
-                pg1 = -mb_adv * ratio
-                pg2 = -mb_adv * torch.clamp(ratio, 1 - cfg.clip_coef, 1 + cfg.clip_coef)
-                pg_loss = torch.max(pg1, pg2).mean()
+                    pg1 = -mb_adv * ratio
+                    pg2 = -mb_adv * torch.clamp(ratio, 1 - cfg.clip_coef, 1 + cfg.clip_coef)
+                    pg_loss = torch.max(pg1, pg2).mean()
 
-                if cfg.clip_vloss:
-                    v_unclipped = (new_val - flat_ret[mb]) ** 2
-                    v_clipped = flat_val[mb] + torch.clamp(
-                        new_val - flat_val[mb], -cfg.clip_coef, cfg.clip_coef)
-                    v_clipped_loss = (v_clipped - flat_ret[mb]) ** 2
-                    v_loss = 0.5 * torch.max(v_unclipped, v_clipped_loss).mean()
-                else:
-                    v_loss = 0.5 * ((new_val - flat_ret[mb]) ** 2).mean()
-
-                ent = entropy.mean()
-                loss = pg_loss - current_ent_coef * ent + cfg.vf_coef * v_loss
-
-                if update <= cfg.value_warmup_updates:
-                    # Critic-only warmup (as in train_symbolic.py): fit V on
-                    # a frozen encoder so the untrained critic after BC
-                    # neither drags the shared features nor feeds the
-                    # actor noise advantages.
-                    with torch.no_grad():
-                        z = (agent._critic_encode(flat_obs[mb])
-                             if agent.separate_critic
-                             else agent.encode(flat_obs[mb]))
-                    v_loss = 0.5 * ((agent.critic(z).squeeze(-1)
-                                     - flat_ret[mb]) ** 2).mean()
-                    loss = cfg.vf_coef * v_loss
-                elif anchor_active and current_anchor > 0:
-                    if teacher is not None:
-                        # Live labels: the rollout already paired each
-                        # state with the teacher's chosen action.
-                        # Anchor on the same minibatch the PG loss uses,
-                        # so we don't bias toward stale teacher states.
-                        flat_teacher = teacher_buf.reshape(-1)
-                        bc_logits = agent.actor(agent.encode(flat_obs[mb]))
-                        anchor_ce = F.cross_entropy(
-                            bc_logits, flat_teacher[mb])
+                    if cfg.clip_vloss:
+                        v_unclipped = (new_val - flat_ret[mb]) ** 2
+                        v_clipped = flat_val[mb] + torch.clamp(
+                            new_val - flat_val[mb], -cfg.clip_coef, cfg.clip_coef)
+                        v_clipped_loss = (v_clipped - flat_ret[mb]) ** 2
+                        v_loss = 0.5 * torch.max(v_unclipped, v_clipped_loss).mean()
                     else:
-                        bc_M = len(bc_data[3])
-                        bc_idxs = anchor_rng.choice(
-                            bc_M, size=min(cfg.bc_batch_size, bc_M),
-                            replace=False)
-                        bc_obs, bc_acts, _ = _bc_minibatch(
-                            bc_data[0], bc_data[1], None, bc_data[3],
-                            bc_idxs, cfg, device)
-                        bc_logits = agent.actor(agent.encode(bc_obs))
-                        anchor_ce = F.cross_entropy(bc_logits, bc_acts)
-                    loss = loss + current_anchor * anchor_ce
+                        v_loss = 0.5 * ((new_val - flat_ret[mb]) ** 2).mean()
+
+                    ent = entropy.mean()
+                    loss = pg_loss - current_ent_coef * ent + cfg.vf_coef * v_loss
+
+                    if update <= cfg.value_warmup_updates:
+                        # Critic-only warmup (as in train_symbolic.py): fit V on
+                        # a frozen encoder so the untrained critic after BC
+                        # neither drags the shared features nor feeds the
+                        # actor noise advantages.
+                        with torch.no_grad():
+                            z = (agent._critic_encode(flat_obs[mb])
+                                 if agent.separate_critic
+                                 else agent.encode(flat_obs[mb]))
+                        v_loss = 0.5 * ((agent.critic(z).squeeze(-1).float()
+                                         - flat_ret[mb]) ** 2).mean()
+                        loss = cfg.vf_coef * v_loss
+                    elif anchor_active and current_anchor > 0:
+                        if teacher is not None:
+                            # Live labels: the rollout already paired each
+                            # state with the teacher's chosen action.
+                            # Anchor on the same minibatch the PG loss uses,
+                            # so we don't bias toward stale teacher states.
+                            flat_teacher = teacher_buf.reshape(-1)
+                            bc_logits = agent.actor(agent.encode(flat_obs[mb]))
+                            anchor_ce = F.cross_entropy(
+                                bc_logits.float(), flat_teacher[mb])
+                        else:
+                            bc_M = len(bc_data[3])
+                            bc_idxs = anchor_rng.choice(
+                                bc_M, size=min(cfg.bc_batch_size, bc_M),
+                                replace=False)
+                            bc_obs, bc_acts, _ = _bc_minibatch(
+                                bc_data[0], bc_data[1], None, bc_data[3],
+                                bc_idxs, cfg, device)
+                            bc_logits = agent.actor(agent.encode(bc_obs))
+                            anchor_ce = F.cross_entropy(bc_logits.float(), bc_acts)
+                        loss = loss + current_anchor * anchor_ce
 
                 optim.zero_grad()
                 loss.backward()
@@ -1492,6 +1538,8 @@ def main() -> None:
                     clipfracs.append(
                         ((ratio - 1.0).abs() > cfg.clip_coef).float().mean().item())
                     approx_kls.append(((ratio - 1) - (new_logp - flat_logp[mb])).mean().item())
+
+        t_learn += time.monotonic() - t_phase   # the .item()s above synced
 
         # ---- Logging ----
         if update % cfg.log_every == 0:
@@ -1504,7 +1552,8 @@ def main() -> None:
                   f"pg {pg_loss.item():+.3f}  v {v_loss.item():.3f}  "
                   f"ent {ent.item():.3f}  clip {np.mean(clipfracs):.3f}  "
                   f"avg_ret {avg_ret:.1f}  lr {lr_now:.2e}  "
-                  f"entc {current_ent_coef:.3f}{anchor_tag}  sps {sps:.0f}",
+                  f"entc {current_ent_coef:.3f}{anchor_tag}  sps {sps:.0f}  "
+                  f"roll {t_roll / update:.2f}s learn {t_learn / update:.2f}s",
                   flush=True)
             print(f"     buf: ent_mean {ent_buf_mean:.2f}  ent_p10 {ent_buf_p10:.2f}  "
                   f"spread {spread_mean:5.2f}  top_a {top_act_idx}@{top_act_frac:.0%}",
