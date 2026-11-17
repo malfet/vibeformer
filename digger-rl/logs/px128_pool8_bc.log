@@ -1,0 +1,121 @@
+[px128_pool8_bc] device=mps cfg=Config(total_timesteps=0, learning_rate=0.00025, num_steps=128, num_envs=1, anneal_lr=True, gamma=0.99, gae_lambda=0.95, num_minibatches=4, update_epochs=4, norm_adv=True, clip_coef=0.1, clip_vloss=False, ent_coef=0.01, vf_coef=0.5, max_grad_norm=0.5, frame_skip=4, frame_stack=4, frame_offsets=(), obs_size=128, start_states=None, start_prob=0.0, archive_every=0, archive_prob=0.0, archive_size=200, archive_perturb=10, color=True, encoder_width=1, arch='impala_pool8', aug_shift=4, separate_critic=False, load_agent='', save_best=False, clip_reward=True, reward_scale=1.0, value_warmup_updates=0, episodic_life=False, death_penalty=0.0, ent_coef_final=None, bc_traces=('data/traces/lv_0.npz', 'data/traces/lv_1.npz', 'data/traces/lv_2.npz', 'data/traces/lv_3.npz', 'data/traces/lv_4.npz', 'data/traces/lv_5.npz', 'data/traces/lv_6.npz', 'data/traces/lv_7.npz', 'data/traces/lv_8.npz', 'data/traces/lv_9.npz'), bc_val=('data/traces/lv_val_0.npz', 'data/traces/lv_val_1.npz'), bc_epochs=15, bc_batch_size=256, bc_value=False, bc_anchor_coef=0.0, bc_anchor_final=None, teacher_policy='', time_penalty=0.0, warmup_steps=0, warmup_epochs=5, dagger_iters=0, dagger_collect_steps=25000, dagger_epochs=5, log_every=1, save_every=50, device='mps', seed=1, run_name='px128_pool8_bc')
+[px128_pool8_bc] agent: width=1, in_ch=12 (color), params=625,239  num_envs=1
+  bc: skipped 589 cross-reset stacks in trace 0
+  bc: skipped 546 cross-reset stacks in trace 1
+  bc: skipped 525 cross-reset stacks in trace 2
+  bc: skipped 548 cross-reset stacks in trace 3
+  bc: skipped 583 cross-reset stacks in trace 4
+  bc: skipped 536 cross-reset stacks in trace 5
+  bc: skipped 585 cross-reset stacks in trace 6
+  bc: skipped 610 cross-reset stacks in trace 7
+  bc: skipped 551 cross-reset stacks in trace 8
+  bc: skipped 539 cross-reset stacks in trace 9
+  bc: skipped 281 cross-reset stacks in trace 0
+  bc: skipped 271 cross-reset stacks in trace 1
+bc: 294358 samples (15 epochs, batch=256)
+  bc epoch 1/15  ce 1.060  acc 0.559  val acc 0.729  at changes 0.380
+  bc epoch 2/15  ce 0.595  acc 0.788  val acc 0.812  at changes 0.487
+  bc epoch 3/15  ce 0.458  acc 0.842  val acc 0.836  at changes 0.528
+  bc epoch 4/15  ce 0.394  acc 0.867  val acc 0.848  at changes 0.532
+  bc epoch 5/15  ce 0.348  acc 0.883  val acc 0.857  at changes 0.557
+  bc epoch 6/15  ce 0.314  acc 0.894  val acc 0.862  at changes 0.562
+  bc epoch 7/15  ce 0.290  acc 0.904  val acc 0.865  at changes 0.580
+  bc epoch 8/15  ce 0.269  acc 0.910  val acc 0.862  at changes 0.575
+  bc epoch 9/15  ce 0.252  acc 0.915  val acc 0.864  at changes 0.574
+  bc epoch 10/15  ce 0.238  acc 0.920  val acc 0.862  at changes 0.598
+  bc epoch 11/15  ce 0.224  acc 0.924  val acc 0.864  at changes 0.602
+  bc epoch 12/15  ce 0.215  acc 0.927  val acc 0.865  at changes 0.596
+  bc epoch 13/15  ce 0.204  acc 0.931  val acc 0.861  at changes 0.611
+  bc epoch 14/15  ce 0.196  acc 0.933  val acc 0.865  at changes 0.603
+  bc epoch 15/15  ce 0.188  acc 0.935  val acc 0.862  at changes 0.605
+  bc: kept the best epoch (val acc 0.865)
+[px128_pool8_bc] bc-only: final evaluation (10 episodes)
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+[px128_pool8_bc]   eval 1/10: score 900
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+[px128_pool8_bc]   eval 2/10: score 1525
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+[px128_pool8_bc]   eval 3/10: score 1650
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+[px128_pool8_bc]   eval 4/10: score 1450
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+[px128_pool8_bc]   eval 5/10: score 925
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+[px128_pool8_bc]   eval 6/10: score 1350
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+[px128_pool8_bc]   eval 7/10: score 1450
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+[px128_pool8_bc]   eval 8/10: score 1200
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+[px128_pool8_bc]   eval 9/10: score 2500
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+[px128_pool8_bc]   eval 10/10: score 1225
+[px128_pool8_bc] bc-only eval: mean 1418  median 1400  min/max 900/2500
+[px128_pool8_bc] bc-only done. saved /Users/malfet/git/malfet/vibeformer/digger-rl/data/checkpoints/px128_pool8_bc/ppo_digger_bc_only.pt

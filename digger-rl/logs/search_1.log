@@ -1,0 +1,85 @@
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+  step 500: deaths 0, checked 144, searched 3, overruled 3 (rescued 3), 0.09 s/step
+  step 1000: deaths 0, checked 463, searched 14, overruled 14 (rescued 13), 0.14 s/step
+  step 1500: deaths 0, checked 874, searched 89, overruled 70 (rescued 62), 0.20 s/step
+  step 2000: deaths 0, checked 1235, searched 191, overruled 129 (rescued 96), 0.22 s/step
+  step 2500: deaths 1, checked 1592, searched 426, overruled 187 (rescued 131), 0.24 s/step
+  step 3000: deaths 1, checked 2092, searched 535, overruled 266 (rescued 183), 0.27 s/step
+  step 3500: deaths 1, checked 2490, searched 735, overruled 372 (rescued 228), 0.29 s/step
+  step 4000: deaths 1, checked 2875, searched 776, overruled 408 (rescued 260), 0.28 s/step
+  step 4500: deaths 2, checked 3262, searched 1003, overruled 496 (rescued 310), 0.29 s/step
+  step 5000: deaths 2, checked 3672, searched 1082, overruled 545 (rescued 339), 0.29 s/step
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+  step 5500: deaths 3, checked 4006, searched 1115, overruled 568 (rescued 360), 0.28 s/step
+  step 6000: deaths 3, checked 4282, searched 1117, overruled 570 (rescued 362), 0.27 s/step
+  step 6500: deaths 3, checked 4758, searched 1311, overruled 690 (rescued 435), 0.29 s/step
+  step 7000: deaths 3, checked 5126, searched 1353, overruled 718 (rescued 458), 0.29 s/step
+  step 7500: deaths 3, checked 5552, searched 1409, overruled 765 (rescued 499), 0.29 s/step
+  step 8000: deaths 4, checked 5712, searched 1461, overruled 785 (rescued 505), 0.28 s/step
+  step 8500: deaths 4, checked 6154, searched 1587, overruled 881 (rescued 560), 0.28 s/step
+  step 9000: deaths 4, checked 6488, searched 1594, overruled 888 (rescued 567), 0.28 s/step
+  step 9500: deaths 5, checked 6892, searched 1770, overruled 935 (rescued 592), 0.28 s/step
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+  step 10000: deaths 6, checked 7199, searched 1810, overruled 951 (rescued 598), 0.27 s/step
+  step 10500: deaths 6, checked 7519, searched 1820, overruled 961 (rescued 608), 0.27 s/step
+  step 11000: deaths 6, checked 7936, searched 1864, overruled 996 (rescued 638), 0.27 s/step
+  step 11500: deaths 7, checked 8379, searched 2062, overruled 1052 (rescued 675), 0.27 s/step
+  step 12000: deaths 7, checked 8601, searched 2121, overruled 1090 (rescued 707), 0.27 s/step
+  step 12500: deaths 7, checked 9039, searched 2217, overruled 1158 (rescued 769), 0.27 s/step
+  step 13000: deaths 8, checked 9295, searched 2369, overruled 1188 (rescued 776), 0.27 s/step
+  step 13500: deaths 8, checked 9519, searched 2400, overruled 1206 (rescued 785), 0.26 s/step
+  step 14000: deaths 8, checked 9945, searched 2515, overruled 1287 (rescued 840), 0.27 s/step
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+  step 14500: deaths 9, checked 10235, searched 2633, overruled 1375 (rescued 883), 0.27 s/step
+  step 15000: deaths 9, checked 10531, searched 2638, overruled 1380 (rescued 887), 0.26 s/step
+  step 15500: deaths 9, checked 10921, searched 2684, overruled 1411 (rescued 912), 0.26 s/step
+  step 16000: deaths 11, checked 11324, searched 3002, overruled 1483 (rescued 918), 0.26 s/step
+  step 16500: deaths 11, checked 11517, searched 3054, overruled 1498 (rescued 931), 0.26 s/step
+  step 17000: deaths 11, checked 11913, searched 3124, overruled 1534 (rescued 951), 0.26 s/step
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+  step 17500: deaths 12, checked 12283, searched 3261, overruled 1588 (rescued 987), 0.26 s/step
+  step 18000: deaths 13, checked 12731, searched 3455, overruled 1662 (rescued 1034), 0.26 s/step
+  step 18500: deaths 13, checked 13219, searched 3697, overruled 1800 (rescued 1111), 0.27 s/step
+  step 19000: deaths 14, checked 13548, searched 3867, overruled 1881 (rescued 1143), 0.27 s/step
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+  step 19500: deaths 16, checked 14027, searched 4070, overruled 1953 (rescued 1172), 0.27 s/step
+  step 20000: deaths 17, checked 14449, searched 4361, overruled 2024 (rescued 1200), 0.27 s/step
+
+{'steps': 20000, 'checked': 14449, 'rollouts': 36254, 'searched': 4361, 'overruled': 2024, 'rescued': 1200}, deaths 17
+wrote 20000 steps to data/traces/px128_search_1.npz

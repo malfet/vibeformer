@@ -1,0 +1,106 @@
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+kill 1 at step 1336 L8: saved 1, passive 2 (21s)
+kill 2 at step 1538 L8: saved 2, passive 4 (24s)
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+kill 3 at step 2281 L7: saved 4, passive 5 (35s)
+kill 4 at step 2309 L7: saved 4, passive 8 (36s)
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+kill 5 at step 4085 L2: saved 7, passive 8 (63s)
+kill 6 at step 4235 L2: saved 7, passive 11 (66s)
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+kill 7 at step 4791 L5: saved 9, passive 12 (75s)
+kill 8 at step 4816 L5: saved 12, passive 12 (75s)
+kill 9 at step 4938 L5: saved 15, passive 12 (77s)
+kill 10 at step 5188 L5: saved 15, passive 15 (81s)
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+kill 11 at step 6768 L3: saved 18, passive 15 (104s)
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+kill 12 at step 7093 L8: saved 19, passive 17 (108s)
+kill 13 at step 7260 L8: saved 20, passive 19 (110s)
+kill 14 at step 7450 L8: saved 21, passive 21 (113s)
+kill 15 at step 7566 L8: saved 24, passive 21 (115s)
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+kill 16 at step 9692 L7: saved 24, passive 24 (141s)
+kill 17 at step 9714 L7: saved 27, passive 24 (141s)
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+kill 18 at step 10002 L5: saved 30, passive 24 (144s)
+kill 19 at step 10374 L5: saved 32, passive 25 (148s)
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+kill 20 at step 10600 L7: saved 33, passive 27 (150s)
+
+10600 steps, {'kills': 20, 'kills_L8': 6, 'passive': 27, 'saved': 33, 'kills_L7': 5, 'kills_L2': 2, 'kills_L5': 6, 'kills_L3': 1, 'kills_skipped': 1}

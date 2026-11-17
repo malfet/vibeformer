@@ -1,0 +1,71 @@
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+  step 500: deaths 1, checked 374, searched 105, overruled 35 (rescued 30), 0.24 s/step
+  step 1000: deaths 1, checked 641, searched 132, overruled 52 (rescued 44), 0.21 s/step
+  step 1500: deaths 1, checked 1119, searched 215, overruled 107 (rescued 91), 0.25 s/step
+  step 2000: deaths 2, checked 1320, searched 258, overruled 121 (rescued 102), 0.22 s/step
+  step 2500: deaths 2, checked 1786, searched 281, overruled 142 (rescued 122), 0.23 s/step
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+  step 3000: deaths 3, checked 2215, searched 402, overruled 153 (rescued 128), 0.22 s/step
+  step 3500: deaths 4, checked 2631, searched 535, overruled 178 (rescued 151), 0.22 s/step
+  step 4000: deaths 5, checked 2783, searched 586, overruled 199 (rescued 164), 0.21 s/step
+  step 4500: deaths 6, checked 3101, searched 598, overruled 211 (rescued 176), 0.20 s/step
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+  step 5000: deaths 6, checked 3355, searched 619, overruled 224 (rescued 189), 0.20 s/step
+  step 5500: deaths 6, checked 3669, searched 647, overruled 246 (rescued 208), 0.20 s/step
+  step 6000: deaths 6, checked 4115, searched 676, overruled 273 (rescued 235), 0.21 s/step
+  step 6500: deaths 6, checked 4521, searched 706, overruled 293 (rescued 253), 0.21 s/step
+  step 7000: deaths 6, checked 4972, searched 736, overruled 321 (rescued 281), 0.21 s/step
+  step 7500: deaths 6, checked 5215, searched 756, overruled 340 (rescued 298), 0.21 s/step
+  step 8000: deaths 7, checked 5666, searched 927, overruled 378 (rescued 328), 0.21 s/step
+  step 8500: deaths 7, checked 6057, searched 965, overruled 410 (rescued 355), 0.22 s/step
+  step 9000: deaths 7, checked 6533, searched 1017, overruled 452 (rescued 387), 0.22 s/step
+  step 9500: deaths 7, checked 6949, searched 1060, overruled 477 (rescued 408), 0.22 s/step
+  step 10000: deaths 7, checked 7381, searched 1093, overruled 498 (rescued 429), 0.22 s/step
+  step 10500: deaths 7, checked 7877, searched 1124, overruled 525 (rescued 454), 0.23 s/step
+  step 11000: deaths 8, checked 8123, searched 1191, overruled 553 (rescued 472), 0.22 s/step
+  step 11500: deaths 9, checked 8525, searched 1275, overruled 588 (rescued 497), 0.23 s/step
+  step 12000: deaths 9, checked 8843, searched 1380, overruled 594 (rescued 502), 0.22 s/step
+  step 12500: deaths 9, checked 9326, searched 1437, overruled 641 (rescued 544), 0.23 s/step
+  step 13000: deaths 9, checked 9757, searched 1452, overruled 650 (rescued 553), 0.23 s/step
+  step 13500: deaths 9, checked 10173, searched 1483, overruled 671 (rescued 573), 0.23 s/step
+  step 14000: deaths 9, checked 10481, searched 1514, overruled 695 (rescued 596), 0.23 s/step
+  step 14500: deaths 9, checked 10887, searched 1556, overruled 731 (rescued 629), 0.23 s/step
+  step 15000: deaths 9, checked 11112, searched 1570, overruled 743 (rescued 639), 0.22 s/step
+  step 15500: deaths 9, checked 11525, searched 1601, overruled 772 (rescued 666), 0.22 s/step
+  step 16000: deaths 9, checked 12021, searched 1616, overruled 787 (rescued 681), 0.23 s/step
+  step 16500: deaths 10, checked 12438, searched 1779, overruled 828 (rescued 705), 0.23 s/step
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+  step 17000: deaths 11, checked 12888, searched 1925, overruled 857 (rescued 731), 0.23 s/step
+  step 17500: deaths 11, checked 13299, searched 1951, overruled 880 (rescued 753), 0.23 s/step
+  step 18000: deaths 12, checked 13683, searched 2099, overruled 898 (rescued 761), 0.23 s/step
+  step 18500: deaths 12, checked 14022, searched 2158, overruled 941 (rescued 793), 0.23 s/step
+  step 19000: deaths 12, checked 14454, searched 2203, overruled 984 (rescued 834), 0.23 s/step
+  step 19500: deaths 13, checked 14692, searched 2217, overruled 995 (rescued 840), 0.23 s/step
+  step 20000: deaths 13, checked 15110, searched 2268, overruled 1022 (rescued 861), 0.22 s/step
+
+{'steps': 20000, 'checked': 15110, 'rollouts': 26450, 'searched': 2268, 'overruled': 1022, 'rescued': 861}, deaths 13
+wrote 20000 steps to data/traces/px128_coord_search2_3.npz

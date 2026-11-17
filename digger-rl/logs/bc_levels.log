@@ -1,0 +1,83 @@
+  bc: skipped 589 cross-reset stacks in trace 0
+  bc: skipped 546 cross-reset stacks in trace 1
+  bc: skipped 525 cross-reset stacks in trace 2
+  bc: skipped 548 cross-reset stacks in trace 3
+  bc: skipped 583 cross-reset stacks in trace 4
+  bc: skipped 536 cross-reset stacks in trace 5
+  bc: skipped 585 cross-reset stacks in trace 6
+  bc: skipped 610 cross-reset stacks in trace 7
+  bc: skipped 551 cross-reset stacks in trace 8
+  bc: skipped 539 cross-reset stacks in trace 9
+  bc: skipped 281 cross-reset stacks in trace 0
+  bc: skipped 271 cross-reset stacks in trace 1
+train samples per level: {np.int16(1): np.int64(36674), np.int16(2): np.int64(68735), np.int16(3): np.int64(42898), np.int16(4): np.int64(25022), np.int16(5): np.int64(25771), np.int16(6): np.int64(14603), np.int16(7): np.int64(24765), np.int16(8): np.int64(22919), np.int16(9): np.int64(17334), np.int16(10): np.int64(15637)}
+val samples per level:   {np.int16(1): np.int64(2879), np.int16(2): np.int64(5187), np.int16(3): np.int64(2696), np.int16(4): np.int64(2904), np.int16(5): np.int64(3972), np.int16(6): np.int64(3565), np.int16(7): np.int64(2797), np.int16(8): np.int64(2409), np.int16(9): np.int64(2096), np.int16(10): np.int64(937)}
+148307 training samples per run
+[early] epoch 1: seen 0.695  held-out L4 0.343 L5 0.378 L6 0.429 L7 0.368 L8 0.318 L9 0.412 L10 0.394  (88s)
+[early] epoch 2: seen 0.780  held-out L4 0.389 L5 0.418 L6 0.484 L7 0.439 L8 0.405 L9 0.500 L10 0.477  (175s)
+[early] epoch 3: seen 0.785  held-out L4 0.408 L5 0.426 L6 0.531 L7 0.489 L8 0.458 L9 0.525 L10 0.521  (262s)
+[early] epoch 4: seen 0.801  held-out L4 0.431 L5 0.418 L6 0.520 L7 0.482 L8 0.419 L9 0.525 L10 0.494  (350s)
+[early] epoch 5: seen 0.809  held-out L4 0.408 L5 0.409 L6 0.503 L7 0.493 L8 0.441 L9 0.521 L10 0.498  (438s)
+[early] epoch 6: seen 0.822  held-out L4 0.436 L5 0.404 L6 0.484 L7 0.502 L8 0.433 L9 0.494 L10 0.534  (529s)
+[early] epoch 7: seen 0.817  held-out L4 0.441 L5 0.440 L6 0.497 L7 0.503 L8 0.456 L9 0.511 L10 0.527  (617s)
+[early] epoch 8: seen 0.829  held-out L4 0.445 L5 0.434 L6 0.506 L7 0.503 L8 0.458 L9 0.528 L10 0.525  (705s)
+[early] epoch 9: seen 0.822  held-out L4 0.450 L5 0.433 L6 0.499 L7 0.492 L8 0.430 L9 0.524 L10 0.541  (792s)
+[early] epoch 10: seen 0.826  held-out L4 0.451 L5 0.446 L6 0.544 L7 0.508 L8 0.444 L9 0.561 L10 0.550  (880s)
+[early] epoch 11: seen 0.825  held-out L4 0.437 L5 0.446 L6 0.492 L7 0.512 L8 0.451 L9 0.535 L10 0.555  (967s)
+[early] epoch 12: seen 0.836  held-out L4 0.463 L5 0.449 L6 0.518 L7 0.522 L8 0.468 L9 0.530 L10 0.554  (1055s)
+[spread] epoch 1: seen 0.595  held-out L4 0.352 L8 0.399  (93s)
+[spread] epoch 2: seen 0.707  held-out L4 0.474 L8 0.474  (187s)
+[spread] epoch 3: seen 0.759  held-out L4 0.523 L8 0.551  (277s)
+[spread] epoch 4: seen 0.771  held-out L4 0.529 L8 0.544  (377s)
+[spread] epoch 5: seen 0.792  held-out L4 0.556 L8 0.590  (466s)
+[spread] epoch 6: seen 0.792  held-out L4 0.551 L8 0.598  (554s)
+[spread] epoch 7: seen 0.813  held-out L4 0.577 L8 0.616  (643s)
+[spread] epoch 8: seen 0.811  held-out L4 0.597 L8 0.614  (730s)
+[spread] epoch 9: seen 0.809  held-out L4 0.580 L8 0.644  (818s)
+[spread] epoch 10: seen 0.813  held-out L4 0.598 L8 0.655  (906s)
+[spread] epoch 11: seen 0.812  held-out L4 0.592 L8 0.627  (994s)
+[spread] epoch 12: seen 0.815  held-out L4 0.606 L8 0.648  (1084s)
+[spread_pool8] epoch 1: seen 0.536  held-out L4 0.374 L8 0.409  (88s)
+[spread_pool8] epoch 2: seen 0.718  held-out L4 0.535 L8 0.559  (178s)
+[spread_pool8] epoch 3: seen 0.764  held-out L4 0.621 L8 0.638  (267s)
+[spread_pool8] epoch 4: seen 0.791  held-out L4 0.636 L8 0.679  (357s)
+[spread_pool8] epoch 5: seen 0.813  held-out L4 0.674 L8 0.721  (447s)
+[spread_pool8] epoch 6: seen 0.827  held-out L4 0.687 L8 0.722  (539s)
+[spread_pool8] epoch 7: seen 0.828  held-out L4 0.687 L8 0.740  (631s)
+[spread_pool8] epoch 8: seen 0.830  held-out L4 0.687 L8 0.728  (722s)
+[spread_pool8] epoch 9: seen 0.829  held-out L4 0.673 L8 0.754  (809s)
+[spread_pool8] epoch 10: seen 0.830  held-out L4 0.670 L8 0.729  (896s)
+[spread_pool8] epoch 11: seen 0.836  held-out L4 0.673 L8 0.730  (983s)
+[spread_pool8] epoch 12: seen 0.829  held-out L4 0.668 L8 0.722  (1070s)
+[spread_coord] epoch 1: seen 0.402  held-out L4 0.351 L8 0.350  (91s)
+[spread_coord] epoch 2: seen 0.664  held-out L4 0.626 L8 0.630  (183s)
+[spread_coord] epoch 3: seen 0.748  held-out L4 0.655 L8 0.691  (275s)
+[spread_coord] epoch 4: seen 0.795  held-out L4 0.743 L8 0.763  (368s)
+[spread_coord] epoch 5: seen 0.811  held-out L4 0.742 L8 0.770  (460s)
+[spread_coord] epoch 6: seen 0.821  held-out L4 0.722 L8 0.794  (550s)
+[spread_coord] epoch 7: seen 0.829  held-out L4 0.753 L8 0.802  (639s)
+[spread_coord] epoch 8: seen 0.843  held-out L4 0.756 L8 0.801  (728s)
+[spread_coord] epoch 9: seen 0.830  held-out L4 0.738 L8 0.800  (817s)
+[spread_coord] epoch 10: seen 0.855  held-out L4 0.763 L8 0.812  (907s)
+[spread_coord] epoch 11: seen 0.853  held-out L4 0.743 L8 0.824  (998s)
+[spread_coord] epoch 12: seen 0.859  held-out L4 0.749 L8 0.829  (1090s)
+[all] epoch 1: seen 0.578  held-out   (90s)
+[all] epoch 2: seen 0.720  held-out   (181s)
+[all] epoch 3: seen 0.767  held-out   (271s)
+[all] epoch 4: seen 0.796  held-out   (361s)
+[all] epoch 5: seen 0.805  held-out   (451s)
+[all] epoch 6: seen 0.817  held-out   (541s)
+[all] epoch 7: seen 0.827  held-out   (631s)
+[all] epoch 8: seen 0.828  held-out   (721s)
+[all] epoch 9: seen 0.832  held-out   (811s)
+[all] epoch 10: seen 0.831  held-out   (901s)
+[all] epoch 11: seen 0.823  held-out   (991s)
+[all] epoch 12: seen 0.836  held-out   (1081s)
+
+val accuracy per level at each run's best epoch (* = not trained on)
+run           arch             params      L1     L2     L3     L4     L5     L6     L7     L8     L9    L10
+early         impala          2198103  0.854  0.815  0.855  0.463* 0.449* 0.518* 0.522* 0.468* 0.530* 0.554*
+spread        impala          2198103  0.817  0.809  0.844  0.606* 0.743  0.818  0.839  0.648* 0.848  0.918 
+spread_pool8  impala_pool8     625239  0.861  0.813  0.877  0.673* 0.775  0.838  0.857  0.730* 0.862  0.894 
+spread_coord  impala_coord     153367  0.864  0.835  0.876  0.749* 0.839  0.859  0.888  0.829* 0.870  0.909 
+all           impala          2198103  0.853  0.847  0.852  0.820  0.773  0.830  0.856  0.847  0.848  0.896 

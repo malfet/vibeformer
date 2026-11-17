@@ -448,3 +448,16 @@ Let's not publish, I want to make a few changes to a symbolic extractor state ma
 Can you suggest why hes1 was not super helpful. Also I'm curious if one FC layer taking up 90% of the network weights is a good design. And was IMPALA experiment kind of failure. If som, hypothesize as to why
 Let's run cheap alternatives tests. Also I wonder if network will learn to better generalize against the levels if training with teacher will be done across all 10 levels
 I'm also curious whether it's worth to have RGB inputs or change them into single channel (considering that game's EGA paletter is very discrete)
+Yes, let's do 1
+And delete all intermediate checkpoints but best
+Yes, let's do that, but forget about hes1, let's delete all intermediate checkpoints other than exit2 (as hes1 does not really help) and start a training from scratch
+OK, what are the next steps?
+Do it
+Any updates?
+Do it
+Two questions while training runs: why it takes 2.5hours? Is it compute bound? Or waiting for play traces? Also can you modify game state to detect level cleared and add ability to tweak number of lives. I want to know if any of the current strategies can clear level 5 given 10 lives for example
+Let's do overlapped and increase parallelism
+Sure, let's do 1
+Do it
+Can you add your findings to appropriate .md file (or may be you can rename it to changelog or something)
+Commit all changes

@@ -1,0 +1,100 @@
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+  [px128_coord_exit2] L1 L1_0_0: CLEAR eaten 100% +1250
+  [px128_coord_exit2] L1 L1_0_0: died  eaten  70% +775
+  [px128_coord_exit2] L1 L1_2_0: died  eaten  57% +675
+  [px128_coord_exit2] L1 L1_2_0: died  eaten  50% +375
+  [px128_coord_exit2] L1 L1_3_0: died  eaten  50% +375
+  [px128_coord_exit2] L1 L1_3_0: died  eaten  47% +350
+  [px128_coord_exit2] L1 L1_1_0: CLEAR eaten 100% +1250
+  [px128_coord_exit2] L1 L1_1_0: died  eaten  50% +625
+  [px128_coord_exit2] L2 L2_1_0: died  eaten  80% +1575
+  [px128_coord_exit2] L2 L2_1_0: died  eaten  83% +1300
+  [px128_coord_exit2] L2 L2_3_0: died  eaten  73% +1250
+  [px128_coord_exit2] L2 L2_3_0: died  eaten  83% +1600
+  [px128_coord_exit2] L2 L2_2_0: died  eaten  76% +1250
+  [px128_coord_exit2] L2 L2_2_0: died  eaten  80% +1575
+  [px128_coord_exit2] L2 L2_0_0: died  eaten  83% +1350
+  [px128_coord_exit2] L2 L2_0_0: died  eaten  80% +1575
+  [px128_coord_exit2] L3 L3_3_0: died  eaten  59% +1250
+  [px128_coord_exit2] L3 L3_3_0: died  eaten  59% +1250
+  [px128_coord_exit2] L3 L3_1_0: died  eaten  59% +1750
+  [px128_coord_exit2] L3 L3_1_0: died  eaten  59% +1250
+  [px128_coord_exit2] L3 L3_0_0: died  eaten  59% +1250
+  [px128_coord_exit2] L3 L3_0_0: died  eaten  84% +1550
+  [px128_coord_exit2] L3 L3_2_0: died  eaten  59% +1250
+  [px128_coord_exit2] L3 L3_2_0: died  eaten  59% +1250
+  [px128_coord_exit2] L4 L4_1_0: died  eaten  80% +1800
+  [px128_coord_exit2] L4 L4_1_0: died  eaten  43% +1200
+  [px128_coord_exit2] L4 L4_3_0: died  eaten  54% +1625
+  [px128_coord_exit2] L4 L4_3_0: died  eaten  85% +2850
+  [px128_coord_exit2] L4 L4_2_0: died  eaten  75% +2475
+  [px128_coord_exit2] L4 L4_2_0: died  eaten  77% +2975
+  [px128_coord_exit2] L4 L4_0_0: died  eaten  89% +2300
+  [px128_coord_exit2] L4 L4_0_0: died  eaten  78% +2250
+  [px128_coord_exit2] L5 L5_3_0: died  eaten  47% +1400
+  [px128_coord_exit2] L5 L5_3_0: died  eaten  19% +625
+  [px128_coord_exit2] L5 L5_1_0: died  eaten  32% +1125
+  [px128_coord_exit2] L5 L5_1_0: died  eaten  43% +1825
+  [px128_coord_exit2] L5 L5_0_0: died  eaten  44% +1600
+  [px128_coord_exit2] L5 L5_0_0: died  eaten  74% +2850
+  [px128_coord_exit2] L5 L5_2_0: died  eaten  27% +1025
+  [px128_coord_exit2] L5 L5_2_0: died  eaten  62% +2700
+  [px128_coord_exit2] L6 L6_2_0: died  eaten  25% +575
+  [px128_coord_exit2] L6 L6_2_0: died  eaten  37% +725
+  [px128_coord_exit2] L6 L6_0_0: died  eaten  77% +2250
+  [px128_coord_exit2] L6 L6_0_0: died  eaten  37% +725
+  [px128_coord_exit2] L6 L6_1_0: died  eaten  31% +650
+  [px128_coord_exit2] L6 L6_1_0: died  eaten  31% +650
+  [px128_coord_exit2] L6 L6_3_0: died  eaten  25% +575
+  [px128_coord_exit2] L6 L6_3_0: died  eaten  46% +850
+  [px128_coord_exit2] L7 L7_0_0: died  eaten  39% +1800
+  [px128_coord_exit2] L7 L7_0_0: died  eaten  38% +1525
+  [px128_coord_exit2] L7 L7_2_0: died  eaten  58% +2375
+  [px128_coord_exit2] L7 L7_2_0: died  eaten  57% +2625
+  [px128_coord_exit2] L7 L7_3_0: died  eaten  39% +1575
+  [px128_coord_exit2] L7 L7_3_0: died  eaten  41% +1525
+  [px128_coord_exit2] L7 L7_1_0: died  eaten  41% +1950
+  [px128_coord_exit2] L7 L7_1_0: died  eaten  38% +1875
+  [px128_coord_exit2] L8 L8_2_0: died  eaten  37% +1075
+  [px128_coord_exit2] L8 L8_2_0: died  eaten  51% +1750
+  [px128_coord_exit2] L8 L8_0_0: died  eaten  21% +575
+  [px128_coord_exit2] L8 L8_0_0: died  eaten  51% +1500
+  [px128_coord_exit2] L8 L8_1_0: died  eaten  35% +1050
+  [px128_coord_exit2] L8 L8_1_0: died  eaten  35% +1050
+  [px128_coord_exit2] L8 L8_3_0: died  eaten  44% +1450
+  [px128_coord_exit2] L8 L8_3_0: died  eaten  38% +1100
+  [px128_coord_exit2] L9 L9_0_0: died  eaten  29% +625
+  [px128_coord_exit2] L9 L9_0_0: died  eaten  44% +825
+  [px128_coord_exit2] L9 L9_2_0: died  eaten  83% +1425
+  [px128_coord_exit2] L9 L9_2_0: died  eaten  35% +700
+  [px128_coord_exit2] L9 L9_3_0: died  eaten  62% +1000
+  [px128_coord_exit2] L9 L9_3_0: died  eaten  83% +1900
+  [px128_coord_exit2] L9 L9_1_0: died  eaten  25% +575
+  [px128_coord_exit2] L9 L9_1_0: died  eaten  29% +625
+  [px128_coord_exit2] L10 L10_1_0: died  eaten  21% +975
+  [px128_coord_exit2] L10 L10_1_0: died  eaten  21% +975
+  [px128_coord_exit2] L10 L10_3_0: died  eaten  34% +1775
+  [px128_coord_exit2] L10 L10_3_0: died  eaten  12% +525
+  [px128_coord_exit2] L10 L10_2_0: died  eaten  33% +1500
+  [px128_coord_exit2] L10 L10_2_0: died  eaten  49% +3125
+  [px128_coord_exit2] L10 L10_0_0: died  eaten  36% +1825
+  [px128_coord_exit2] L10 L10_0_0: died  eaten  38% +2125
+
+=== px128_coord_exit2 per level (2 x 40 starts, one life each, stochastic) ===
+level  n  cleared  emeralds eaten  score gained
+    1  8    2/8              65%           709
+    2  8    0/8              80%          1434
+    3  8    0/8              62%          1350
+    4  8    0/8              73%          2184
+    5  8    0/8              44%          1644
+    6  8    0/8              38%           875
+    7  8    0/8              44%          1906
+    8  8    0/8              39%          1194
+    9  8    0/8              49%           959
+   10  8    0/8              30%          1603

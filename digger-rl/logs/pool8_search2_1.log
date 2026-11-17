@@ -1,0 +1,50 @@
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+  step 500: deaths 0, checked 475, searched 55, overruled 48 (rescued 42), stuck 0 (unstuck 0), 0.30 s/step
+  step 1000: deaths 0, checked 727, searched 123, overruled 65 (rescued 59), stuck 51 (unstuck 1), 0.28 s/step
+  step 1500: deaths 0, checked 1036, searched 254, overruled 100 (rescued 89), stuck 101 (unstuck 10), 0.30 s/step
+  step 2000: deaths 0, checked 1513, searched 357, overruled 161 (rescued 132), stuck 108 (unstuck 13), 0.31 s/step
+  step 2500: deaths 0, checked 1955, searched 432, overruled 190 (rescued 160), stuck 149 (unstuck 13), 0.32 s/step
+  step 3000: deaths 0, checked 2306, searched 478, overruled 220 (rescued 186), stuck 159 (unstuck 15), 0.31 s/step
+  step 3500: deaths 0, checked 2651, searched 564, overruled 246 (rescued 211), stuck 217 (unstuck 17), 0.31 s/step
+  step 4000: deaths 0, checked 2967, searched 632, overruled 264 (rescued 229), stuck 266 (unstuck 24), 0.31 s/step
+  step 4500: deaths 0, checked 3449, searched 714, overruled 322 (rescued 279), stuck 266 (unstuck 24), 0.32 s/step
+  step 5000: deaths 0, checked 3770, searched 821, overruled 348 (rescued 301), stuck 339 (unstuck 27), 0.33 s/step
+  step 5500: deaths 0, checked 4119, searched 905, overruled 359 (rescued 310), stuck 412 (unstuck 30), 0.33 s/step
+  step 6000: deaths 1, checked 4583, searched 1091, overruled 438 (rescued 355), stuck 412 (unstuck 30), 0.33 s/step
+  step 6500: deaths 1, checked 4928, searched 1223, overruled 466 (rescued 379), stuck 463 (unstuck 30), 0.33 s/step
+  step 7000: deaths 1, checked 5279, searched 1289, overruled 483 (rescued 394), stuck 512 (unstuck 38), 0.33 s/step
+  step 7500: deaths 1, checked 5734, searched 1353, overruled 535 (rescued 445), stuck 515 (unstuck 40), 0.33 s/step
+  step 8000: deaths 1, checked 5987, searched 1507, overruled 564 (rescued 470), stuck 629 (unstuck 53), 0.33 s/step
+  step 8500: deaths 1, checked 6323, searched 1596, overruled 594 (rescued 496), stuck 679 (unstuck 57), 0.33 s/step
+  step 9000: deaths 1, checked 6721, searched 1651, overruled 619 (rescued 518), stuck 697 (unstuck 57), 0.33 s/step
+  step 9500: deaths 1, checked 7073, searched 1716, overruled 648 (rescued 545), stuck 729 (unstuck 58), 0.33 s/step
+  step 10000: deaths 1, checked 7387, searched 1834, overruled 685 (rescued 575), stuck 800 (unstuck 66), 0.33 s/step
+  step 10500: deaths 1, checked 7848, searched 1921, overruled 735 (rescued 607), stuck 800 (unstuck 66), 0.33 s/step
+  step 11000: deaths 1, checked 8230, searched 2052, overruled 790 (rescued 655), stuck 851 (unstuck 67), 0.33 s/step
+  step 11500: deaths 1, checked 8661, searched 2161, overruled 853 (rescued 702), stuck 851 (unstuck 67), 0.33 s/step
+  step 12000: deaths 1, checked 9036, searched 2249, overruled 883 (rescued 729), stuck 901 (unstuck 71), 0.34 s/step
+  step 12500: deaths 1, checked 9500, searched 2348, overruled 932 (rescued 768), stuck 934 (unstuck 71), 0.34 s/step
+  step 13000: deaths 1, checked 9850, searched 2408, overruled 961 (rescued 796), stuck 954 (unstuck 71), 0.34 s/step
+  step 13500: deaths 1, checked 10174, searched 2519, overruled 1003 (rescued 829), stuck 1003 (unstuck 77), 0.34 s/step
+  step 14000: deaths 2, checked 10581, searched 2721, overruled 1058 (rescued 870), stuck 1019 (unstuck 86), 0.34 s/step
+  step 14500: deaths 2, checked 10983, searched 2829, overruled 1108 (rescued 907), stuck 1062 (unstuck 87), 0.34 s/step
+  step 15000: deaths 2, checked 11317, searched 2891, overruled 1152 (rescued 945), stuck 1072 (unstuck 87), 0.33 s/step
+  step 15500: deaths 2, checked 11630, searched 2990, overruled 1175 (rescued 967), stuck 1148 (unstuck 91), 0.34 s/step
+  step 16000: deaths 2, checked 11984, searched 3082, overruled 1195 (rescued 987), stuck 1206 (unstuck 92), 0.34 s/step
+  step 16500: deaths 2, checked 12478, searched 3174, overruled 1261 (rescued 1048), stuck 1207 (unstuck 92), 0.34 s/step
+  step 17000: deaths 2, checked 12828, searched 3237, overruled 1272 (rescued 1057), stuck 1256 (unstuck 100), 0.33 s/step
+  step 17500: deaths 2, checked 13238, searched 3382, overruled 1316 (rescued 1094), stuck 1327 (unstuck 100), 0.34 s/step
+  step 18000: deaths 2, checked 13584, searched 3447, overruled 1341 (rescued 1113), stuck 1357 (unstuck 100), 0.33 s/step
+  step 18500: deaths 3, checked 13876, searched 3688, overruled 1366 (rescued 1124), stuck 1454 (unstuck 103), 0.33 s/step
+  step 19000: deaths 3, checked 14346, searched 3741, overruled 1405 (rescued 1161), stuck 1454 (unstuck 103), 0.33 s/step
+  step 19500: deaths 3, checked 14670, searched 3927, overruled 1473 (rescued 1191), stuck 1529 (unstuck 106), 0.33 s/step
+  step 20000: deaths 3, checked 15001, searched 4009, overruled 1496 (rescued 1213), stuck 1582 (unstuck 116), 0.32 s/step
+
+{'steps': 20000, 'checked': 15001, 'rollouts': 36628, 'searched': 4009, 'overruled': 1496, 'rescued': 1213, 'stuck': 1582, 'unstuck': 116}, deaths 3
+wrote 20000 steps to data/traces/px128_pool8_search2_1.npz

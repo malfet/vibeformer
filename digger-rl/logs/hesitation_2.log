@@ -1,0 +1,168 @@
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+dither at step 338 L1: saved 1 (4s)
+unsure at step 610 L2: saved 2 (6s)
+unsure at step 827 L2: saved 3 (8s)
+unsure at step 927 L2: saved 4 (9s)
+unsure at step 1105 L2: saved 5 (11s)
+dither at step 1173 L2: saved 6 (12s)
+unsure at step 1365 L3: saved 7 (14s)
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+unsure at step 1656 L5: saved 8 (17s)
+unsure at step 1801 L5: saved 9 (18s)
+unsure at step 1930 L5: saved 10 (20s)
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+dither at step 2036 L1: saved 11 (21s)
+unsure at step 2312 L2: saved 12 (24s)
+dither at step 2403 L2: saved 13 (25s)
+unsure at step 2522 L2: saved 14 (26s)
+unsure at step 2685 L2: saved 15 (27s)
+dither at step 2738 L2: saved 16 (28s)
+dither at step 2891 L2: saved 17 (29s)
+unsure at step 3187 L3: saved 18 (32s)
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+dither at step 3546 L1: saved 19 (36s)
+unsure at step 3927 L2: saved 20 (40s)
+unsure at step 4119 L2: saved 21 (42s)
+dither at step 4175 L2: saved 22 (42s)
+unsure at step 4470 L3: saved 23 (45s)
+unsure at step 4538 L3: saved 24 (46s)
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+unsure at step 4636 L2: saved 25 (47s)
+unsure at step 4948 L2: saved 26 (50s)
+unsure at step 5000 L2: saved 27 (51s)
+dither at step 5067 L2: saved 28 (51s)
+dither at step 5117 L2: saved 29 (52s)
+unsure at step 5374 L3: saved 30 (54s)
+unsure at step 5574 L3: saved 31 (56s)
+dither at step 5700 L3: saved 32 (58s)
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+dither at step 5752 L7: saved 33 (58s)
+unsure at step 5820 L7: saved 34 (59s)
+unsure at step 6224 L7: saved 35 (63s)
+unsure at step 6289 L7: saved 36 (64s)
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+dither at step 6643 L1: saved 37 (67s)
+unsure at step 7082 L2: saved 38 (72s)
+unsure at step 7195 L2: saved 39 (73s)
+dither at step 7253 L2: saved 40 (74s)
+unsure at step 7449 L3: saved 41 (76s)
+unsure at step 7541 L3: saved 42 (76s)
+unsure at step 7591 L3: saved 43 (77s)
+unsure at step 7650 L3: saved 44 (78s)
+unsure at step 7815 L3: saved 45 (79s)
+unsure at step 7883 L3: saved 46 (80s)
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+unsure at step 8024 L9: saved 47 (81s)
+unsure at step 8230 L9: saved 48 (83s)
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+unsure at step 8776 L9: saved 49 (89s)
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+dither at step 9215 L1: saved 50 (94s)
+unsure at step 9462 L2: saved 51 (96s)
+unsure at step 9674 L2: saved 52 (98s)
+unsure at step 9759 L2: saved 53 (99s)
+dither at step 9834 L2: saved 54 (100s)
+unsure at step 10321 L3: saved 55 (105s)
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+dither at step 10721 L1: saved 56 (109s)
+unsure at step 10994 L2: saved 57 (112s)
+unsure at step 11213 L2: saved 58 (114s)
+dither at step 11378 L2: saved 59 (116s)
+unsure at step 11574 L3: saved 60 (118s)
+unsure at step 11668 L3: saved 61 (119s)
+unsure at step 11938 L3: saved 62 (121s)
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+unsure at step 12093 L1: saved 63 (123s)
+dither at step 12289 L1: saved 64 (125s)
+unsure at step 12670 L2: saved 65 (129s)
+unsure at step 12804 L2: saved 66 (130s)
+dither at step 12854 L2: saved 67 (131s)
+unsure at step 13196 L3: saved 68 (134s)
+unsure at step 13319 L3: saved 69 (135s)
+unsure at step 13507 L3: saved 70 (137s)
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+dither at step 13917 L1: saved 71 (141s)
+unsure at step 14246 L2: saved 72 (145s)
+unsure at step 14433 L2: saved 73 (146s)
+dither at step 14483 L2: saved 74 (147s)
+unsure at step 14644 L2: saved 75 (149s)
+
+14644 steps, entropy median 0.018 p90 0.871 p99 1.518, {'saved': 75, 'dither': 22, 'dither_L1': 8, 'unsure': 53, 'unsure_L2': 24, 'dither_L2': 12, 'unsure_L3': 19, 'unsure_L5': 3, 'dither_L3': 1, 'dither_L7': 1, 'unsure_L7': 3, 'unsure_L9': 3, 'unsure_L1': 1}

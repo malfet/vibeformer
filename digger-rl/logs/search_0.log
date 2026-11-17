@@ -1,0 +1,85 @@
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+  step 500: deaths 1, checked 218, searched 93, overruled 42 (rescued 23), 0.20 s/step
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+  step 1000: deaths 3, checked 404, searched 222, overruled 47 (rescued 25), 0.14 s/step
+  step 1500: deaths 3, checked 680, searched 284, overruled 85 (rescued 59), 0.17 s/step
+  step 2000: deaths 3, checked 1082, searched 318, overruled 107 (rescued 70), 0.19 s/step
+  step 2500: deaths 4, checked 1339, searched 374, overruled 158 (rescued 116), 0.20 s/step
+  step 3000: deaths 4, checked 1630, searched 425, overruled 198 (rescued 152), 0.21 s/step
+  step 3500: deaths 4, checked 2098, searched 603, overruled 310 (rescued 227), 0.25 s/step
+  step 4000: deaths 4, checked 2465, searched 629, overruled 330 (rescued 243), 0.24 s/step
+  step 4500: deaths 4, checked 2888, searched 690, overruled 367 (rescued 270), 0.25 s/step
+  step 5000: deaths 5, checked 3305, searched 834, overruled 449 (rescued 328), 0.26 s/step
+  step 5500: deaths 5, checked 3700, searched 1082, overruled 542 (rescued 374), 0.26 s/step
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+  step 6000: deaths 6, checked 4011, searched 1136, overruled 575 (rescued 395), 0.26 s/step
+  step 6500: deaths 6, checked 4478, searched 1248, overruled 644 (rescued 448), 0.27 s/step
+  step 7000: deaths 6, checked 4866, searched 1392, overruled 728 (rescued 509), 0.28 s/step
+  step 7500: deaths 7, checked 5303, searched 1680, overruled 832 (rescued 539), 0.28 s/step
+  step 8000: deaths 7, checked 5621, searched 1709, overruled 860 (rescued 563), 0.28 s/step
+  step 8500: deaths 7, checked 6075, searched 1810, overruled 920 (rescued 609), 0.29 s/step
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+  step 9000: deaths 9, checked 6446, searched 2083, overruled 1006 (rescued 630), 0.29 s/step
+  step 9500: deaths 9, checked 6586, searched 2087, overruled 1010 (rescued 634), 0.28 s/step
+  step 10000: deaths 9, checked 6850, searched 2093, overruled 1016 (rescued 639), 0.27 s/step
+  step 10500: deaths 9, checked 7275, searched 2127, overruled 1045 (rescued 666), 0.27 s/step
+  step 11000: deaths 9, checked 7730, searched 2276, overruled 1129 (rescued 704), 0.27 s/step
+  step 11500: deaths 11, checked 8041, searched 2471, overruled 1166 (rescued 715), 0.27 s/step
+  step 12000: deaths 11, checked 8260, searched 2509, overruled 1194 (rescued 734), 0.27 s/step
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+  step 12500: deaths 12, checked 8595, searched 2601, overruled 1251 (rescued 768), 0.27 s/step
+  step 13000: deaths 12, checked 8919, searched 2618, overruled 1261 (rescued 778), 0.26 s/step
+  step 13500: deaths 12, checked 9339, searched 2687, overruled 1305 (rescued 803), 0.27 s/step
+  step 14000: deaths 12, checked 9738, searched 2779, overruled 1367 (rescued 847), 0.27 s/step
+  step 14500: deaths 13, checked 10124, searched 2966, overruled 1401 (rescued 863), 0.27 s/step
+  step 15000: deaths 14, checked 10530, searched 3175, overruled 1449 (rescued 887), 0.27 s/step
+  step 15500: deaths 14, checked 10859, searched 3241, overruled 1497 (rescued 924), 0.27 s/step
+[core] [DOSBOX LOG] No working midi device found/selected! Please check your settings and/or compilation environment.
+[core] [DOSBOX LOG] MIDI: Opened device:none
+[core] [DOSBOX LOG] DOS keyboard layout loaded with main language code US for layout us
+[core] [DOSBOX STATUS] Program: DIGGER - Cycles: -1 - Frameskip: -1 - Paused: 0
+[core] [DBP THROTTLE] NONE 0.000000 -> NONE 70.086594
+[core] [DOSBOX] Resolution changed 640x400 @ 70.087Hz AR: 1.60000 => 640x400 @ 70.087Hz AR: 1.60000
+[core] [DBP THROTTLE] NONE 70.086594 -> NONE 70.086304
+  step 16000: deaths 15, checked 11303, searched 3371, overruled 1573 (rescued 969), 0.27 s/step
+  step 16500: deaths 15, checked 11370, searched 3371, overruled 1573 (rescued 969), 0.26 s/step
+  step 17000: deaths 15, checked 11744, searched 3412, overruled 1600 (rescued 987), 0.26 s/step
+  step 17500: deaths 15, checked 12174, searched 3492, overruled 1663 (rescued 1023), 0.26 s/step
+  step 18000: deaths 16, checked 12539, searched 3660, overruled 1709 (rescued 1067), 0.26 s/step
+  step 18500: deaths 16, checked 12922, searched 3716, overruled 1755 (rescued 1109), 0.26 s/step
+  step 19000: deaths 17, checked 13313, searched 3929, overruled 1813 (rescued 1139), 0.26 s/step
+  step 19500: deaths 17, checked 13666, searched 3954, overruled 1837 (rescued 1160), 0.26 s/step
+  step 20000: deaths 17, checked 14153, searched 4014, overruled 1890 (rescued 1208), 0.26 s/step
+
+{'steps': 20000, 'checked': 14153, 'rollouts': 34223, 'searched': 4014, 'overruled': 1890, 'rescued': 1208}, deaths 17
+wrote 20000 steps to data/traces/px128_search_0.npz
