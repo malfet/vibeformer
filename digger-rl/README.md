@@ -7,12 +7,17 @@ with PPO; it now scores well above the teacher.
 
 The current best policy is published in the repo:
 
-    python watch.py checkpoints/digger_px128_pool8_bagA.pt --hud --sound
-    python evaluate.py checkpoints/digger_px128_pool8_bagA.pt --episodes 20
+    python watch.py checkpoints/digger_px128_pool8_grpo1.pt --hud --sound
+    python evaluate.py checkpoints/digger_px128_pool8_grpo1.pt --episodes 20
 
-It is the small-head (`--arch impala_pool8`) rebuild after four PPO
-rounds (16M frames), the last three anchored on search-corrected play
-([HISTORY Lessons 27-29](HISTORY.md)). The pipeline and model below
+It is `px128_pool8_bagA` (the small-head `--arch impala_pool8` rebuild
+after four PPO rounds, 16M frames, the last three anchored on
+search-corrected play, [HISTORY Lessons 27-29](HISTORY.md)) fine-tuned
+for 100 iterations with GRPO (`train_grpo.py`): groups of 8 rollouts
+from one exact emulator snapshot, half of them 6-16 steps before the
+policy's own deaths, return = 0.02 x score - 10 x died. It removed most
+sampling blunders: +1000 sampled score over bagA on the same seeds, the
+same greedy score. bagA stays in `checkpoints/`. The pipeline and model below
 still describe the previous published policy,
 `checkpoints/digger_px128_exit1.pt`; the pool8 line follows the same
 steps with `--arch impala_pool8` (one more max-pool to 8x8 before the
@@ -325,7 +330,10 @@ games each:
 
 | Policy | Score | Greedy | Life | L1 clean | Bag kills/game |
 |---|---:|---:|---:|---:|---:|
-| **`px128_pool8_bagA` (published, 2026-11-17)** | **6476** ±377 | **6903** | **406** | 15/20 | 3.4 |
+| **`px128_pool8_grpo1` (published, 2026-11-18; 40 sampled seed 99, 30 greedy seed 5)** | **7020** ±228 | **6969** ±215 | **442** | 35/40 | 4.7 |
+| `px128_pool8_bagA` same seeds (2026-11-18) | 6008 ±184 | 6708 ±258 | 388 | 32/40 | 3.9 |
+| `px128_pool8_bag2` same seeds (5th PPO round from bagA) | 6894 ±316 | 6895 ±278 | 417 | 30/40 | 5.8 |
+| `px128_pool8_bagA` (previously published, 2026-11-17) | 6476 ±377 | 6903 | 406 | 15/20 | 3.4 |
 | `px128_exit1` (previously published, step 8) | 5240 ±224 | 5520 ±231 | 372 | 16/20 | 7.7 |
 | `px128_bag1` (step 7) | 4325 ±239 | 5323 ±123 | 342 | 14/20 | 7.4 |
 | `px128_esc1` (step 7 + escape starts, levels 4-10 weighted) | 3754 ±103 | 3840 ±165 | 291 | 12/20 | 1.3 |

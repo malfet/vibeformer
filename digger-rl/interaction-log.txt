@@ -468,3 +468,4 @@ Why did you commit all this logs/ into the repo? Delete them please
 And commit current best checkpoint
 push those changes
 Do commit and  try some shooting experiments. But also may be collect near death experiences and try learning to avoid them. What is the death penalty now
+Sure. But also suggest if any of the current policies much better than bagA and if so commit it as checkpoint
