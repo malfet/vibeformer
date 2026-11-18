@@ -461,3 +461,7 @@ Sure, let's do 1
 Do it
 Can you add your findings to appropriate .md file (or may be you can rename it to changelog or something)
 Commit all changes
+Let's think of next steps, but also give me a quick summary of your best model. And perhaps in associated artifact, can you explain the training strategy (with all the speedup we've tried) I.e. does it follow IMPALA idea? Or classic PPO? Or something else?
+Sure do 1-2 , but I want you to may be start thinking on IMPALA like training or may be even GPRO. Also please note that digger often dies by running into enemies, in quite avoidable manner. Another thing when it fails (and where teacher is really bad) is shooting, i.e. it often shoots in the wall or something
+Let's try GPRO
+Why did you commit all this logs/ into the repo? Delete them please

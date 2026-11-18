@@ -9,3 +9,4 @@ build/
 data/
 *.egg-info/
 vendor/dosbox-pure/dosbox_pure_libretro.dylib
+logs/
