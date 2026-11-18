@@ -466,3 +466,5 @@ Sure do 1-2 , but I want you to may be start thinking on IMPALA like training or
 Let's try GPRO
 Why did you commit all this logs/ into the repo? Delete them please
 And commit current best checkpoint
+push those changes
+Do commit and  try some shooting experiments. But also may be collect near death experiences and try learning to avoid them. What is the death penalty now
