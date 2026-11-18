@@ -7,8 +7,16 @@ with PPO; it now scores well above the teacher.
 
 The current best policy is published in the repo:
 
-    python watch.py checkpoints/digger_px128_exit1.pt --hud --sound
-    python evaluate.py checkpoints/digger_px128_exit1.pt --episodes 20
+    python watch.py checkpoints/digger_px128_pool8_bagA.pt --hud --sound
+    python evaluate.py checkpoints/digger_px128_pool8_bagA.pt --episodes 20
+
+It is the small-head (`--arch impala_pool8`) rebuild after four PPO
+rounds (16M frames), the last three anchored on search-corrected play
+([HISTORY Lessons 27-29](HISTORY.md)). The pipeline and model below
+still describe the previous published policy,
+`checkpoints/digger_px128_exit1.pt`; the pool8 line follows the same
+steps with `--arch impala_pool8` (one more max-pool to 8x8 before the
+FC layer), plus a bag-kill round with the anchor kept.
 
 How the project got here (symbolic agents, NatureCNN, DQN/Dreamer
 attempts, reward experiments, and the lessons from each) is in
@@ -317,7 +325,8 @@ games each:
 
 | Policy | Score | Greedy | Life | L1 clean | Bag kills/game |
 |---|---:|---:|---:|---:|---:|
-| **`px128_exit1` (published, step 8)** | **5240** ±224 | **5520** ±231 | **372** | **16/20** | **7.7** |
+| **`px128_pool8_bagA` (published, 2026-11-17)** | **6476** ±377 | **6903** | **406** | 15/20 | 3.4 |
+| `px128_exit1` (previously published, step 8) | 5240 ±224 | 5520 ±231 | 372 | 16/20 | 7.7 |
 | `px128_bag1` (step 7) | 4325 ±239 | 5323 ±123 | 342 | 14/20 | 7.4 |
 | `px128_esc1` (step 7 + escape starts, levels 4-10 weighted) | 3754 ±103 | 3840 ±165 | 291 | 12/20 | 1.3 |
 | `px128_ppo3` (step 5) | 3951-4133 | 5138 ±262 | 314-328 | 8-10/20 | 3.8 |
