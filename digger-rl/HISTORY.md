@@ -960,6 +960,53 @@ once, so a two-run ablation followed:
   each.
 - Bag kills are still the gap with `exit2`.
 
+### 30. GRPO from emulator snapshots; search labels hurt; a time-scaled death penalty breaks the plateau (2026-11-18/19)
+
+`train_grpo.py`: groups of G=8 rollouts from one exact emulator snapshot
+(half of them 6-16 steps before the policy's own deaths), advantage =
+(R - mean) / std within the group, PPO-clip loss plus a k3 KL to the
+starting policy, CPU workers one weight version stale. Same-seed evals:
+40 sampled games (seed 99) and 30 greedy (seed 5).
+
+| Policy | Horizon / death penalty | Sampled | Greedy |
+|---|---|---:|---:|
+| `pool8_bagA` | (PPO) | 6008 | 6708 |
+| `pool8_bag2` | 5th PPO round from bagA | 6894 | 6895 |
+| `grpo1` it100 (published) | 32 / 10 | 7020 | 6969 |
+| GRPO from bag2 it100 | 32 / 10 | 7114 | 6695 |
+| `grpoLt` -> `grpoLt2` it200 | 128 / 10 + 15 x share of horizon not survived | **7274** | **7318** |
+
+- **Short-horizon GRPO only removes sampling blunders.** v1 gained ~1000
+  sampled and nothing greedy, peaked at it100 and then drifted (KL 0.02
+  -> 0.56). Continuing it with a fresh reference, or GRPO from bag2,
+  stayed at ~7000.
+- **Branch groups (force each action for 3 steps) made shooting worse**:
+  forced FIRE while reloading = standing still, which often beats
+  walking into a monster.
+- **Search labels as a CE loss collapse the policy**, in-loop (2506 by
+  it25, 386 labels-only) and even mixed into the PPO anchor at 15%
+  (4343). Per-state labels are only 64-77% self-consistent (two halves
+  of 8 sampled continuations), and near monsters they spread almost
+  evenly over all six actions, so the network learns "near a monster,
+  act at random". FIRE spam (600+ presses while reloading) comes back
+  every time. `tools/death_labels.py` and `train_pixel.py --label-sets`
+  are kept for reference.
+- **The policy can see whether it is loaded** (linear probe on the 256
+  features: 98.9% vs 81% majority) yet fires 8x more while reloading:
+  a learned habit, not missing information. No dead units; effective
+  rank ~33 of 256: not at capacity.
+- **A PPO round after GRPO undoes it** (5856 sampled from grpo1's 7020).
+- **The death penalty must give a signal when every rollout dies.** With
+  a flat penalty (25) at H=128 only 2-4 of 6 groups had any spread and
+  nothing improved; scaling it by how early the death came (dying at
+  once 25, at the end 10) used 4-6 of 6 and climbed steadily, and is
+  the first change since bagA to move greedy play. It peaked at
+  `grpoLt2` it200 (20 groups/iter); 300 more iterations (`grpoLt3`)
+  gave 7316, 7058, 6996 on 20 games against Lt2 it200's 7624.
+- Shooting is still the weak spot: Lt2 it200 passed up a loaded aimed
+  shot before 19/60 deaths. A kill only pays if it lands inside the
+  horizon, and a missed shot costs nothing.
+
 ## Lessons ported from ../snake (2026-08-31)
 
 The snake project ran the same recipe on a much cheaper simulator and

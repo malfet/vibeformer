@@ -409,6 +409,11 @@ class Config:
     #     of pure offline BC: the teacher labels states the student
     #     actually reaches during training (DAGGER-style).
     bc_anchor_coef: float = 0.0
+    # Search labels (tools/death_labels.py npz): states with a single
+    # action label each. label_frac of every anchor minibatch comes from
+    # them; only labels whose two halves of rollouts agree are kept.
+    label_sets: tuple[str, ...] = ()
+    label_frac: float = 0.25
     bc_anchor_final: float | None = None
     teacher_policy: str = ""              # "" | "smart" | "greedy" | "dodge"
     time_penalty: float = 0.0             # subtracted per agent step
@@ -1015,6 +1020,11 @@ def parse_args() -> Config:
                    help="anchor weight for an extra CE(pi(s_demo), a_demo) "
                         "loss added to every PPO minibatch (default 0 = off). "
                         "Try 0.1-1.0 to keep PPO from drifting off BC.")
+    p.add_argument("--label-sets", nargs="*", default=[],
+                   help="tools/death_labels.py npz files mixed into the "
+                        "BC anchor (consistent labels only)")
+    p.add_argument("--label-frac", type=float, default=Config.label_frac,
+                   help="fraction of each anchor minibatch from --label-sets")
     p.add_argument("--bc-anchor-final", type=float, default=None,
                    help="if set, linearly anneal the BC anchor coef toward "
                         "this value across training")
@@ -1099,6 +1109,7 @@ def parse_args() -> Config:
         bc_epochs=a.bc_epochs,
         bc_batch_size=a.bc_batch_size, bc_value=a.bc_value,
         bc_anchor_coef=a.bc_anchor_coef, bc_anchor_final=a.bc_anchor_final,
+        label_sets=tuple(a.label_sets), label_frac=a.label_frac,
         teacher_policy=a.teacher_policy,
         time_penalty=a.time_penalty,
         warmup_steps=a.warmup_steps,
@@ -1203,6 +1214,24 @@ def main() -> None:
         if cfg.bc_epochs > 0:
             bc_pretrain(agent, optim, bc_data, cfg, device, val_data)
     anchor_rng = np.random.default_rng(cfg.seed + 17)
+    lab_obs = lab_y = None
+    if cfg.label_sets:
+        lo, ly = [], []
+        for f in cfg.label_sets:
+            z = np.load(f)
+            V = z["V"]
+            tried = ~np.isnan(V[:, :, 0])
+            h = V.shape[2] // 2
+            with np.errstate(all="ignore"):
+                m1 = np.where(tried, np.nanmean(V[:, :, :h], 2), -np.inf)
+                m2 = np.where(tried, np.nanmean(V[:, :, h:], 2), -np.inf)
+            keep = (z["gap"] >= 2.0) & (m1.argmax(1) == m2.argmax(1))
+            lo.append(z["obs"][keep])
+            ly.append(z["best"][keep])
+        lab_obs, lab_y = np.concatenate(lo), np.concatenate(ly).astype(np.int64)
+        print(f"{tag}search labels: {len(lab_y)} "
+              f"(per action {np.bincount(lab_y, minlength=6).tolist()})",
+              flush=True)
 
     # Live teacher labeling. Required by --teacher-policy. Only the
     # in-process (num_envs=1) path exposes the underlying DiggerEnv so
@@ -1519,12 +1548,20 @@ def main() -> None:
                                 bc_logits.float(), flat_teacher[mb])
                         else:
                             bc_M = len(bc_data[3])
+                            n_lab = (int(round(cfg.bc_batch_size * cfg.label_frac))
+                                     if lab_y is not None else 0)
                             bc_idxs = anchor_rng.choice(
-                                bc_M, size=min(cfg.bc_batch_size, bc_M),
+                                bc_M, size=min(cfg.bc_batch_size - n_lab, bc_M),
                                 replace=False)
                             bc_obs, bc_acts, _ = _bc_minibatch(
                                 bc_data[0], bc_data[1], None, bc_data[3],
                                 bc_idxs, cfg, device)
+                            if n_lab:
+                                j = anchor_rng.integers(len(lab_y), size=n_lab)
+                                bc_obs = torch.cat([bc_obs, torch.from_numpy(
+                                    lab_obs[j]).to(device).float().mul_(1 / 255)])
+                                bc_acts = torch.cat([bc_acts, torch.from_numpy(
+                                    lab_y[j]).to(device)])
                             bc_logits = agent.actor(agent.encode(bc_obs))
                             anchor_ce = F.cross_entropy(bc_logits.float(), bc_acts)
                         loss = loss + current_anchor * anchor_ce

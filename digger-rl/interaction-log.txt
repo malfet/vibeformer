@@ -469,3 +469,7 @@ And commit current best checkpoint
 push those changes
 Do commit and  try some shooting experiments. But also may be collect near death experiences and try learning to avoid them. What is the death penalty now
 Sure. But also suggest if any of the current policies much better than bagA and if so commit it as checkpoint
+Is there a way to estimate if say network is at capacity? I.e. it ca not memorize any more rules and one needs to add one more layer or something to achieve that?
+Hmm, I guess what I don't understand is why do you think we need labels instead of say few more iterations of GRPO1 Or it stopped improving as well
+I think longer horizon GRPO makes sense, and penalize those rollouts when it have died before reaching 128 steps (or is it wrong)
+Should size of the penalty be proportional to how quickly one dies? I.e. imagine unavoidable near-depth situation, but we should still encourage model to learn to stay alive as long as it can

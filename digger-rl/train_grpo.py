@@ -51,6 +51,7 @@ import torch
 import torch.nn.functional as F
 
 from digger_env import DiggerEnv, preprocess_uint8, stack_offsets
+from tools.play_audit import line_of_fire, ram
 from tools.policies import load_pixel_agent
 from tools.symbolic_env import SymbolicDiggerEnv, env_step_skipped
 
@@ -71,13 +72,15 @@ def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
         return f.transpose(2, 0, 1) if f.ndim == 3 else f[None]
 
     @torch.no_grad()
-    def sample(stack, force: int | None = None) -> tuple[int, float]:
-        """A sampled action (or `force`) and its log-probability."""
+    def sample(stack, force: int | None = None,
+               greedy: bool = False) -> tuple[int, float]:
+        """A sampled (or greedy) action, or `force`, and its log-prob."""
         x = torch.from_numpy(np.concatenate(
             [stack[-1 - o] for o in offs], 0)).float().div_(255).unsqueeze(0)
-        d = torch.distributions.Categorical(
-            logits=agent.actor(agent.encode(x))[0])
-        act = d.sample() if force is None else torch.tensor(force)
+        logits = agent.actor(agent.encode(x))[0]
+        d = torch.distributions.Categorical(logits=logits)
+        act = (torch.tensor(force) if force is not None
+               else logits.argmax() if greedy else d.sample())
         return int(act), float(d.log_prob(act))
 
     maxlen = offs[0] + 1
@@ -85,6 +88,8 @@ def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
     hard: collections.deque = collections.deque(maxlen=a.pool_size)
     pool: collections.deque = collections.deque(maxlen=a.pool_size)
     hist: collections.deque = collections.deque(maxlen=16)
+    near: collections.deque = collections.deque(maxlen=a.pool_size)
+    shoot: collections.deque = collections.deque(maxlen=a.pool_size)
     env.reset()
     fresh, played = True, 0
 
@@ -105,9 +110,15 @@ def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
                 if played % 25 == 0:
                     pool.append(rec)
             act, _ = sample(stack)
+            if a.labels and s.digger is not None and not s.dying \
+                    and s.digger.can_fire and (
+                        act == DiggerEnv.FIRE or
+                        line_of_fire(s, s.digger.dir)[0] == "aimed"):
+                shoot.append(rec)
             _, _, done, info = env_step_skipped(env, act, 4)
             if info.get("death_event", False):
                 hard.extend(list(hist)[:-5])        # 6..16 steps back
+                near.extend(list(hist)[-12:-1])     # 2..12 steps back
                 hist.clear()
             fresh = info.get("dying", False)
             if done:
@@ -115,7 +126,8 @@ def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
                 fresh = True
                 hist.clear()
 
-    def rollout(snap, start_stack, force: int | None = None) -> dict:
+    def rollout(snap, start_stack, force: int | None = None,
+                greedy: bool = False, hold: int | None = None) -> dict:
         env.restore_snapshot(snap)
         st = collections.deque(start_stack, maxlen=maxlen)
         frames = list(start_stack)
@@ -127,7 +139,9 @@ def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
                 fr = frame()
                 st.append(fr)
                 frames.append(fr)
-            act, lp = sample(st, force if t < a.hold else None)
+            act, lp = sample(st, force if t < (a.hold if hold is None
+                                                 else hold) else None,
+                             greedy)
             acts.append(act)
             logps.append(lp)
             _, _, done, info = env_step_skipped(env, act, 4)
@@ -140,7 +154,34 @@ def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
         return dict(frames=np.stack(frames), acts=np.array(acts, np.int64),
                     logp=np.array(logps, np.float32),
                     R=a.score_scale * (score - score0)
-                    - a.death_penalty * died, died=died)
+                    - died * (a.death_penalty + a.death_time_penalty
+                              * (a.horizon - len(acts)) / a.horizon),
+                    died=died)
+
+    def label(src: str) -> dict | None:
+        """Try every action from a stored state (hold it, then the greedy
+        policy) and return a CE label when the best beats the policy's
+        own greedy choice by --label-margin. FIRE is only tried when
+        loaded (unloaded FIRE just stands still, like NOOP) and pays
+        --fire-cost for the reload it starts."""
+        q = near if src == "near" else shoot
+        snap, st = q[rng.integers(len(q))]
+        env.restore_snapshot(snap)
+        d, _ = ram(env)
+        loaded = d[9] == 0 and d[23] != 0
+        g, _ = sample(collections.deque(st, maxlen=maxlen), greedy=True)
+        R = np.full(DiggerEnv.NUM_ACTIONS, -np.inf, np.float32)
+        for f in range(DiggerEnv.NUM_ACTIONS):
+            if f == DiggerEnv.FIRE and not loaded:
+                continue
+            r = rollout(snap, st, f, greedy=True,
+                        hold=1 if f == DiggerEnv.FIRE else a.label_hold)
+            R[f] = r["R"] - (a.fire_cost if f == DiggerEnv.FIRE else 0.0)
+        best = int(R.argmax())
+        if R[best] - R[g] < a.label_margin:
+            return None
+        return dict(obs=np.concatenate([st[-1 - o] for o in offs], 0),
+                    label=best, greedy=g, gap=float(R[best] - R[g]), src=src)
 
     while True:
         msg = conn.recv()
@@ -166,7 +207,23 @@ def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
             env.restore_snapshot(cur[0])
             stack.clear()
             stack.extend(cur[1])
-        conn.send(groups)
+        labels, tried = [], 0
+        if a.labels:
+            play(a.explore * 2)
+        while tried < a.labels and (near or shoot):
+            cur = (env.snapshot(), list(stack))
+            src = ("near" if near and (not shoot or rng.random() < a.near_prob)
+                   else "shoot")
+            lab = label(src)
+            tried += 1
+            if lab is not None:
+                labels.append(lab)
+            env.restore_snapshot(cur[0])
+            stack.clear()
+            stack.extend(cur[1])
+            if tried % 2 == 0:
+                play(a.explore)
+        conn.send(dict(groups=groups, labels=labels, tried=tried))
     env.close()
 
 
@@ -222,6 +279,12 @@ def main() -> None:
     p.add_argument("--pool-size", type=int, default=200)
     p.add_argument("--score-scale", type=float, default=0.02)
     p.add_argument("--death-penalty", type=float, default=10.0)
+    p.add_argument("--death-time-penalty", type=float, default=0.0,
+                   help="extra death penalty scaled by the share of the "
+                        "horizon not survived: dying at once costs "
+                        "death_penalty + this, dying at the last step "
+                        "death_penalty. Gives a signal when every rollout "
+                        "of a group dies: the one that lasts longest wins.")
     p.add_argument("--lr", type=float, default=3e-5)
     p.add_argument("--epochs", type=int, default=2)
     p.add_argument("--minibatch", type=int, default=512)
@@ -234,6 +297,21 @@ def main() -> None:
     p.add_argument("--hold", type=int, default=3)
     p.add_argument("--branch-coef", type=float, default=1.0,
                    help="weight of the branch steps' loss")
+    p.add_argument("--labels", type=int, default=0,
+                   help="states per worker per iteration to label by trying "
+                        "every action (near-death and shooting states)")
+    p.add_argument("--near-prob", type=float, default=0.6,
+                   help="P(label a state 2..12 steps before a death) vs a "
+                        "loaded aimed / firing state")
+    p.add_argument("--label-hold", type=int, default=2)
+    p.add_argument("--label-margin", type=float, default=2.0,
+                   help="label only if best R - greedy's R >= this")
+    p.add_argument("--fire-cost", type=float, default=1.0)
+    p.add_argument("--ce-coef", type=float, default=0.5)
+    p.add_argument("--kl-full", type=float, default=0.0,
+                   help="weight of the full KL(ref || pi) on GRPO states")
+    p.add_argument("--ce-batch", type=int, default=128)
+    p.add_argument("--label-buffer", type=int, default=5000)
     p.add_argument("--no-overlap", dest="overlap", action="store_false")
     p.add_argument("--start-states", default="data/save/levels")
     p.add_argument("--start-prob", type=float, default=0.5)
@@ -274,9 +352,29 @@ def main() -> None:
     request()
     t0 = time.monotonic()
     steps_total = 0
+    lab_obs: collections.deque = collections.deque(maxlen=a.label_buffer)
+    lab_y: collections.deque = collections.deque(maxlen=a.label_buffer)
+    lab_meta: list[tuple] = []
+
+    def ce_loss():
+        if len(lab_y) < 32:
+            return None, None
+        j = np.random.randint(len(lab_y), size=min(a.ce_batch, len(lab_y)))
+        x = torch.from_numpy(np.stack([lab_obs[i] for i in j])).to(device)
+        y = torch.from_numpy(np.array([lab_y[i] for i in j])).to(device)
+        logits = agent.actor(agent.encode(x.float().div_(255)))
+        return (F.cross_entropy(logits, y),
+                (logits.argmax(-1) == y).float().mean())
     for it in range(1, a.iters + 1):
         tw = time.monotonic()
-        groups = [g for c in conns for g in c.recv()]
+        msgs = [c.recv() for c in conns]
+        groups = [g for m_ in msgs for g in m_["groups"]]
+        new_labels = [l for m_ in msgs for l in m_["labels"]]
+        tried = sum(m_["tried"] for m_ in msgs)
+        for l in new_labels:
+            lab_obs.append(l["obs"])
+            lab_y.append(l["label"])
+            lab_meta.append((it, l["src"], l["greedy"], l["label"], l["gap"]))
         t_wait = time.monotonic() - tw
         if a.overlap and it < a.iters:
             request()                    # next batch plays while we learn
@@ -313,8 +411,8 @@ def main() -> None:
                     lp = F.log_softmax(agent.actor(agent.encode(x)), -1)
                     lp_a = lp.gather(1, act[:, None])[:, 0]
                     with torch.no_grad():
-                        ref_a = F.log_softmax(ref.actor(ref.encode(x)),
-                                              -1).gather(1, act[:, None])[:, 0]
+                        ref_lp = F.log_softmax(ref.actor(ref.encode(x)), -1)
+                        ref_a = ref_lp.gather(1, act[:, None])[:, 0]
                     A = torch.from_numpy(adv[mb]).to(device)
                     ratio = (lp_a - torch.from_numpy(logp_old[mb]).to(device)).exp()
                     pg = -torch.min(ratio * A, ratio.clamp(1 - a.clip,
@@ -330,6 +428,18 @@ def main() -> None:
                     d = ref_a - lp_a
                     kl = d.exp() - d - 1
                     loss = loss + a.beta * kl.mean()
+                    if a.kl_full:
+                        # whole-distribution KL(ref || pi) on these
+                        # ordinary states: what keeps the labels from
+                        # rewriting the rest of the policy
+                        klf = (ref_lp.exp() * (ref_lp - lp)).sum(-1).mean()
+                        loss = loss + a.kl_full * klf
+                        stats["klf"].append(float(klf.detach()))
+                    ce, acc = ce_loss()
+                    if ce is not None:
+                        loss = loss + a.ce_coef * ce
+                        stats["ce"].append(float(ce.detach()))
+                        stats["acc"].append(float(acc))
                     optim.zero_grad()
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(agent.parameters(), 0.5)
@@ -339,12 +449,25 @@ def main() -> None:
                                                 > a.clip).float().mean()))
                     stats["ent"].append(float(-(lp.exp() * lp).sum(-1)
                                               .mean().detach()))
+        elif len(lab_y) >= 32:
+            # no GRPO signal this iteration: label loss alone
+            for _ in range(a.epochs * 2):
+                ce, acc = ce_loss()
+                loss = a.ce_coef * ce
+                optim.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(agent.parameters(), 0.5)
+                optim.step()
+                stats["ce"].append(float(ce.detach()))
+                stats["acc"].append(float(acc))
         if not a.overlap and it < a.iters:
             request()
         t_learn = time.monotonic() - tl
         R = np.array([r["R"] for r in rolls])
         samp = [r for g in groups if not g["branch"] for r in g["rollouts"]]
         died = np.mean([r["died"] for r in samp]) if samp else float("nan")
+        nfire = sum(l["label"] == DiggerEnv.FIRE for l in new_labels)
+        nshoot = sum(l["src"] == "shoot" for l in new_labels)
         bused = sum(1 for g in groups if g["branch"]
                     and np.std([r["R"] for r in g["rollouts"]]) > 1e-6)
         hard = np.mean([g["src"] == "hard" for g in groups])
@@ -353,11 +476,15 @@ def main() -> None:
               f"groups {used}/{len(groups)} (branch {bused}) hard {hard:.2f} R {R.mean():+.2f} "
               f"died {died:.3f} kl {m.get('kl', 0):.4f} "
               f"clip {m.get('clip', 0):.3f} ent {m.get('ent', 0):.3f} "
+              f"labels {len(new_labels)}/{tried} (shoot {nshoot}, FIRE {nfire}) "
+              f"klf {m.get('klf', 0):.3f} buf {len(lab_y)} ce {m.get('ce', 0):.3f} acc {m.get('acc', 0):.2f} "
               f"wait {t_wait:.1f}s learn {t_learn:.1f}s "
               f"({time.monotonic() - t0:.0f}s)", flush=True)
         if it % a.save_every == 0:
             save(f"grpo_it{it:04d}.pt", it)
     save("ppo_digger_final.pt", a.iters)
+    if lab_meta:
+        np.save(out / "labels_meta.npy", np.array(lab_meta, dtype=object))
     for c in conns:
         c.send(None)
     for pr in procs:
