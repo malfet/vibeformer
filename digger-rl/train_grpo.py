@@ -134,6 +134,9 @@ def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
         acts, logps = [], []
         score0 = env._env._last_score
         score, died = score0, False
+        duds = misses = 0
+        shot = None                      # None, or "did it kill" so far
+        track = a.dud_cost or a.miss_cost
         for t in range(a.horizon):
             if t:
                 fr = frame()
@@ -144,8 +147,24 @@ def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
                              greedy)
             acts.append(act)
             logps.append(lp)
+            if track:
+                d0, m0 = ram(env)
             _, _, done, info = env_step_skipped(env, act, 4)
             score = int(info.get("score", score))
+            if track:
+                # same RAM rules as tools/play_audit.py
+                d1, m1 = ram(env)
+                if act == DiggerEnv.FIRE:
+                    if d0[9] == 0 and d1[9] > 0:
+                        shot = False
+                    elif d0[9] > 0 or d0[23] == 0:
+                        duds += 1
+                if shot is not None:
+                    shot |= bool(((m0[:, 15] != 0) & (m1[:, 15] == 0)
+                                  & (m0[:, 10] == 0)).any())
+                    if d1[23] != 0:
+                        misses += not shot
+                        shot = None
             if info.get("dying", False) or info.get("death_event", False):
                 died = True
                 break
@@ -155,7 +174,9 @@ def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
                     logp=np.array(logps, np.float32),
                     R=a.score_scale * (score - score0)
                     - died * (a.death_penalty + a.death_time_penalty
-                              * (a.horizon - len(acts)) / a.horizon),
+                              * (a.horizon - len(acts)) / a.horizon)
+                    - a.dud_cost * duds - a.miss_cost * misses,
+                    duds=duds, misses=misses,
                     died=died)
 
     def label(src: str) -> dict | None:
@@ -279,6 +300,10 @@ def main() -> None:
     p.add_argument("--pool-size", type=int, default=200)
     p.add_argument("--score-scale", type=float, default=0.02)
     p.add_argument("--death-penalty", type=float, default=10.0)
+    p.add_argument("--dud-cost", type=float, default=0.0,
+                   help="per FIRE press while reloading (0.2 = 10 points)")
+    p.add_argument("--miss-cost", type=float, default=0.0,
+                   help="per shot that ends without a kill (1.0 = 50 points)")
     p.add_argument("--death-time-penalty", type=float, default=0.0,
                    help="extra death penalty scaled by the share of the "
                         "horizon not survived: dying at once costs "
@@ -474,7 +499,8 @@ def main() -> None:
         m = {k: np.mean(v) for k, v in stats.items()}
         print(f"[{a.run_name}] it {it:4d} steps {steps_total:8d} "
               f"groups {used}/{len(groups)} (branch {bused}) hard {hard:.2f} R {R.mean():+.2f} "
-              f"died {died:.3f} kl {m.get('kl', 0):.4f} "
+              f"died {died:.3f} duds {np.mean([r.get('duds', 0) for r in rolls]):.2f} "
+              f"miss {np.mean([r.get('misses', 0) for r in rolls]):.2f} kl {m.get('kl', 0):.4f} "
               f"clip {m.get('clip', 0):.3f} ent {m.get('ent', 0):.3f} "
               f"labels {len(new_labels)}/{tried} (shoot {nshoot}, FIRE {nfire}) "
               f"klf {m.get('klf', 0):.3f} buf {len(lab_y)} ce {m.get('ce', 0):.3f} acc {m.get('acc', 0):.2f} "

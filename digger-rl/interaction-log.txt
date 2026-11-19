@@ -473,3 +473,5 @@ Is there a way to estimate if say network is at capacity? I.e. it ca not memoriz
 Hmm, I guess what I don't understand is why do you think we need labels instead of say few more iterations of GRPO1 Or it stopped improving as well
 I think longer horizon GRPO makes sense, and penalize those rollouts when it have died before reaching 128 steps (or is it wrong)
 Should size of the penalty be proportional to how quickly one dies? I.e. imagine unavoidable near-depth situation, but we should still encourage model to learn to stay alive as long as it can
+Sure
+And push charges
