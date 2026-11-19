@@ -475,3 +475,4 @@ I think longer horizon GRPO makes sense, and penalize those rollouts when it hav
 Should size of the penalty be proportional to how quickly one dies? I.e. imagine unavoidable near-depth situation, but we should still encourage model to learn to stay alive as long as it can
 Sure
 And push charges
+Can we just penalize the agent for shooting during reload (if you can reliably extract reload from the game state) And yes, do 1 and 2

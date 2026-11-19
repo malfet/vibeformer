@@ -170,13 +170,23 @@ def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
                 break
             if done or env._env.level_done():
                 break
+        V = 0.0
+        if a.bootstrap and not died and not done:
+            # what the rest of the life is worth, in the same units as R
+            # (the critic was fit on 0.02 x score with gamma 0.99)
+            st.append(frame())
+            with torch.no_grad():
+                x = torch.from_numpy(np.concatenate(
+                    [st[-1 - o] for o in offs], 0)).float().div_(255)
+                V = float(agent.value(x.unsqueeze(0))[0])
         return dict(frames=np.stack(frames), acts=np.array(acts, np.int64),
                     logp=np.array(logps, np.float32),
                     R=a.score_scale * (score - score0)
                     - died * (a.death_penalty + a.death_time_penalty
                               * (a.horizon - len(acts)) / a.horizon)
-                    - a.dud_cost * duds - a.miss_cost * misses,
-                    duds=duds, misses=misses,
+                    - a.dud_cost * duds - a.miss_cost * misses
+                    + a.bootstrap * V,
+                    V=V, duds=duds, misses=misses,
                     died=died)
 
     def label(src: str) -> dict | None:
@@ -300,6 +310,9 @@ def main() -> None:
     p.add_argument("--pool-size", type=int, default=200)
     p.add_argument("--score-scale", type=float, default=0.02)
     p.add_argument("--death-penalty", type=float, default=10.0)
+    p.add_argument("--bootstrap", type=float, default=0.0,
+                   help="add this x the critic's V(s_end) to a rollout that "
+                        "survives its horizon (1.0 = full value)")
     p.add_argument("--dud-cost", type=float, default=0.0,
                    help="per FIRE press while reloading (0.2 = 10 points)")
     p.add_argument("--miss-cost", type=float, default=0.0,
