@@ -1006,6 +1006,20 @@ starting policy, CPU workers one weight version stale. Same-seed evals:
 - Shooting is still the weak spot: Lt2 it200 passed up a loaded aimed
   shot before 19/60 deaths. A kill only pays if it lands inside the
   horizon, and a missed shot costs nothing.
+- **`grpoLt2` it200 was published** on 100 sampled (seeds 99+7) / 70
+  greedy (seeds 5+11) games: 7251 / 7121 against `grpo1`'s 6765 / 7388.
+  Greedy means swing by ~700 between 30-40-game seed sets; judge on 70+.
+- **Shot costs, 200 more iterations from Lt2 it200** (20 games seed 99
+  unless noted):
+  - `--miss-cost 1.0 --dud-cost 0.2`: duds 110 -> 18, but shots 33 -> 13
+    and kills 6 -> 1: it stopped shooting. ~6900.
+  - `--dud-cost 0.2` alone (FIRE while reloading, exact from RAM): duds
+    110 -> 43, kills kept (7 from 20 shots). it200 read 8162 on 20
+    games but 7013 sampled / 6880 greedy on the full 100 / 70: no gain.
+  - `--bootstrap 1.0` (critic V(s_end) added to rollouts that survive
+    the horizon): more groups with signal (9-10 of 12), cleaner shots
+    (0 into dirt), score 6400-7200: no gain. The critic head has not
+    been refit since GRPO changed the shared encoder.
 
 ## Lessons ported from ../snake (2026-08-31)
 
