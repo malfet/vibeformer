@@ -1020,6 +1020,20 @@ starting policy, CPU workers one weight version stale. Same-seed evals:
     the horizon): more groups with signal (9-10 of 12), cleaner shots
     (0 into dirt), score 6400-7200: no gain. The critic head has not
     been refit since GRPO changed the shared encoder.
+- **Hard states 64-128 steps before deaths** (`--hard-back 64,128
+  --hard-stride 4`, from Lt2): 16 of 20 groups with signal, but 40-game
+  scores 6937 / 7350 / 7272 / 6683 against Lt2's 7274. No gain.
+- **The critic was stale.** `tools/refit_critic.py` (ridge refit of the
+  head alone on ~28k states of the policy's own play, discounted return
+  to the next death): held-out R^2 0.05 -> 0.80, mean prediction 13.2
+  -> 8.4 (actual 8.4). With the refit head, `--bootstrap 1.0`
+  (`grpoV2`): 40-game scores 7487 / 6846 / 7479 / 7039; it50 on 100
+  sampled / 70 greedy games 7308 / 7586, the best on both counts so
+  far (Lt2 7251 / 7121, grpo1 6765 / 7388), though the greedy margin is
+  only ~1.4 standard errors.
+- Since Lt2 every GRPO variant rises to ~7300 sampled and drifts; the
+  remaining deaths are mostly being caught 1-2 tiles from a monster
+  with an escape 12 steps earlier (45/60).
 
 ## Lessons ported from ../snake (2026-08-31)
 

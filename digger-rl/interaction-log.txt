@@ -476,3 +476,6 @@ Should size of the penalty be proportional to how quickly one dies? I.e. imagine
 Sure
 And push charges
 Can we just penalize the agent for shooting during reload (if you can reliably extract reload from the game state) And yes, do 1 and 2
+If we have a longer GRPO rollout let's start trainign say 64-128 steps before death. And what do you mean by Retain the critic?
+Sure
+Looks like you've done, so what's the conclusion

@@ -87,7 +87,8 @@ def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
     stack: collections.deque = collections.deque(maxlen=maxlen)
     hard: collections.deque = collections.deque(maxlen=a.pool_size)
     pool: collections.deque = collections.deque(maxlen=a.pool_size)
-    hist: collections.deque = collections.deque(maxlen=16)
+    hist: collections.deque = collections.deque(
+        maxlen=max(16, a.hard_back[1]))
     near: collections.deque = collections.deque(maxlen=a.pool_size)
     shoot: collections.deque = collections.deque(maxlen=a.pool_size)
     env.reset()
@@ -117,7 +118,11 @@ def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
                 shoot.append(rec)
             _, _, done, info = env_step_skipped(env, act, 4)
             if info.get("death_event", False):
-                hard.extend(list(hist)[:-5])        # 6..16 steps back
+                # hist[-k] is the state k steps before the death onset
+                lst = list(hist)
+                lo, hi = a.hard_back
+                hard.extend(lst[len(lst) - k] for k in
+                            range(lo, min(hi, len(lst)) + 1, a.hard_stride))
                 near.extend(list(hist)[-12:-1])     # 2..12 steps back
                 hist.clear()
             fresh = info.get("dying", False)
@@ -307,6 +312,11 @@ def main() -> None:
     p.add_argument("--explore", type=int, default=32,
                    help="steps of normal play between groups")
     p.add_argument("--hard-prob", type=float, default=0.5)
+    p.add_argument("--hard-back", type=lambda v: tuple(map(int, v.split(","))),
+                   default=(6, 16), help="MIN,MAX steps before a death that "
+                                         "go into the hard pool")
+    p.add_argument("--hard-stride", type=int, default=1,
+                   help="take every Nth state of that window")
     p.add_argument("--pool-size", type=int, default=200)
     p.add_argument("--score-scale", type=float, default=0.02)
     p.add_argument("--death-penalty", type=float, default=10.0)
