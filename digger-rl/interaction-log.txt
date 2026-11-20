@@ -479,3 +479,4 @@ Can we just penalize the agent for shooting during reload (if you can reliably e
 If we have a longer GRPO rollout let's start trainign say 64-128 steps before death. And what do you mean by Retain the critic?
 Sure
 Looks like you've done, so what's the conclusion
+Sure
