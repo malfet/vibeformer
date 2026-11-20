@@ -19,9 +19,11 @@ Two backends behind one interface:
 are a TTY, else matplotlib. Key names follow matplotlib ("left", "enter",
 " ", "f1", "a"), so callers map keys the same way for both backends.
 Ctrl+C or Ctrl+Q closes the Kitty viewer; closing the window closes the
-matplotlib one. While the Kitty viewer is up, print() output goes to a
-message line under the frame, and all of it is replayed to the terminal on
-close.
+matplotlib one. While the Kitty viewer is up nothing but the viewer
+writes to the terminal: file descriptors 1 and 2 are pointed at a pipe, so
+print() output and native writes (the DOSBox core logs to stdout/stderr)
+both land in a message line under the frame, drawn between frames, and all
+of it is replayed to the terminal on close.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ import select
 import struct
 import sys
 import termios
+import threading
 import zlib
 
 import numpy as np
@@ -89,30 +92,42 @@ _MOD_CTRL = 4
 
 
 class _MessageLine:
-    """stdout stand-in: shows the latest line under the frame, keeps all."""
+    """stdout stand-in: keeps every line; the display draws the latest.
 
-    def __init__(self, display: "KittyDisplay"):
-        self._display = display
+    Written from the main thread (print) and from the pipe reader thread
+    (native output), so it never touches the terminal itself.
+    """
+
+    def __init__(self):
         self.lines: list[str] = []
+        self.latest: str | None = None
         self._partial = ""
+        self._lock = threading.Lock()
 
     def write(self, text: str) -> int:
-        self._partial += text
-        *done, self._partial = self._partial.split("\n")
-        self.lines.extend(done)
-        if done and done[-1]:
-            self._display._message(done[-1])
+        with self._lock:
+            self._partial += text
+            *done, self._partial = self._partial.split("\n")
+            self.lines.extend(done)
+            for line in reversed(done):
+                if line.strip():
+                    self.latest = line
+                    break
         return len(text)
 
     def flush(self) -> None:
         pass
+
+    def take_latest(self) -> str | None:
+        with self._lock:
+            line, self.latest = self.latest, None
+        return line
 
 
 class KittyDisplay(_Display):
     """Inline terminal viewer: Kitty graphics + Kitty keyboard protocol."""
 
     def __init__(self, title: str = "DIGGER"):
-        self._out = sys.stdout.buffer
         self._fd = sys.stdin.fileno()
         self._saved_tty = termios.tcgetattr(self._fd)
         attrs = termios.tcgetattr(self._fd)
@@ -121,10 +136,26 @@ class KittyDisplay(_Display):
         termios.tcsetattr(self._fd, termios.TCSANOW, attrs)
         self._buf = b""
         self._title = title
-        self._rows = 24
+        self._rows, self._cols = 24, 80
+        self._image_id = 2
+        self._title_text: str | None = None
         self.is_open = True
         self._stdout = sys.stdout
-        self._messages = _MessageLine(self)
+        self._messages = _MessageLine()
+        # Keep a private handle on the terminal, then point fds 1 and 2 at
+        # a pipe so nothing else (Python or C) can draw over the frame.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        self._tty = os.dup(1)
+        self._out = os.fdopen(self._tty, "wb", closefd=False)
+        self._saved_fds = (os.dup(1), os.dup(2))
+        rfd, wfd = os.pipe()
+        os.dup2(wfd, 1)
+        os.dup2(wfd, 2)
+        os.close(wfd)
+        self._reader = threading.Thread(target=self._drain, args=(rfd,),
+                                        daemon=True)
+        self._reader.start()
         sys.stdout = self._messages
         # Alt screen, hidden cursor, keyboard flags 1|2|8: disambiguate,
         # report press/repeat/release, report every key as an escape code.
@@ -134,16 +165,22 @@ class KittyDisplay(_Display):
         self._out.write(data)
         self._out.flush()
 
+    def _drain(self, rfd: int) -> None:
+        """Pipe reader: native stdout/stderr into the message line."""
+        with os.fdopen(rfd, "rb", buffering=0) as f:
+            while chunk := f.read(65536):
+                self._messages.write(chunk.decode("utf-8", "replace"))
+
     def _fit(self, h: int, w: int) -> tuple[int, int]:
         """Columns x rows to scale an h x w image into, below the title."""
         try:
             rows, cols, xpix, ypix = struct.unpack(
-                "HHHH", fcntl.ioctl(1, termios.TIOCGWINSZ, b"\0" * 8))
+                "HHHH", fcntl.ioctl(self._tty, termios.TIOCGWINSZ, b"\0" * 8))
         except OSError:
             rows, cols, xpix, ypix = 24, 80, 0, 0
         if not rows or not cols:
             rows, cols = 24, 80
-        self._rows = rows
+        self._rows, self._cols = rows, cols
         cw = xpix / cols if xpix else 8.0
         ch = ypix / rows if ypix else 16.0
         avail_rows = max(1, rows - 3)    # title, gap, message line
@@ -161,27 +198,50 @@ class KittyDisplay(_Display):
         h, w = rgb.shape[:2]
         c, r = self._fit(h, w)
         payload = base64.standard_b64encode(zlib.compress(rgb.tobytes(), 1))
-        parts = [b"\x1b[2;1H"]
+        # Flicker-free: the whole update is one synchronized-output block
+        # (DEC mode 2026; terminals without it ignore the brackets), and the
+        # frame goes to the other of two image ids, so the old one stays on
+        # screen until the new one is placed, then is deleted.
+        new, old = (2, 1) if self._image_id == 1 else (1, 2)
+        self._image_id = new
+        parts = [b"\x1b[?2026h\x1b[2;1H"]
         for i in range(0, len(payload), _CHUNK):
             more = int(i + _CHUNK < len(payload))
             if i == 0:
-                ctl = (f"a=T,f=24,o=z,s={w},v={h},i=1,p=1,c={c},r={r},"
+                ctl = (f"a=T,f=24,o=z,s={w},v={h},i={new},p=1,c={c},r={r},"
                        f"C=1,q=2,m={more}")
             else:
                 ctl = f"m={more}"
             parts.append(b"\x1b_G" + ctl.encode() + b";"
                          + payload[i:i + _CHUNK] + b"\x1b\\")
+        parts.append(f"\x1b_Ga=d,d=I,i={old},q=2\x1b\\".encode())
+        if self._title_text is not None:
+            parts.append(self._title_bytes(self._title_text))
+            self._title_text = None
+        line = self._messages.take_latest()
+        if line is not None:
+            parts.append(self._message_bytes(line))
+        parts.append(b"\x1b[?2026l")
         self._write(b"".join(parts))
 
     def set_title(self, text: str) -> None:
+        # Drawn with the next frame, inside its synchronized block.
         if self.is_open:
-            line = f"{self._title} -- {text}"
-            self._write(b"\x1b[1;1H\x1b[2K" + line.encode())
+            self._title_text = text
 
-    def _message(self, text: str) -> None:
-        if self.is_open:
-            self._write(f"\x1b[{self._rows};1H\x1b[2K".encode()
-                        + text[:400].encode())
+    def _title_bytes(self, text: str) -> bytes:
+        return (b"\x1b[1;1H\x1b[2K"
+                + self._clip(f"{self._title} -- {text}").encode())
+
+    def _clip(self, text: str) -> str:
+        # One printable line, shorter than the terminal: a wrapped line on
+        # the bottom row scrolls the whole screen, image included.
+        text = "".join(ch if ch.isprintable() else " " for ch in text)
+        return text[:max(1, self._cols - 1)]
+
+    def _message_bytes(self, text: str) -> bytes:
+        return (f"\x1b[{self._rows};1H\x1b[2K".encode()
+                + self._clip(text).encode())
 
     def poll(self) -> list[tuple[str, bool]]:
         """Key events since the last call: [(name, pressed), ...]."""
@@ -247,6 +307,15 @@ class KittyDisplay(_Display):
         termios.tcsetattr(self._fd, termios.TCSANOW, self._saved_tty)
         self._saved_tty = None
         sys.stdout = self._stdout
+        # Back to the terminal; that drops the pipe's last writer, so the
+        # reader sees EOF once it has drained what is left.
+        sys.stderr.flush()
+        for fd, saved in zip((1, 2), self._saved_fds):
+            os.dup2(saved, fd)
+            os.close(saved)
+        self._reader.join(timeout=1.0)
+        self._out.close()
+        os.close(self._tty)
         for line in self._messages.lines + [self._messages._partial]:
             if line:
                 print(line)

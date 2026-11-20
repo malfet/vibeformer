@@ -480,3 +480,9 @@ If we have a longer GRPO rollout let's start trainign say 64-128 steps before de
 Sure
 Looks like you've done, so what's the conclusion
 Sure
+Ok, what would be the next steps. Should one try to train something that would have surprised the model? Or may be automate capturing more of a "failure" scenarios, for examples I've seen a few cases when digger was sitting under the bag of gold and tried to push it upwards (which is helpful if you want to kill mosnter) or downwards (which just a waste of time)
+Also do delete numerious intermediate checkpoints
+Also, perhaps can you fix the flicker, by making sure nothing is printed other than graphics (I see often flickrer happes because some dosbox logs are getting printed under the rendered screen
+I still see blinks and [DOSBOX core log lines] printed (though this time after run is finished
+Ok, now flicker finally gone
+Commit this

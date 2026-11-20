@@ -12,6 +12,7 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <stdexcept>
@@ -358,7 +359,14 @@ private:
         return 0;
     }
 
-    static void log_printf(retro_log_level, const char* fmt, ...) {
+    // Core chatter (MIDI probing, throttle, resolution changes) is info
+    // level; print only warnings and errors unless DIGGER_CORE_LOG=1.
+    static void log_printf(retro_log_level level, const char* fmt, ...) {
+        static const bool verbose = [] {
+            const char* v = std::getenv("DIGGER_CORE_LOG");
+            return v != nullptr && v[0] != '\0' && v[0] != '0';
+        }();
+        if (level < RETRO_LOG_WARN && !verbose) return;
         char buf[2048];
         va_list args;
         va_start(args, fmt);
