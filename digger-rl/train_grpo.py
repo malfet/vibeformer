@@ -43,6 +43,7 @@ import argparse
 import collections
 import copy
 import multiprocessing as mp
+import struct
 import time
 from pathlib import Path
 
@@ -51,6 +52,7 @@ import torch
 import torch.nn.functional as F
 
 from digger_env import DiggerEnv, preprocess_uint8, stack_offsets
+from tools.game_state import RAM_MON_SPAWN
 from tools.play_audit import line_of_fire, ram
 from tools.policies import load_pixel_agent
 from tools.symbolic_env import SymbolicDiggerEnv, env_step_skipped
@@ -91,6 +93,12 @@ def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
         maxlen=max(16, a.hard_back[1]))
     near: collections.deque = collections.deque(maxlen=a.pool_size)
     shoot: collections.deque = collections.deque(maxlen=a.pool_size)
+    # Harvest starts: the cherry up or bonus mode on (natural), and
+    # "crowd" states with the screen full of monsters and the cherry
+    # still to come, where kills both score and unlock the cherry.
+    cherry: collections.deque = collections.deque(maxlen=a.pool_size)
+    crowd: collections.deque = collections.deque(maxlen=a.pool_size)
+    spawn_off = RAM_MON_SPAWN
     env.reset()
     fresh, played = True, 0
 
@@ -110,6 +118,12 @@ def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
                 played += 1
                 if played % 25 == 0:
                     pool.append(rec)
+                if (s.cherry is not None or s.bonus_mode) and played % 3 == 0:
+                    cherry.append(rec)
+                if (s.cherry_pending and s.monsters_max_on_screen
+                        and len(s.monsters) >= s.monsters_max_on_screen
+                        and played % 10 == 0):
+                    crowd.append(rec)
             act, _ = sample(stack)
             if a.labels and s.digger is not None and not s.dying \
                     and s.digger.can_fire and (
@@ -140,6 +154,14 @@ def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
         score0 = env._env._last_score
         score, died = score0, False
         duds = misses = 0
+        cherries = eats = 0
+        # Potential-based shaping (phi = -coef x tiles to the target),
+        # summed over the steps where the target exists: toward the
+        # cherry while it is up, toward the nearest monster in bonus
+        # mode. Telescopes to coef x (distance before - distance after).
+        shape = 0.0
+        if a.cherry_shape or a.bonus_shape:
+            pot0 = potential(env._last_state)
         shot = None                      # None, or "did it kill" so far
         track = a.dud_cost or a.miss_cost
         for t in range(a.horizon):
@@ -155,7 +177,21 @@ def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
             if track:
                 d0, m0 = ram(env)
             _, _, done, info = env_step_skipped(env, act, 4)
-            score = int(info.get("score", score))
+            new = int(info.get("score", score))
+            gain = new - score
+            score = new
+            if gain >= 1000:
+                cherries += 1
+            elif env._last_state.bonus_mode and gain and gain % 200 == 0:
+                eats += 1
+            if a.cherry_shape or a.bonus_shape:
+                pot1 = potential(env._last_state)
+                if gain >= 1000:
+                    pot1[0] = 0.0          # reached: distance 0
+                for k, coef in enumerate((a.cherry_shape, a.bonus_shape)):
+                    if pot0[k] is not None and pot1[k] is not None:
+                        shape += coef * (pot0[k] - pot1[k])
+                pot0 = pot1
             if track:
                 # same RAM rules as tools/play_audit.py
                 d1, m1 = ram(env)
@@ -190,9 +226,40 @@ def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
                     - died * (a.death_penalty + a.death_time_penalty
                               * (a.horizon - len(acts)) / a.horizon)
                     - a.dud_cost * duds - a.miss_cost * misses
-                    + a.bootstrap * V,
+                    + a.bootstrap * V + shape,
                     V=V, duds=duds, misses=misses,
-                    died=died)
+                    died=died, cherries=cherries, eats=eats)
+
+    def potential(s) -> list:
+        """[tiles to the cherry, tiles to the nearest monster in bonus
+        mode], None where that target is absent."""
+        d = s.digger
+        if d is None or s.dying:
+            return [None, None]
+        out = [None, None]
+        if s.cherry is not None:
+            out[0] = float(abs(d.col - s.cherry[0]) + abs(d.row - s.cherry[1]))
+        if s.bonus_mode and s.monsters:
+            out[1] = float(min(abs(d.col - m.col) + abs(d.row - m.row)
+                               for m in s.monsters))
+        return out
+
+    def poked() -> tuple | None:
+        """A general-pool state with the cherry made to appear on the next
+        tick: mark the whole monster quota as spawned (the unspawned rest
+        never come) and zero the spawn timer."""
+        for _ in range(8):
+            snap, st = pool[rng.integers(len(pool))]
+            s = snap[1]
+            if s is None or s.digger is None or s.dying or not s.cherry_pending:
+                continue
+            env.restore_snapshot(snap)
+            core = env._env._core
+            sp = np.frombuffer(core.read_memory_region(0), "<i2", 5, spawn_off)
+            core.write_memory_region(0, spawn_off, struct.pack("<h", int(sp[1])))
+            core.write_memory_region(0, spawn_off + 6, struct.pack("<h", 0))
+            return env.snapshot(), st
+        return None
 
     def label(src: str) -> dict | None:
         """Try every action from a stored state (hold it, then the greedy
@@ -229,9 +296,20 @@ def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
             play(a.explore)
             if not pool:
                 continue
-            src = "hard" if hard and rng.random() < a.hard_prob else "pool"
-            q = hard if src == "hard" else pool
-            snap, start_stack = q[rng.integers(len(q))]
+            u = rng.random()
+            start = None
+            if u < a.cherry_prob:
+                if cherry and rng.random() >= a.poke_frac:
+                    src, start = "cherry", cherry[rng.integers(len(cherry))]
+                else:
+                    src, start = "poke", poked()
+            elif u < a.cherry_prob + a.crowd_prob and crowd:
+                src, start = "crowd", crowd[rng.integers(len(crowd))]
+            if start is None:
+                src = "hard" if hard and rng.random() < a.hard_prob else "pool"
+                q = hard if src == "hard" else pool
+                start = q[rng.integers(len(q))]
+            snap, start_stack = start
             cur = (env.snapshot(), list(stack))
             if rng.random() < a.branch_prob:
                 groups.append(dict(src=src, branch=True, rollouts=[
@@ -318,6 +396,20 @@ def main() -> None:
     p.add_argument("--hard-stride", type=int, default=1,
                    help="take every Nth state of that window")
     p.add_argument("--pool-size", type=int, default=200)
+    p.add_argument("--cherry-prob", type=float, default=0.0,
+                   help="share of groups started with the cherry up or in "
+                        "bonus mode (natural states, or poked: see --poke-frac)")
+    p.add_argument("--poke-frac", type=float, default=0.5,
+                   help="of cherry starts, the share made by writing the "
+                        "monster-spawn counters so the cherry appears")
+    p.add_argument("--cherry-shape", type=float, default=0.0,
+                   help="return per tile of progress toward the cherry")
+    p.add_argument("--bonus-shape", type=float, default=0.0,
+                   help="return per tile of progress toward the nearest "
+                        "monster in bonus mode")
+    p.add_argument("--crowd-prob", type=float, default=0.0,
+                   help="share of groups started with the screen full of "
+                        "monsters and the cherry still to come")
     p.add_argument("--score-scale", type=float, default=0.02)
     p.add_argument("--death-penalty", type=float, default=10.0)
     p.add_argument("--bootstrap", type=float, default=0.0,
@@ -519,6 +611,7 @@ def main() -> None:
         bused = sum(1 for g in groups if g["branch"]
                     and np.std([r["R"] for r in g["rollouts"]]) > 1e-6)
         hard = np.mean([g["src"] == "hard" for g in groups])
+        srcs = collections.Counter(g["src"] for g in groups)
         m = {k: np.mean(v) for k, v in stats.items()}
         print(f"[{a.run_name}] it {it:4d} steps {steps_total:8d} "
               f"groups {used}/{len(groups)} (branch {bused}) hard {hard:.2f} R {R.mean():+.2f} "
@@ -527,6 +620,8 @@ def main() -> None:
               f"clip {m.get('clip', 0):.3f} ent {m.get('ent', 0):.3f} "
               f"labels {len(new_labels)}/{tried} (shoot {nshoot}, FIRE {nfire}) "
               f"klf {m.get('klf', 0):.3f} buf {len(lab_y)} ce {m.get('ce', 0):.3f} acc {m.get('acc', 0):.2f} "
+              f"harvest c{srcs['cherry']}/p{srcs['poke']}/k{srcs['crowd']} "
+              f"cherry {sum(r.get('cherries', 0) for r in rolls)} eats {sum(r.get('eats', 0) for r in rolls)} "
               f"wait {t_wait:.1f}s learn {t_learn:.1f}s "
               f"({time.monotonic() - t0:.0f}s)", flush=True)
         if it % a.save_every == 0:

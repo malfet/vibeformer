@@ -13,7 +13,7 @@ Channel layout (each plane is a 10x15 float32 mask):
   2 digger
   3 monster (any nobbin / hobbin in that tile)
   4 bag intact
-  5 cherry              (currently always zero; cherry not decoded yet)
+  5 cherry              (RAM: top-centre tile while the cherry is up)
   6 heading tile        (tile the digger is moving into; == digger tile
                          when aligned -- what the teacher plans from)
   7-10 facing           (whole plane = 1 for the digger's facing: R, U, L, D)

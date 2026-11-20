@@ -231,6 +231,20 @@ class GameState:
     level: int = 0
     level_done: bool = False
 
+    # Cherry bonus and monster quota (RAM only; monster.c / digger.c).
+    # A life on a level spawns `monster_quota` monsters (level + 5), at
+    # most `monsters_max_on_screen` at a time; once all have spawned the
+    # cherry appears at the top centre, once per life on each level.
+    # Eating it starts bonus mode: monsters can be eaten (200, 400,
+    # 800, ...) and each one eaten is added back to the quota. Ordinary
+    # kills use the quota up, and killing the last one ends the level.
+    bonus_mode: bool = False
+    bonus_time: int = 0                 # game ticks left (~1 per step)
+    cherry_pending: bool = False        # cherry still to come this life
+    monsters_spawned: int = 0
+    monster_quota: int = 0
+    monsters_max_on_screen: int = 0
+
 
 # ---- CV extractor ---------------------------------------------------------
 # Strategy:
@@ -721,6 +735,15 @@ RAM_MONSTERS = 0x25AD6   # 6 x 36 B: x,y,h,v,xr,yr,dir,hdir,t,hnt,death,bag,
 RAM_BAGS = 0x25D1A       # 7 x 26 B: x,y,h,v,xr,yr,dir,wt,gt,fallh,
                          #           wobbling,unfallen,exist (live copy)
 RAM_FIELD = 0x2600C      # int16[150]; bit 0x2000 set = not dug through
+# Found by forcing the cherry to appear (write_memory_region) and eating
+# it with a scripted walk; bools are int16 0 / -1.
+RAM_BONUS_VISIBLE = 0x247C2   # bonusvisible
+RAM_BONUS_MODE = 0x247C4      # bonusmode
+RAM_BONUS_TIME = 0x25A3C      # bonustimeleft (250 - 20 x level at start)
+RAM_MON_SPAWN = 0x247E4       # nextmonster, totalmonsters, maxmononscr,
+                              # nextmontime, mongaptime
+RAM_UNBONUS = 0x247F0         # unbonusflag: cherry still to come
+CHERRY_TILE = (14, 0)         # (col, row): sprite at (292, 18)
 N_MONSTERS, MONSTER_WORDS = 6, 18
 N_BAGS, BAG_WORDS = 7, 13
 
@@ -771,7 +794,8 @@ def extract_state_ram(mem: bytes) -> GameState:
 
     Unlike the CV extractors, this is exact on every frame, including
     right after a save-state restore, when the framebuffer still lags.
-    The cherry is not decoded yet (it is always None, the same as CV).
+    The cherry, bonus mode and monster quota are RAM-only (CV leaves
+    them at the defaults).
     """
     def words(off: int, n: int) -> np.ndarray:
         return np.frombuffer(mem, dtype="<i2", count=n, offset=off)
@@ -816,6 +840,15 @@ def extract_state_ram(mem: bytes) -> GameState:
         state.bags.append(BagPos(col=col, row=row,
                                  moving=int(b[6]) != DIR_NONE,
                                  broken=int(b[8]) != 0))
+
+    if words(RAM_BONUS_VISIBLE, 1)[0] != 0:
+        state.cherry = CHERRY_TILE
+    state.bonus_mode = bool(words(RAM_BONUS_MODE, 1)[0] != 0)
+    state.bonus_time = int(words(RAM_BONUS_TIME, 1)[0]) if state.bonus_mode else 0
+    state.cherry_pending = bool(words(RAM_UNBONUS, 1)[0] != 0)
+    sp = words(RAM_MON_SPAWN, 3)
+    state.monsters_spawned, state.monster_quota = int(sp[0]), int(sp[1])
+    state.monsters_max_on_screen = int(sp[2])
     return state
 
 

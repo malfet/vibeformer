@@ -1035,6 +1035,52 @@ starting policy, CPU workers one weight version stale. Same-seed evals:
   remaining deaths are mostly being caught 1-2 tiles from a monster
   with an escape 12 steps earlier (45/60).
 
+### 31. The cherry is gated by kills, and the policy never makes them (2026-11-20)
+
+grpoV2 ate the cherry 0 times in 30 games. The symbolic state never
+decoded it, so the teacher behind BC never went for it. But the gate is
+earlier: a life on a level spawns a quota of level + 5 monsters, at most
+3 (level 1) or 4 on screen, and the cherry appears only once the whole
+quota has spawned (monster.c), i.e. after quota - max-on-screen kills.
+Ordinary kills use the quota up (the last one ends the level); monsters
+eaten in bonus mode are added back. A new life resets the quota and
+re-arms the cherry; emeralds and bags persist. Census of 40 grpoV2
+games, per (life, level):
+
+| | L1 | L2 | L3 |
+|---|---|---|---|
+| lives | 52 | 91 | 41 |
+| kills needed for the cherry | 3 | 3 | 3-4 |
+| kills made | ~0.6 | ~0.4 | ~1.4 |
+| cherry appeared | 0 | 6 | 5 |
+| intact gold bags left at clear | 5.9 | 3.5 | 2.0 |
+
+The policy plays emerald-first: level 1 ends in ~300 steps with 3
+monsters on screen, ~3 never spawned and ~6 bags unbroken.
+
+RAM (found by writing the spawn counters with the new
+`write_memory_region` and eating the cherry with a scripted walk):
+`0x247C2` bonusvisible, `0x247C4` bonusmode, `0x25A3C` bonustimeleft
+(229 at level 1, ~1 tick per agent step), `0x247E4..` nextmonster,
+totalmonsters, maxmononscr, nextmontime, mongaptime, `0x247F0`
+unbonusflag. `GameState` now carries cherry, bonus_mode, bonus_time,
+cherry_pending and the quota.
+
+GRPO harvest starts (`--cherry-prob`, `--poke-frac`, `--crowd-prob`):
+cherry-up / bonus states, poked ones (spawn counters set so the cherry
+appears next tick), and full-screen "crowd" states.
+- H1 (no shaping): 1 cherry in 92 iterations. From poked states the
+  cherry shows in every rollout but the policy never walks to it (0/56),
+  so groups carry no signal. Stopped.
+- H2 (+ `--cherry-shape 0.5 --bonus-shape 0.5`, potential-based, per
+  tile): still 3 cherries in 200 iterations; from poked states it still
+  stops ~6 tiles short (0/36 before and after). Kills per L1 life 0.5 ->
+  0.67. Scores on 100 sampled / 70 greedy games: it100 7422 / 7457,
+  it200 7432 / 7571 against grpoV2 7308 / 7586: no real change.
+- So the cherry needs guided exploration (rollouts that actually reach
+  it), not just a reward for it: GRPO cannot rank 8 rollouts that all
+  miss.
+
 ## Lessons ported from ../snake (2026-08-31)
 
 The snake project ran the same recipe on a much cheaper simulator and

@@ -486,3 +486,8 @@ Also, perhaps can you fix the flicker, by making sure nothing is printed other t
 I still see blinks and [DOSBOX core log lines] printed (though this time after run is finished
 Ok, now flicker finally gone
 Commit this
+Another failure mode I see with the model (and perhaps with the trainig) - it never tried grabbing a cherry and eating enemies
+Anyway, propose next steps to improve the scrore. Also, one thing that confuses me a bit - if game is deterministic, why I sometimes sitll see model die on the first level. Have we choose interval to react at too low?
+Yes, you can plan step 1 but also think of the strategy where agent can perhaps keep cruising level 1 and kill monsters rather than collecting all emeralds and proceed to level 2
+Sure
+Dp ot

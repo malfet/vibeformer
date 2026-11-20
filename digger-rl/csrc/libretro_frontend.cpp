@@ -247,6 +247,22 @@ public:
         return py::bytes(static_cast<const char*>(r.ptr), r.len);
     }
 
+    // Overwrite bytes of a registered memory region (game-state surgery
+    // for training starts, e.g. making the cherry bonus appear). With the
+    // lockstep core the frame is finished, so the write lands between
+    // game ticks.
+    void write_memory_region(size_t idx, size_t offset, py::bytes data) {
+        if (idx >= memory_maps_.size()) {
+            throw std::runtime_error("memory region index out of range");
+        }
+        const auto& r = memory_maps_[idx];
+        std::string buf = data;
+        if (offset > r.len || buf.size() > r.len - offset) {
+            throw std::runtime_error("write past the end of the memory region");
+        }
+        std::memcpy(static_cast<char*>(r.ptr) + offset, buf.data(), buf.size());
+    }
+
     py::tuple get_system_info() {
         retro_system_info info = {};
         retro_get_system_info_(&info);
@@ -534,6 +550,9 @@ PYBIND11_MODULE(_libretro, m) {
              "Return the descriptor list set by the core via SET_MEMORY_MAPS.")
         .def("read_memory_region", &LibretroCore::read_memory_region, py::arg("index"),
              "Return the bytes of the registered memory region at the given index.")
+        .def("write_memory_region", &LibretroCore::write_memory_region,
+             py::arg("index"), py::arg("offset"), py::arg("data"),
+             "Overwrite bytes of the registered memory region at the given index.")
         .def("get_system_info", &LibretroCore::get_system_info)
         .def("get_av_info", &LibretroCore::get_av_info)
         .def("enable_audio", &LibretroCore::enable_audio, py::arg("on") = true,
