@@ -26,6 +26,14 @@ instead: one rollout per action, each forced for its first --hold
 steps, and only that first choice is trained (see build_batch). This
 is where FIRE and the rare escapes get compared on equal terms.
 
+A policy that never reaches an event (the cherry, a kill) gives G
+rollouts that all miss it, so a reward for it changes no advantage.
+With --guided k, cherry/poke/crowd groups run their first k rollouts
+under a scripted guide (tools/guide.py) for a random number of steps,
+then hand over to the policy. Guided steps stay in the loss with the
+policy's own logp_old, so a guided rollout that reaches the cherry
+raises the probability of the moves that got it there.
+
 The learner (GPU) applies the PPO-clipped GRPO loss with a k3 KL penalty
 toward the frozen starting policy, then sends the new weights back.
 With --overlap (default) the workers already play the next batch while
@@ -53,6 +61,7 @@ import torch.nn.functional as F
 
 from digger_env import DiggerEnv, preprocess_uint8, stack_offsets
 from tools.game_state import RAM_MON_SPAWN
+from tools.guide import GUIDES
 from tools.play_audit import line_of_fire, ram
 from tools.policies import load_pixel_agent
 from tools.symbolic_env import SymbolicDiggerEnv, env_step_skipped
@@ -146,7 +155,9 @@ def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
                 hist.clear()
 
     def rollout(snap, start_stack, force: int | None = None,
-                greedy: bool = False, hold: int | None = None) -> dict:
+                greedy: bool = False, hold: int | None = None,
+                guide: str | None = None, gsteps: int = 0,
+                horizon: int | None = None) -> dict:
         env.restore_snapshot(snap)
         st = collections.deque(start_stack, maxlen=maxlen)
         frames = list(start_stack)
@@ -155,6 +166,7 @@ def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
         score, died = score0, False
         duds = misses = 0
         cherries = eats = 0
+        gn, tch = 0, None                # guided steps taken, first cherry
         # Potential-based shaping (phi = -coef x tiles to the target),
         # summed over the steps where the target exists: toward the
         # cherry while it is up, toward the nearest monster in bonus
@@ -164,14 +176,19 @@ def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
             pot0 = potential(env._last_state)
         shot = None                      # None, or "did it kill" so far
         track = a.dud_cost or a.miss_cost
-        for t in range(a.horizon):
+        H = horizon or a.horizon
+        for t in range(H):
             if t:
                 fr = frame()
                 st.append(fr)
                 frames.append(fr)
-            act, lp = sample(st, force if t < (a.hold if hold is None
-                                                 else hold) else None,
-                             greedy)
+            f = force if t < (a.hold if hold is None else hold) else None
+            if guide is not None and t < gsteps:
+                # a scripted step, kept in the loss like a sampled one:
+                # logp_old is the policy's own probability of it
+                f = GUIDES[guide](env._last_state)
+                gn = t + 1
+            act, lp = sample(st, f, greedy)
             acts.append(act)
             logps.append(lp)
             if track:
@@ -182,6 +199,8 @@ def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
             score = new
             if gain >= 1000:
                 cherries += 1
+                if tch is None:
+                    tch = t
             elif env._last_state.bonus_mode and gain and gain % 200 == 0:
                 eats += 1
             if a.cherry_shape or a.bonus_shape:
@@ -224,11 +243,12 @@ def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
                     logp=np.array(logps, np.float32),
                     R=a.score_scale * (score - score0)
                     - died * (a.death_penalty + a.death_time_penalty
-                              * (a.horizon - len(acts)) / a.horizon)
+                              * (H - len(acts)) / H)
                     - a.dud_cost * duds - a.miss_cost * misses
                     + a.bootstrap * V + shape,
                     V=V, duds=duds, misses=misses,
-                    died=died, cherries=cherries, eats=eats)
+                    died=died, cherries=cherries, eats=eats,
+                    guided=guide is not None, gn=gn, tch=tch)
 
     def potential(s) -> list:
         """[tiles to the cherry, tiles to the nearest monster in bonus
@@ -292,6 +312,7 @@ def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
             break
         agent.load_state_dict(msg["weights"])
         groups = []
+        guide_labels = []
         while len(groups) < msg["groups"]:
             play(a.explore)
             if not pool:
@@ -311,7 +332,37 @@ def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
                 start = q[rng.integers(len(q))]
             snap, start_stack = start
             cur = (env.snapshot(), list(stack))
-            if rng.random() < a.branch_prob:
+            gname = ({"cherry": "cherry", "poke": "cherry",
+                      "crowd": a.crowd_guide}.get(src)
+                     if a.guided else None)
+            if gname:
+                # guided group: the first --guided rollouts follow the
+                # scripted guide for a random number of steps, then the
+                # policy; the rest are the policy's own
+                H = a.harvest_horizon or a.horizon
+                groups.append(dict(src=src, branch=False, rollouts=[
+                    rollout(snap, start_stack, guide=gname if i < a.guided
+                            else None,
+                            gsteps=int(rng.integers(a.guide_min,
+                                                    a.guide_max + 1)),
+                            horizon=H)
+                    for i in range(a.group)]))
+                if a.guide_labels:
+                    # imitation labels: the guide's moves up to the
+                    # cherry, in guided rollouts that ate it
+                    for r in groups[-1]["rollouts"]:
+                        if not r["guided"] or r["tch"] is None:
+                            continue
+                        hi = min(r["gn"], r["tch"] + 1)
+                        lo = max(0, hi - a.guide_label_last) \
+                            if a.guide_label_last else 0
+                        for t in range(lo, hi):
+                            guide_labels.append(dict(
+                                obs=np.concatenate([r["frames"][maxlen - 1 + t - o]
+                                                    for o in offs], 0),
+                                label=int(r["acts"][t]), greedy=-1, gap=0.0,
+                                src="guide"))
+            elif rng.random() < a.branch_prob:
                 groups.append(dict(src=src, branch=True, rollouts=[
                     rollout(snap, start_stack, f)
                     for f in range(DiggerEnv.NUM_ACTIONS)]))
@@ -337,7 +388,8 @@ def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
             stack.extend(cur[1])
             if tried % 2 == 0:
                 play(a.explore)
-        conn.send(dict(groups=groups, labels=labels, tried=tried))
+        conn.send(dict(groups=groups, labels=labels + guide_labels,
+                       tried=tried))
     env.close()
 
 
@@ -410,6 +462,21 @@ def main() -> None:
     p.add_argument("--crowd-prob", type=float, default=0.0,
                    help="share of groups started with the screen full of "
                         "monsters and the cherry still to come")
+    p.add_argument("--guided", type=int, default=0,
+                   help="in cherry/poke/crowd groups, rollouts that follow "
+                        "a scripted guide (tools/guide.py) for their first "
+                        "U[--guide-min, --guide-max] steps")
+    p.add_argument("--guide-min", type=int, default=16)
+    p.add_argument("--guide-max", type=int, default=96)
+    p.add_argument("--guide-labels", action="store_true",
+                   help="add the guide's moves up to the cherry, from "
+                        "guided rollouts that ate it, to the CE label buffer")
+    p.add_argument("--guide-label-last", type=int, default=0,
+                   help="label only the last N guided steps before the "
+                        "cherry (0: all)")
+    p.add_argument("--crowd-guide", default="hunt", choices=sorted(GUIDES))
+    p.add_argument("--harvest-horizon", type=int, default=0,
+                   help="horizon of guided groups (0: --horizon)")
     p.add_argument("--score-scale", type=float, default=0.02)
     p.add_argument("--death-penalty", type=float, default=10.0)
     p.add_argument("--bootstrap", type=float, default=0.0,
@@ -612,6 +679,7 @@ def main() -> None:
                     and np.std([r["R"] for r in g["rollouts"]]) > 1e-6)
         hard = np.mean([g["src"] == "hard" for g in groups])
         srcs = collections.Counter(g["src"] for g in groups)
+        gro = [r for r in rolls if r.get("guided")]
         m = {k: np.mean(v) for k, v in stats.items()}
         print(f"[{a.run_name}] it {it:4d} steps {steps_total:8d} "
               f"groups {used}/{len(groups)} (branch {bused}) hard {hard:.2f} R {R.mean():+.2f} "
@@ -622,6 +690,7 @@ def main() -> None:
               f"klf {m.get('klf', 0):.3f} buf {len(lab_y)} ce {m.get('ce', 0):.3f} acc {m.get('acc', 0):.2f} "
               f"harvest c{srcs['cherry']}/p{srcs['poke']}/k{srcs['crowd']} "
               f"cherry {sum(r.get('cherries', 0) for r in rolls)} eats {sum(r.get('eats', 0) for r in rolls)} "
+              f"(guided: cherry {sum(r['cherries'] for r in gro)} eats {sum(r['eats'] for r in gro)} n {len(gro)}) "
               f"wait {t_wait:.1f}s learn {t_learn:.1f}s "
               f"({time.monotonic() - t0:.0f}s)", flush=True)
         if it % a.save_every == 0:

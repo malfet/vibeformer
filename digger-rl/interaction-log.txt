@@ -491,3 +491,5 @@ Anyway, propose next steps to improve the scrore. Also, one thing that confuses 
 Yes, you can plan step 1 but also think of the strategy where agent can perhaps keep cruising level 1 and kill monsters rather than collecting all emeralds and proceed to level 2
 Sure
 Dp ot
+Yes, do it
+Sure, so what would be the next steps. Cherry what sort of a diversion, what I really want is to figure out of model have reached plateau, or whether it can learn to say finish both 1st and 2nd levels without dying. It's strategy in the 2nd level is a bit surprising, I don't think I fully understand it

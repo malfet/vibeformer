@@ -1081,6 +1081,45 @@ appears next tick), and full-screen "crowd" states.
   it), not just a reward for it: GRPO cannot rank 8 rollouts that all
   miss.
 
+### 32. Guided rollouts reach the cherry; imitation either does nothing or wrecks the policy (2026-11-20)
+
+`tools/guide.py` adds scripted guides: Dijkstra on the tile grid from the
+heading tile (dirt costs 2, bags impassable, monster neighbourhoods +8).
+`cherry` walks to the cherry (chases monsters in bonus mode); `hunt`
+fires when lined up, else walks to a firing line. Alone, from poked
+states, the cherry guide eats the cherry 13-18/30 times (policy 0/30).
+The hunt guide gets 0.4-0.6 kills per 64 steps from crowd states
+(policy 0.2-0.5) but dies more and scores less. A "fire assist" (policy
+plays, guide only presses FIRE when aimed) changes nothing: the policy
+already fires when aimed; it just rarely gets aimed.
+
+`train_grpo.py --guided k`: in cherry/poke/crowd groups the first k of
+G rollouts follow the guide for U[--guide-min, --guide-max] steps, then
+the policy; guided steps stay in the PPO loss with the policy's own
+logp_old.
+- G1 (`--guided 3`, 16..96 steps): guided rollouts ate 1192 cherries in
+  200 iterations, unguided 50. The policy alone still 0/36. The guide's
+  moves have pi ~ e^-12 under the policy (CE 11.8 at the start of G2):
+  a clipped ratio cannot raise them meaningfully, and the KL pulls back.
+  Scores flat (it200 7367 on 40 games).
+- G2 (+ `--guide-labels`: the guide's moves up to the cherry, from guided
+  rollouts that ate it, into the CE label buffer; `--ce-coef 0.3
+  --kl-full 0.5`): CE 11.8 -> 0.45, accuracy 0.87; the policy alone ate
+  6/36 at it25 and unguided cherries rose to 148 per 25 iterations.
+  But the whole policy collapsed: life length 463 -> 189 (it25) / 252
+  (it50), games of 500-5000 points. The cherry is a small sprite; "head
+  to the top centre" leaked into ordinary states. Stopped at it~75.
+- G3 (`--guide-label-last 16 --ce-coef 0.05 --kl-full 2.0`): no
+  collapse, but no cherry either (0/36 alone at it200; unguided 33-66
+  per 50 iterations). it150 on 100 sampled / 70 greedy games: 7351 /
+  7167 against grpoV2 7308 / 7586. Not published.
+
+Conclusion: even a policy that ate every cherry it saw would gain
+little, because the cherry needs 3 kills per life and level-1 kills
+stayed at 0.6-0.7 in every run. The lever is kills (bag drops and
+lined-up shots), and a guide good enough to teach them does not exist
+yet: the hunt guide is worse than the policy.
+
 ## Lessons ported from ../snake (2026-08-31)
 
 The snake project ran the same recipe on a much cheaper simulator and
