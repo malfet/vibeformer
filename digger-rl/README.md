@@ -31,6 +31,12 @@ still describe the previous published policy,
 steps with `--arch impala_pool8` (one more max-pool to 8x8 before the
 FC layer), plus a bag-kill round with the anchor kept.
 
+Two policies trained from a random network with PPO alone (no teacher,
+score reward only, 20M frames) are also in `checkpoints/`:
+`digger_px128_scratch_f4.pt` (4 frames; 4885 sampled / 5499 greedy) and
+`digger_px128_scratch_f8.pt` (8 frames reaching 24 steps back; 5237 /
+5341). See [HISTORY Lesson 33](HISTORY.md).
+
 How the project got here (symbolic agents, NatureCNN, DQN/Dreamer
 attempts, reward experiments, and the lessons from each) is in
 [HISTORY.md](HISTORY.md).

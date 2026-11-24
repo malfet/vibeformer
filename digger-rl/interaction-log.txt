@@ -493,3 +493,8 @@ Sure
 Dp ot
 Yes, do it
 Sure, so what would be the next steps. Cherry what sort of a diversion, what I really want is to figure out of model have reached plateau, or whether it can learn to say finish both 1st and 2nd levels without dying. It's strategy in the 2nd level is a bit surprising, I don't think I fully understand it
+sure, but in parallel I want you to  get back to the roots - digger is relatively simple game and we are going deep into hand-crafting some sort of scenarios instead of thinking how model can learn on its own. We have a good loss function now, have we tried GRPO without any priors, to see if it can learn cleaning say level1
+Ok, so PPO is much better than GRPO to learn how to finish level 1 from scratch? Have it finished training? Give me path to checkpoints. And have you tried other ideas on how to improve survivability? I.e. are 4 frames enough information for the network to make a decisions in those near-death situations?
+Ok, what are you trying to do now?
+Sure, though I have a question : do you think keep training will allow it to beat GRPO?
+Ok, can you commit and push a 4 frames scratch checkpoint and 8 frames commit . I have a rather strange experiment on top of grpoV2 - what if we disable the bonus for eating the diamonds and leave just ones for killing monsters - this will force model to stay on 1st level and survive? (if this is possible at all)

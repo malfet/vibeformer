@@ -942,6 +942,8 @@ def parse_args() -> Config:
                    help="force CPU even if a CUDA/MPS accelerator is available")
     p.add_argument("--lr", type=float, default=Config.learning_rate)
     p.add_argument("--seed", type=int, default=Config.seed)
+    p.add_argument("--gamma", type=float, default=Config.gamma,
+                   help="discount; 0.995 looks ~200 steps ahead vs ~100")
     p.add_argument("--num-steps", type=int, default=Config.num_steps)
     p.add_argument("--num-envs", type=int, default=Config.num_envs,
                    help="parallel envs (subprocess workers if >1)")
@@ -1094,7 +1096,7 @@ def parse_args() -> Config:
     return Config(
         total_timesteps=a.total_timesteps,
         device=str(select_device(a.force_cpu)),
-        learning_rate=a.lr, seed=a.seed,
+        learning_rate=a.lr, seed=a.seed, gamma=a.gamma,
         num_steps=a.num_steps, num_envs=a.num_envs, overlap=a.overlap, amp=a.amp,
         frame_skip=a.frame_skip,
         frame_stack=(len(stack_offsets(0, offs)) if offs else a.frame_stack),

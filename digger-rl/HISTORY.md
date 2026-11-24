@@ -1120,6 +1120,38 @@ stayed at 0.6-0.7 in every run. The lever is kills (bag drops and
 lined-up shots), and a guide good enough to teach them does not exist
 yet: the hunt guide is worse than the policy.
 
+### 33. Back to the roots: PPO learns from a random network, GRPO does not (2026-11-21/23)
+
+No teacher, no BC, no start states: fresh games, reward = 0.02 x score
+(`--no-clip-reward`; `clip_reward` defaults to True and shows avg_ret
+0), episodic life, `impala_pool8`, 8 envs, 20M frames each. Evaluated
+on 40 sampled (seed 99) / 30 greedy (seed 5) games.
+
+| Run | Change | Sampled | Greedy | Life (s / g) | L1 clean (s / g) | Bag deaths |
+|---|---|---:|---:|---:|---:|---:|
+| GRPO from random init | 128-step groups, no critic | ~200 at 6M, stopped | - | 140-190 | 0 | - |
+| `px128_ppo_scratch1` -> `checkpoints/digger_px128_scratch_f4.pt` | 4 frames, gamma 0.99 | 4885 | 5499 | 267 / 289 | 8/40 / 14/30 | 13/120 |
+| `px128_ppo_scratch_mem8` -> `checkpoints/digger_px128_scratch_f8.pt` | 8 frames at 0,1,2,3,6,10,16,24 | 5237 | 5341 | 291 / 321 | 11/40 / 7/30 | 16/120 |
+| `px128_ppo_scratch_g995` | 4 frames, `--gamma 0.995` | 4175 | 4323 | 396 / 414 | 3/40 / 2/30 | 1/120 |
+| grpoV2 (teacher pipeline) | - | 7308 | 7586 | 456 | - | - |
+
+- **GRPO cannot start from nothing**: one scalar per 128-step rollout
+  gives a random policy no per-step credit. It stays at random-policy
+  level (124 points). It is a fine-tuner only.
+- **PPO with a critic learns L1 alone**: 1498 at 6M frames (above the
+  heuristic teacher's 1362), 4885 / 5499 at 20M, still rising (avg_ret
+  ~35 at the end).
+- **More history is not the bottleneck**: 8 frames buys a few percent,
+  monster deaths unchanged (104/120 sampled).
+- **Horizon is**: gamma 0.995 gives 45% longer lives and almost no bag
+  deaths, but learns slower (799 at 6M) and stops finishing L1 (11/40
+  sampled): it survives without taking the last, risky emeralds.
+- Side probes on grpoV2 (`tools/rewind_traces.py`, `tools/self_imitate.py`):
+  rewinding 16-256 steps on each death and re-sampling makes 19/20 games
+  reach L3 deathless; L2 deaths need 64-256 step rewinds in 26/48 cases
+  (route choices, not reflexes). CE on these deathless self-traces did
+  nothing: the policy already picked 96% of their actions.
+
 ## Lessons ported from ../snake (2026-08-31)
 
 The snake project ran the same recipe on a much cheaper simulator and
