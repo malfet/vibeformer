@@ -1154,7 +1154,7 @@ on 40 sampled (seed 99) / 30 greedy (seed 5) games.
 
 ### 34. Paying only for survival does not make grpoV2 survive longer (2026-11-24)
 
-`train_grpo.py --reward survive` (code kept in git history only):
+`train_grpo.py --reward survive` (code in commit 9ebd73b, removed right after):
 R = 0.1 per step alive + 5 per kill (from the RAM monster quota,
 `monleft()`) - 10 for dying - 10 for eating the level's last emerald;
 score ignored. From grpoV2, 300 iterations, 128-step rollouts, starts
