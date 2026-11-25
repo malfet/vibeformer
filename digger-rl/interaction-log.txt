@@ -498,3 +498,5 @@ Ok, so PPO is much better than GRPO to learn how to finish level 1 from scratch?
 Ok, what are you trying to do now?
 Sure, though I have a question : do you think keep training will allow it to beat GRPO?
 Ok, can you commit and push a 4 frames scratch checkpoint and 8 frames commit . I have a rather strange experiment on top of grpoV2 - what if we disable the bonus for eating the diamonds and leave just ones for killing monsters - this will force model to stay on 1st level and survive? (if this is possible at all)
+Yeah, do it. Also, I have to say that f8 and f4 behave very different and I kind of like the strategy, feels like v8 is better but probably harder to train. Did you train them all from level 2 or on all levels?
+Sure, commit, but may be follow it by the commit that deletes the code. It's nice to preserve this in history, but I don't want top level repo to be too bloated. And can you take one of from-scratch checkpoints and continue training it (or may be GRPO) from varied levels, but still without a teacher

@@ -1152,6 +1152,30 @@ on 40 sampled (seed 99) / 30 greedy (seed 5) games.
   (route choices, not reflexes). CE on these deathless self-traces did
   nothing: the policy already picked 96% of their actions.
 
+### 34. Paying only for survival does not make grpoV2 survive longer (2026-11-24)
+
+`train_grpo.py --reward survive` (code kept in git history only):
+R = 0.1 per step alive + 5 per kill (from the RAM monster quota,
+`monleft()`) - 10 for dying - 10 for eating the level's last emerald;
+score ignored. From grpoV2, 300 iterations, 128-step rollouts, starts
+on levels 1-2 only (`--max-level 2 --start-prob 0`), half of them 6-16
+steps before the policy's own deaths.
+
+| Checkpoint | Sampled (40) | Greedy (30) | Life | L1 clean s / g |
+|---|---:|---:|---:|---:|
+| grpoV2 | 7308 | 7586 | 456 | ~30/40 / 14/30 |
+| survive1 it100 | 7132 | - | 447 | 29/40 / - |
+| survive1 final | 6879 | 6988 | 453 / 441 | 28/40 / 20/30 |
+
+- Lives did not get longer; monster deaths stay ~92%. Only greedy
+  clean L1 rose (14 -> 20 of 30, ~2 standard errors).
+- It did not learn to stay on the level: ~26 rollouts per iteration
+  still ate the last emerald. Kills stayed at 0.1-0.2 per rollout.
+- Same reason as before: groups from 6-16 steps before a death mostly
+  all die, the others mostly all survive 128 steps. The deaths that
+  matter are decided 64-256 steps earlier (rewind probe, Lesson 33), out
+  of reach of a 128-step window whatever the reward.
+
 ## Lessons ported from ../snake (2026-08-31)
 
 The snake project ran the same recipe on a much cheaper simulator and

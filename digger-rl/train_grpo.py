@@ -20,6 +20,12 @@ otherwise from a general one, and runs G rollouts of up to H steps:
 
     R = 0.02 x score gained - death_penalty x died
 
+With --reward survive, score is ignored: R = alive_reward x steps
+alive + kill_reward x kills - death penalties - clear_penalty if the
+rollout eats the level's last emerald. Survival is the whole job, and
+"stay on the level" is the best plan (--max-level resets the worker's
+game past that level, so starts come from early levels only).
+
 A confident policy often plays all G samples the same way, which gives
 no signal. So with probability --branch-prob a group is a branch group
 instead: one rollout per action, each forced for its first --hold
@@ -65,6 +71,14 @@ from tools.guide import GUIDES
 from tools.play_audit import line_of_fire, ram
 from tools.policies import load_pixel_agent
 from tools.symbolic_env import SymbolicDiggerEnv, env_step_skipped
+
+
+def monleft(s) -> int | None:
+    """Monsters still to kill on this level (monster.c monleft())."""
+    if not s.monster_quota:
+        return None
+    return s.monster_quota - s.monsters_spawned + sum(
+        m.alive for m in s.monsters)
 
 
 def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
@@ -114,6 +128,10 @@ def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
     def play(n: int) -> None:
         nonlocal fresh, played
         for _ in range(n):
+            if a.max_level and env._last_state.level > a.max_level:
+                env.reset()
+                fresh = True
+                hist.clear()
             fr = frame()
             if fresh:
                 stack.clear()
@@ -177,6 +195,8 @@ def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
         shot = None                      # None, or "did it kill" so far
         track = a.dud_cost or a.miss_cost
         H = horizon or a.horizon
+        kills, cleared = 0, False
+        ml = monleft(env._last_state)
         for t in range(H):
             if t:
                 fr = frame()
@@ -197,12 +217,22 @@ def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
             new = int(info.get("score", score))
             gain = new - score
             score = new
+            # a kill uses up the level's quota (monster.c monleft());
+            # eating one in bonus mode adds it back, counted below
+            ml1 = monleft(env._last_state)
+            # (monsters vanish during the digger's death animation)
+            if ml is not None and ml1 is not None and ml1 < ml \
+                    and not (info.get("dying", False)
+                             or info.get("death_event", False)):
+                kills += ml - ml1
+            ml = ml1
             if gain >= 1000:
                 cherries += 1
                 if tch is None:
                     tch = t
             elif env._last_state.bonus_mode and gain and gain % 200 == 0:
                 eats += 1
+                kills += 1
             if a.cherry_shape or a.bonus_shape:
                 pot1 = potential(env._last_state)
                 if gain >= 1000:
@@ -229,6 +259,7 @@ def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
                 died = True
                 break
             if done or env._env.level_done():
+                cleared = not done and not env._last_state.emeralds.any()
                 break
         V = 0.0
         if a.bootstrap and not died and not done:
@@ -239,15 +270,24 @@ def worker(idx: int, ckpt: str, conn, a: argparse.Namespace) -> None:
                 x = torch.from_numpy(np.concatenate(
                     [st[-1 - o] for o in offs], 0)).float().div_(255)
                 V = float(agent.value(x.unsqueeze(0))[0])
+        if a.reward == "survive":
+            # steps survived (all of H if the level ends by kills or
+            # the horizon), kills, and a cost for clearing by emeralds
+            alive = (len(acts) if died or cleared else H)
+            gain_term = (a.alive_reward * alive + a.kill_reward * kills
+                         - a.clear_penalty * cleared)
+        else:
+            gain_term = a.score_scale * (score - score0)
         return dict(frames=np.stack(frames), acts=np.array(acts, np.int64),
                     logp=np.array(logps, np.float32),
-                    R=a.score_scale * (score - score0)
+                    R=gain_term
                     - died * (a.death_penalty + a.death_time_penalty
                               * (H - len(acts)) / H)
                     - a.dud_cost * duds - a.miss_cost * misses
                     + a.bootstrap * V + shape,
                     V=V, duds=duds, misses=misses,
                     died=died, cherries=cherries, eats=eats,
+                    kills=kills, cleared=cleared, alive=len(acts),
                     guided=guide is not None, gn=gn, tch=tch)
 
     def potential(s) -> list:
@@ -477,6 +517,16 @@ def main() -> None:
     p.add_argument("--crowd-guide", default="hunt", choices=sorted(GUIDES))
     p.add_argument("--harvest-horizon", type=int, default=0,
                    help="horizon of guided groups (0: --horizon)")
+    p.add_argument("--reward", default="score", choices=("score", "survive"),
+                   help="survive: R = alive_reward x steps alive + "
+                        "kill_reward x kills - clear_penalty x (ate the "
+                        "last emerald) - death penalties; score ignored")
+    p.add_argument("--alive-reward", type=float, default=0.1)
+    p.add_argument("--kill-reward", type=float, default=5.0)
+    p.add_argument("--clear-penalty", type=float, default=10.0)
+    p.add_argument("--max-level", type=int, default=0,
+                   help="reset a worker's game once it passes this level "
+                        "(0: never)")
     p.add_argument("--score-scale", type=float, default=0.02)
     p.add_argument("--death-penalty", type=float, default=10.0)
     p.add_argument("--bootstrap", type=float, default=0.0,
@@ -691,6 +741,9 @@ def main() -> None:
               f"harvest c{srcs['cherry']}/p{srcs['poke']}/k{srcs['crowd']} "
               f"cherry {sum(r.get('cherries', 0) for r in rolls)} eats {sum(r.get('eats', 0) for r in rolls)} "
               f"(guided: cherry {sum(r['cherries'] for r in gro)} eats {sum(r['eats'] for r in gro)} n {len(gro)}) "
+              f"kills {np.mean([r.get('kills', 0) for r in rolls]):.3f} "
+              f"alive {np.mean([r.get('alive', 0) for r in rolls]):.0f} "
+              f"cleared {sum(r.get('cleared', False) for r in rolls)} "
               f"wait {t_wait:.1f}s learn {t_learn:.1f}s "
               f"({time.monotonic() - t0:.0f}s)", flush=True)
         if it % a.save_every == 0:
